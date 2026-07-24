@@ -193,12 +193,14 @@ class WaterSplattingModelConfig(ModelConfig):
     """Depth normalization statistic for M1 depth context."""
     infinite_water_enabled: bool = False
     """M2: enable infinite-water B_inf branch and ownership composition."""
-    infinite_water_ownership_mode: Literal["alpha_only", "alpha_depth", "alpha_depth_color"] = "alpha_depth"
+    infinite_water_ownership_mode: Literal["off", "alpha_only", "alpha_depth", "alpha_depth_color"] = "alpha_depth"
     """M2 ownership evidence mode."""
     infinite_water_detach_evidence: bool = True
     """Detach internal render evidence before constructing M_inf."""
     infinite_water_occupancy_limited: bool = True
     """If True, B_inf can only take over low-accumulation pixels."""
+    infinite_water_compose_mode: Literal["rgb_mix", "tail_approx"] = "rgb_mix"
+    """M2 composition mode. rgb_mix preserves current behavior; tail_approx only replaces the low-occupancy tail."""
     infinite_water_alpha_power: float = 1.0
     """Power applied to low-accumulation evidence."""
     infinite_water_depth_mid: float = 0.75
@@ -1296,10 +1298,21 @@ class WaterSplattingModel(Model):
                 depth_normalize_mode=self.config.infinite_water_depth_normalize_mode,
                 occupancy_limited=self.config.infinite_water_occupancy_limited,
             )
-            m_obj_eff = 1.0 - ownership.m_inf_eff
-            rgb = m_obj_eff * render.rgb + ownership.m_inf_eff * medium.b_inf
-            rgb_clear = m_obj_eff * render.rgb_clear
-            j_object_raw = m_obj_eff * render.j_raw
+            compose_mode = getattr(self.config, "infinite_water_compose_mode", "rgb_mix")
+            if compose_mode == "rgb_mix":
+                m_obj_eff = 1.0 - ownership.m_inf_eff
+                rgb = m_obj_eff * render.rgb + ownership.m_inf_eff * medium.b_inf
+                rgb_clear = m_obj_eff * render.rgb_clear
+                j_object_raw = m_obj_eff * render.j_raw
+            elif compose_mode == "tail_approx":
+                if getattr(self.config, "infinite_water_occupancy_limited", True):
+                    tail_gate = (1.0 - render.accumulation).detach().clamp(0.0, 1.0)
+                else:
+                    tail_gate = torch.ones_like(render.accumulation)
+                rgb = render.rgb + ownership.m_inf * tail_gate * (medium.b_inf - medium_rgb)
+                j_object_raw = (1.0 - ownership.m_inf_eff) * render.j_raw
+            else:
+                raise ValueError(f"Unknown infinite_water_compose_mode: {compose_mode}")
             j_object = torch.clamp(j_object_raw, 0.0, 1.0)
 
         cleanup_ownership = None

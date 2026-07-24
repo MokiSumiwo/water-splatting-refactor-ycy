@@ -9,7 +9,7 @@ import torch
 from torch import Tensor
 
 
-OwnershipMode = Literal["alpha_only", "alpha_depth", "alpha_depth_color"]
+OwnershipMode = Literal["off", "alpha_only", "alpha_depth", "alpha_depth_color"]
 
 
 @dataclass
@@ -65,7 +65,9 @@ def compute_infinite_water_ownership(
     color_distance = torch.mean(torch.abs(evidence_rgb - evidence_b_inf), dim=-1, keepdim=True)
     color_evidence = torch.exp(-color_distance / max(color_temp, 1e-6)).clamp(0.0, 1.0)
 
-    if mode == "alpha_only":
+    if mode == "off":
+        m_inf = torch.zeros_like(alpha_evidence)
+    elif mode == "alpha_only":
         m_inf = alpha_evidence
     elif mode == "alpha_depth":
         m_inf = alpha_evidence * depth_evidence
