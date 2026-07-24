@@ -343,7 +343,17 @@ torch::Tensor get_tile_bin_edges_tensor(
     return tile_bins;
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor>
 rasterize_forward_tensor(
     const std::tuple<int, int, int> tile_bounds,
     const std::tuple<int, int, int> block,
@@ -404,6 +414,15 @@ rasterize_forward_tensor(
     torch::Tensor depth_im = torch::zeros(
         {img_height, img_width}, xys.options().dtype(torch::kFloat32)
     );
+    torch::Tensor depth2_im = torch::zeros(
+        {img_height, img_width}, xys.options().dtype(torch::kFloat32)
+    );
+    torch::Tensor first_depth_im = torch::zeros(
+        {img_height, img_width}, xys.options().dtype(torch::kFloat32)
+    );
+    torch::Tensor last_depth_im = torch::zeros(
+        {img_height, img_width}, xys.options().dtype(torch::kFloat32)
+    );
     torch::Tensor final_Ts = torch::zeros(
         {img_height, img_width}, xys.options().dtype(torch::kFloat32)
     );
@@ -434,10 +453,24 @@ rasterize_forward_tensor(
         (float3 *)out_clr.contiguous().data_ptr<float>(),
         (float3 *)out_med.contiguous().data_ptr<float>(),
         depth_im.contiguous().data_ptr<float>(),
+        depth2_im.contiguous().data_ptr<float>(),
+        first_depth_im.contiguous().data_ptr<float>(),
+        last_depth_im.contiguous().data_ptr<float>(),
         *(float3 *)background.contiguous().data_ptr<float>()
     );
 
-    return std::make_tuple(out_img, out_clr, out_med, depth_im, final_Ts, final_idx, first_idx);
+    return std::make_tuple(
+        out_img,
+        out_clr,
+        out_med,
+        depth_im,
+        final_Ts,
+        final_idx,
+        first_idx,
+        depth2_im,
+        first_depth_im,
+        last_depth_im
+    );
 }
 
 

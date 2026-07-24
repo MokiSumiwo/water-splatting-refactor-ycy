@@ -211,6 +211,14 @@ class WaterSplattingModelConfig(ModelConfig):
     """Temperature for B_inf color-similarity evidence."""
     infinite_water_depth_normalize_mode: Literal["max", "p95"] = "p95"
     """Depth normalization statistic for M2 ownership evidence."""
+    infinite_water_hit_alpha_threshold: float = 0.20
+    """Object accumulation threshold for hit-aware confidence."""
+    infinite_water_hit_alpha_temp: float = 0.05
+    """Temperature for hit-aware accumulation confidence."""
+    infinite_water_hit_concentration_kappa: float = 0.20
+    """Relative-depth-dispersion scale for hit-aware concentration confidence."""
+    infinite_water_capacity_support_mode: Literal["m_inf", "hit_alpha", "hit", "hit_squared"] = "m_inf"
+    """Support used by accumulation-zero loss. m_inf preserves first-stage M2 behavior."""
     infinite_water_loss_start_step: int = 1000
     """First step where M2 auxiliary losses are active."""
     infinite_water_loss_ramp_steps: int = 3000
@@ -936,6 +944,20 @@ class WaterSplattingModel(Model):
             return 0.0
         return float(weight) * min((self.step - start) / ramp, 1.0)
 
+    def _infinite_water_capacity_support(self, outputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+        support = outputs["m_inf"].detach()
+        mode = getattr(self.config, "infinite_water_capacity_support_mode", "m_inf")
+        if mode == "m_inf":
+            return support
+        if mode == "hit_alpha":
+            return support * (1.0 - outputs["hit_q_alpha"].detach()).clamp(0.0, 1.0)
+        if mode == "hit":
+            return support * (1.0 - outputs["hit_confidence"].detach()).clamp(0.0, 1.0)
+        if mode == "hit_squared":
+            gate = (1.0 - outputs["hit_confidence"].detach()).clamp(0.0, 1.0)
+            return support * gate.square()
+        raise ValueError(f"Unknown infinite_water_capacity_support_mode: {mode}")
+
     def _appearance_enabled(self) -> bool:
         return bool(getattr(self.config, "constrained_appearance_enabled", False))
 
@@ -1280,6 +1302,14 @@ class WaterSplattingModel(Model):
         j_gaussian = render.j_gaussian
         j_object_raw = render.j_raw
         j_object = j_gaussian
+        hit_q_alpha = torch.sigmoid(
+            (render.accumulation - self.config.infinite_water_hit_alpha_threshold)
+            / max(self.config.infinite_water_hit_alpha_temp, 1e-6)
+        ).clamp(0.0, 1.0)
+        hit_q_conc = torch.exp(
+            -render.depth_std_relative.detach() / max(self.config.infinite_water_hit_concentration_kappa, 1e-6)
+        ).clamp(0.0, 1.0)
+        hit_confidence = (hit_q_alpha * hit_q_conc).clamp(0.0, 1.0)
         ownership = None
         if getattr(self.config, "infinite_water_enabled", False):
             if medium.b_inf is None:
@@ -1358,6 +1388,15 @@ class WaterSplattingModel(Model):
         outputs = {
             "rgb": rgb,
             "depth": render.depth,
+            "depth_second_moment": render.depth_second_moment,
+            "depth_variance": render.depth_variance,
+            "depth_std_relative": render.depth_std_relative,
+            "first_depth": render.first_depth,
+            "last_depth": render.last_depth,
+            "final_transmittance": render.final_transmittance,
+            "hit_q_alpha": hit_q_alpha,
+            "hit_q_conc": hit_q_conc,
+            "hit_confidence": hit_confidence,
             "accumulation": render.accumulation,
             "background": medium_rgb,
             "rgb_object": render.rgb_object,
@@ -1386,6 +1425,9 @@ class WaterSplattingModel(Model):
             outputs["b_inf"] = medium.b_inf
             outputs["m_inf"] = ownership.m_inf
             outputs["m_inf_eff"] = ownership.m_inf_eff
+            outputs["m_support"] = ownership.m_inf
+            outputs["m_render"] = ownership.m_inf_eff
+            outputs["m_capacity"] = self._infinite_water_capacity_support(outputs)
             outputs["m_inf_alpha_evidence"] = ownership.alpha_evidence
             outputs["m_inf_depth_evidence"] = ownership.depth_evidence
             outputs["m_inf_color_evidence"] = ownership.color_evidence
@@ -1439,6 +1481,12 @@ class WaterSplattingModel(Model):
         if "m_inf" in outputs:
             metrics_dict["m_inf_mean"] = outputs["m_inf"].mean()
             metrics_dict["m_inf_eff_mean"] = outputs["m_inf_eff"].mean()
+            metrics_dict["m_capacity_mean"] = outputs["m_capacity"].mean()
+        if "hit_confidence" in outputs:
+            metrics_dict["hit_q_alpha_mean"] = outputs["hit_q_alpha"].mean()
+            metrics_dict["hit_q_conc_mean"] = outputs["hit_q_conc"].mean()
+            metrics_dict["hit_confidence_mean"] = outputs["hit_confidence"].mean()
+            metrics_dict["depth_std_relative_mean"] = outputs["depth_std_relative"].mean()
         j_metric = torch.clamp(outputs["J"], 0.0, 1.0)
         metrics_dict["J_white_ratio"] = (j_metric > 0.95).all(dim=-1).float().mean()
         metrics_dict["J_saturation_ratio"] = (j_metric > 0.98).float().mean()
@@ -1504,6 +1552,8 @@ class WaterSplattingModel(Model):
         if getattr(self.config, "infinite_water_enabled", False) and "m_inf" in outputs:
             support = outputs["m_inf"].detach()
             support_norm = support.sum().clamp_min(1e-6)
+            capacity_support = outputs.get("m_capacity", support).detach()
+            capacity_support_norm = capacity_support.sum().clamp_min(1e-6)
 
             binf_weight = self._m2_ramp_weight(self.config.lambda_infinite_water_binf_rgb)
             if binf_weight > 0.0:
@@ -1514,8 +1564,8 @@ class WaterSplattingModel(Model):
             accum_weight = self._m2_ramp_weight(self.config.lambda_infinite_water_accumulation_zero)
             if accum_weight > 0.0:
                 loss_dict["infinite_water_accumulation_zero_loss"] = accum_weight * (
-                    support * outputs["accumulation"]
-                ).sum() / support_norm
+                    capacity_support * outputs["accumulation"]
+                ).sum() / capacity_support_norm
 
             near_weight = self._m2_ramp_weight(self.config.lambda_infinite_water_near_zero)
             if near_weight > 0.0:

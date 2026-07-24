@@ -330,6 +330,9 @@ __global__ void rasterize_forward(
     float3* __restrict__ out_clr,
     float3* __restrict__ out_med,
     float* __restrict__ depth_im,
+    float* __restrict__ depth2_im,
+    float* __restrict__ first_depth_im,
+    float* __restrict__ last_depth_im,
     const float3& __restrict__ background
 ) {
     // each thread draws one pixel, but also timeshares caching gaussians in a
@@ -396,6 +399,8 @@ __global__ void rasterize_forward(
     float3 pix_clr = {0.f, 0.f, 0.f};
     float3 pix_medium = {0.f, 0.f, 0.f};
     float pix_depth = 0.f;
+    float pix_depth2 = 0.f;
+    float first_depth = 0.f;
     for (int b = 0; b < num_batches; ++b) {
         // resync all threads before beginning next batch
         // end early if entire tile is done
@@ -460,8 +465,10 @@ __global__ void rasterize_forward(
             pix_out.y = pix_out.y + exp_obj.y * c_out.y;
             pix_out.z = pix_out.z + exp_obj.z * c_out.z;
             pix_depth = pix_depth + vis * depth;
+            pix_depth2 = pix_depth2 + vis * depth * depth;
             if (cur_idx == 0) {
                 first_idx = batch_start + t;
+                first_depth = depth;
             }
             // add medium scattering
             float3 exp_bs;
@@ -500,6 +507,9 @@ __global__ void rasterize_forward(
         out_clr[pix_id] = pix_clr;
         out_med[pix_id] = final_medium;
         depth_im[pix_id] = pix_depth;
+        depth2_im[pix_id] = pix_depth2;
+        first_depth_im[pix_id] = first_depth;
+        last_depth_im[pix_id] = prev_depth;
     }
 }
 

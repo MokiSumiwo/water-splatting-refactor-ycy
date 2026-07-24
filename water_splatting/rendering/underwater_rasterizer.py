@@ -25,6 +25,12 @@ class UnderwaterRenderOutput:
     rgb_medium: Tensor
     depth: Tensor
     accumulation: Tensor
+    depth_second_moment: Tensor
+    depth_variance: Tensor
+    depth_std_relative: Tensor
+    first_depth: Tensor
+    last_depth: Tensor
+    final_transmittance: Tensor
 
 
 class UnderwaterRasterizer:
@@ -82,7 +88,17 @@ class UnderwaterRasterizer:
         background: Optional[Tensor],
         step: int,
     ) -> UnderwaterRenderOutput:
-        rgb_object, rgb_clear_raw, rgb_medium, depth_im, alpha = rasterize_gaussians(
+        (
+            rgb_object,
+            rgb_clear_raw,
+            rgb_medium,
+            depth_im,
+            alpha,
+            depth2_im,
+            first_depth,
+            last_depth,
+            final_transmittance,
+        ) = rasterize_gaussians(
             xys,
             xys_grad_abs,
             depths,
@@ -100,6 +116,7 @@ class UnderwaterRasterizer:
             background=background,
             return_alpha=True,
             step=step,
+            return_hit_stats=True,
         )
 
         rgb = rgb_object + rgb_medium
@@ -107,8 +124,19 @@ class UnderwaterRasterizer:
         rgb_clear = rgb_clear_raw / (rgb_clear_raw + 1.0)
 
         depth_im = depth_im[..., None]
+        depth2_im = depth2_im[..., None]
         alpha = alpha[..., None]
-        depth_im = torch.where(alpha > 0, depth_im / alpha, depth_im.detach().max())
+        first_depth = first_depth[..., None]
+        last_depth = last_depth[..., None]
+        final_transmittance = final_transmittance[..., None]
+        depth_expected = torch.where(alpha > 0, depth_im / alpha.clamp_min(1e-6), depth_im.detach().max())
+        depth_second_moment = torch.where(
+            alpha > 0,
+            depth2_im / alpha.clamp_min(1e-6),
+            torch.zeros_like(depth2_im),
+        )
+        depth_variance = torch.clamp(depth_second_moment - depth_expected.square(), min=0.0)
+        depth_std_relative = torch.sqrt(depth_variance + 1e-8) / depth_expected.clamp_min(1e-6)
 
         return UnderwaterRenderOutput(
             rgb=rgb,
@@ -118,6 +146,12 @@ class UnderwaterRasterizer:
             rgb_clear=rgb_clear,
             rgb_clear_clamp=j_gaussian,
             rgb_medium=rgb_medium,
-            depth=depth_im,
+            depth=depth_expected,
             accumulation=alpha,
+            depth_second_moment=depth_second_moment,
+            depth_variance=depth_variance,
+            depth_std_relative=depth_std_relative,
+            first_depth=first_depth,
+            last_depth=last_depth,
+            final_transmittance=final_transmittance,
         )

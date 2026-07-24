@@ -45,6 +45,9 @@ __global__ void rasterize_forward(
     float3* __restrict__ out_clr,
     float3* __restrict__ out_med,
     float* __restrict__ depth_im,
+    float* __restrict__ depth2_im,
+    float* __restrict__ first_depth_im,
+    float* __restrict__ last_depth_im,
     const float3& __restrict__ background
 );
 
