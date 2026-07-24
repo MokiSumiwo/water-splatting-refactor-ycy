@@ -26,10 +26,25 @@ from typing import Dict, List, Optional, Tuple, Type, Union
 import numpy as np
 import torch
 import torch.nn as nn
+from water_splatting.cleanup import build_cleanup_candidate_mask, format_cleanup_stats, sample_pixel_map_at_gaussians
+from water_splatting.fields import (
+    DirectionConditionedMediumField,
+    compute_gaussian_colors,
+    compute_gaussian_sh_residual,
+    get_medium_context_extra_dim,
+)
+from water_splatting.losses import (
+    dc_channel_balance_loss,
+    dc_softclip_loss,
+    low_transmission_weights,
+    medium_attenuation_order_loss,
+    reconstruction_loss,
+    sh_residual_mean_anchor_loss,
+)
+from water_splatting.ownership import compute_infinite_water_ownership
+from water_splatting.rendering import UnderwaterRasterizer
 from water_splatting._torch_impl import quat_to_rotmat
-from water_splatting.project_gaussians import project_gaussians
-from water_splatting.rasterize import rasterize_gaussians
-from water_splatting.sh import num_sh_bases, spherical_harmonics
+from water_splatting.sh import num_sh_bases
 from pytorch_msssim import SSIM
 from torch.nn import Parameter
 from typing_extensions import Literal
@@ -164,6 +179,116 @@ class WaterSplattingModelConfig(ModelConfig):
     """Bias for medium density (sigma_bs and sigma_attn)."""
     mlp_type: Literal["tcnn", "torch"] = "tcnn"
     """Type of MLP to use for medium MLP."""
+    medium_context_mode: Literal["dir_only", "dir_xy", "dir_xy_depth", "dir_xy_camera", "dir_xy_depth_camera"] = "dir_only"
+    """M1 medium input mode. dir_only preserves original WaterSplatting behavior."""
+    medium_camera_context_scale: float = 1.0
+    """Multiplier applied after scene-box camera-center normalization."""
+    medium_camera_context_dropout: float = 0.0
+    """Dropout applied to the 3D camera context feature during training."""
+    medium_depth_context_detach: bool = True
+    """If True, M1 depth context is detached before the second medium pass."""
+    medium_depth_context_normalize: bool = True
+    """If True, normalize M1 depth context per rendered view."""
+    medium_depth_context_normalize_mode: Literal["max", "p95"] = "p95"
+    """Depth normalization statistic for M1 depth context."""
+    infinite_water_enabled: bool = False
+    """M2: enable infinite-water B_inf branch and ownership composition."""
+    infinite_water_ownership_mode: Literal["alpha_only", "alpha_depth", "alpha_depth_color"] = "alpha_depth"
+    """M2 ownership evidence mode."""
+    infinite_water_detach_evidence: bool = True
+    """Detach internal render evidence before constructing M_inf."""
+    infinite_water_occupancy_limited: bool = True
+    """If True, B_inf can only take over low-accumulation pixels."""
+    infinite_water_alpha_power: float = 1.0
+    """Power applied to low-accumulation evidence."""
+    infinite_water_depth_mid: float = 0.75
+    """Normalized depth midpoint for far-depth evidence."""
+    infinite_water_depth_temp: float = 0.10
+    """Temperature for far-depth evidence sigmoid."""
+    infinite_water_color_temp: float = 0.20
+    """Temperature for B_inf color-similarity evidence."""
+    infinite_water_depth_normalize_mode: Literal["max", "p95"] = "p95"
+    """Depth normalization statistic for M2 ownership evidence."""
+    infinite_water_loss_start_step: int = 1000
+    """First step where M2 auxiliary losses are active."""
+    infinite_water_loss_ramp_steps: int = 3000
+    """Linear ramp length for M2 auxiliary loss weights."""
+    lambda_infinite_water_binf_rgb: float = 0.0
+    """M2 supervised B_inf RGB fit on soft infinite-water support."""
+    lambda_infinite_water_accumulation_zero: float = 0.0
+    """M2 low-accumulation pressure on soft infinite-water support."""
+    lambda_infinite_water_near_zero: float = 0.0
+    """M2 near-branch RGB suppression on soft infinite-water support."""
+    gaussian_cleanup_enabled: bool = False
+    """M3: enable contribution-aware Gaussian cleanup diagnostics/pruning."""
+    gaussian_cleanup_dry_run: bool = True
+    """If True, log M3 cleanup candidates without deleting Gaussians."""
+    gaussian_cleanup_start_step: int = 12000
+    """First training step where M3 cleanup diagnostics can run."""
+    gaussian_cleanup_interval: int = 500
+    """Run M3 cleanup every this many steps."""
+    gaussian_cleanup_contribution_threshold: float = 1e-4
+    """Maximum projected gradient contribution proxy for M3 cleanup candidates."""
+    gaussian_cleanup_opacity_threshold: float = 0.08
+    """Maximum opacity for M3 cleanup candidates."""
+    gaussian_cleanup_visibility_min_count: int = 2
+    """Minimum accumulated visibility samples before a Gaussian can be considered."""
+    gaussian_cleanup_alpha_threshold: float = 0.25
+    """Maximum sampled object accumulation for the M3 alpha gate."""
+    gaussian_cleanup_depth_threshold: float = 0.0
+    """Minimum average projected depth for the M3 depth gate; <=0 disables by default."""
+    gaussian_cleanup_ownership_threshold: float = 0.35
+    """Minimum sampled M2 infinite-water ownership for the M3 ownership gate."""
+    gaussian_cleanup_ownership_source: Literal["m_inf", "m_inf_eff"] = "m_inf_eff"
+    """M2 ownership map sampled for M3 cleanup diagnostics."""
+    gaussian_cleanup_require_alpha_gate: bool = True
+    """Require low object accumulation at the projected Gaussian center."""
+    gaussian_cleanup_require_depth_gate: bool = False
+    """Require average Gaussian depth above gaussian_cleanup_depth_threshold."""
+    gaussian_cleanup_require_ownership_gate: bool = True
+    """Require M2 ownership support at the projected Gaussian center."""
+    constrained_appearance_enabled: bool = False
+    """M4: enable constrained view-dependent appearance losses/scheduling."""
+    appearance_sh_delay_enabled: bool = False
+    """If True, delay active SH degree schedule to reduce early color absorption."""
+    appearance_sh_delay_start_step: int = 3000
+    """First step where delayed SH can increase above DC-only."""
+    appearance_sh_delay_interval: int = 2000
+    """Interval between delayed SH degree increments."""
+    appearance_loss_start_step: int = 1000
+    """First step where M4 auxiliary losses are active."""
+    appearance_loss_ramp_steps: int = 3000
+    """Linear ramp length for M4 auxiliary loss weights."""
+    lambda_sh_residual_mean: float = 0.0
+    """M4 residual-SH mean anchor loss weight."""
+    lambda_dc_softclip: float = 0.0
+    """M4 low-transmission DC softclip loss weight."""
+    dc_softclip_threshold: float = 0.95
+    """Soft upper bound for DC intrinsic RGB."""
+    dc_softclip_beta: float = 0.05
+    """Softclip temperature for DC intrinsic RGB."""
+    dc_softclip_use_low_transmission_weight: bool = True
+    """Weight DC softclip more in low estimated transmission regions."""
+    lambda_dc_channel_balance: float = 0.0
+    """M4 DC color-balance loss weight for suppressing red/blue dominance."""
+    dc_channel_balance_margin: float = 0.05
+    """Allowed DC red/blue dominance before applying the balance penalty."""
+    dc_channel_balance_beta: float = 0.05
+    """Softplus temperature for DC channel-balance loss."""
+    dc_channel_balance_use_low_transmission_weight: bool = True
+    """Weight DC channel-balance loss more in low estimated transmission regions."""
+    lambda_medium_attenuation_order: float = 0.0
+    """M4 medium attenuation order loss weight for red >= green >= blue."""
+    medium_attenuation_order_margin: float = 0.0
+    """Margin for the medium attenuation channel-order prior."""
+    medium_attenuation_order_beta: float = 0.05
+    """Softplus temperature for the medium attenuation channel-order prior."""
+    medium_attenuation_order_use_low_transmission_weight: bool = True
+    """Weight attenuation-order loss more in low estimated transmission regions."""
+    low_transmission_threshold: float = 0.35
+    """Transmission midpoint for low-transmission weighting."""
+    low_transmission_temperature: float = 0.10
+    """Temperature for low-transmission weighting."""
 
 
 class WaterSplattingModel(Model):
@@ -198,19 +323,29 @@ class WaterSplattingModel(Model):
         self.medium_density_bias = self.medium_density_bias if isinstance(self.medium_density_bias, float) else self.medium_density_bias[0]
         # ------------------------Medium network------------------------
         # Medium MLP
+        medium_context_mode = getattr(self.config, "medium_context_mode", "dir_only")
+        medium_input_dim = self.direction_encoding.get_out_dim() + get_medium_context_extra_dim(medium_context_mode)
+        medium_out_dim = 12 if getattr(self.config, "infinite_water_enabled", False) else 9
         if num_layers_medium > 1:
             self.medium_mlp = MLP(
-                in_dim=self.direction_encoding.get_out_dim(),
+                in_dim=medium_input_dim,
                 num_layers=num_layers_medium,
                 layer_width=hidden_dim_medium,
-                out_dim=9,
+                out_dim=medium_out_dim,
                 activation=nn.Sigmoid(),
                 out_activation=None,
                 implementation=self.config.mlp_type,
             )
         else:
-            self.medium_mlp = nn.Linear(self.direction_encoding.get_out_dim(), 9)
+            self.medium_mlp = nn.Linear(medium_input_dim, medium_out_dim)
             self.config.mlp_type = "torch"
+        self.medium_field = DirectionConditionedMediumField(
+            direction_encoding=self.direction_encoding,
+            medium_mlp=self.medium_mlp,
+            colour_activation=self.colour_activation,
+            sigma_activation=self.sigma_activation,
+        )
+        self.underwater_rasterizer = UnderwaterRasterizer()
 
         if self.seed_points is not None and not self.config.random_init:
             means = torch.nn.Parameter(self.seed_points[0])  # (Location, Color)
@@ -266,6 +401,13 @@ class WaterSplattingModel(Model):
         self.ssim = SSIM(data_range=1.0, size_average=True, channel=3)
         self.lpips = LearnedPerceptualImagePatchSimilarity(normalize=True)
         self.step = 0
+        self.cleanup_alpha_accum = None
+        self.cleanup_ownership_accum = None
+        self.cleanup_sample_counts = None
+        self.cleanup_current_alpha = None
+        self.cleanup_current_ownership = None
+        self.cleanup_last_stats = None
+        self.last_active_sh_degree = 0
 
         self.crop_box: Optional[OrientedBox] = None
         if self.config.background_color == "random":
@@ -450,6 +592,7 @@ class WaterSplattingModel(Model):
                 self.max_2Dsize[visible_mask],
                 newradii / float(max(self.last_size[0], self.last_size[1])),
             )
+            self._accumulate_cleanup_evidence(visible_mask)
 
     def set_crop(self, crop_box: Optional[OrientedBox]):
         self.crop_box = crop_box
@@ -472,6 +615,7 @@ class WaterSplattingModel(Model):
                 self.step < self.config.stop_split_at
                 and (self.step % reset_interval > self.num_train_data + self.config.refine_every)
             )
+            cleanup_cull_mask = self._compute_cleanup_candidate_mask()
             if do_densification:
                 # then we densify
                 assert self.xys_grad_norm is not None and self.vis_counts is not None and self.max_2Dsize is not None
@@ -516,7 +660,7 @@ class WaterSplattingModel(Model):
                 # After a guassian is split into two new gaussians, the original one should also be pruned.
                 splits_mask = torch.cat(
                     (
-                        splits,
+                        splits if cleanup_cull_mask is None else (splits | cleanup_cull_mask),
                         torch.zeros(
                             nsamps * splits.sum() + dups.sum(),
                             device=self.device,
@@ -526,7 +670,9 @@ class WaterSplattingModel(Model):
                 )                
                 deleted_mask = self.cull_gaussians(splits_mask)
             elif self.step >= self.config.stop_split_at and self.config.continue_cull_post_densification:
-                deleted_mask = self.cull_gaussians()
+                deleted_mask = self.cull_gaussians(cleanup_cull_mask)
+            elif cleanup_cull_mask is not None:
+                deleted_mask = self.cull_gaussians(cleanup_cull_mask)
             else:
                 # if we donot allow culling post refinement, no more gaussians will be pruned.
                 deleted_mask = None
@@ -562,6 +708,7 @@ class WaterSplattingModel(Model):
             self.vis_counts = None
             self.depths_accum = None
             self.max_2Dsize = None
+            self._reset_cleanup_accumulators()
 
     def cull_gaussians(self, extra_cull_mask: Optional[torch.Tensor] = None):
         """
@@ -711,6 +858,216 @@ class WaterSplattingModel(Model):
             return TF.resize(image.permute(2, 0, 1), newsize, antialias=None).permute(1, 2, 0)
         return image
 
+    def _get_scene_normalization(self, dtype: torch.dtype, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+        aabb = self.scene_box.aabb.to(device=device, dtype=dtype)
+        center = (aabb[0] + aabb[1]) * 0.5
+        scale = torch.linalg.norm(aabb[1] - aabb[0]).clamp_min(1e-6)
+        return center, scale
+
+    def _predict_medium(
+        self,
+        *,
+        camera: Cameras,
+        rotation_world_from_camera: torch.Tensor,
+        height: int,
+        width: int,
+        cx: float,
+        cy: float,
+        depth_context: Optional[torch.Tensor] = None,
+    ):
+        scene_center, scene_scale = self._get_scene_normalization(
+            dtype=rotation_world_from_camera.dtype,
+            device=rotation_world_from_camera.device,
+        )
+        return self.medium_field(
+            camera=camera,
+            rotation_world_from_camera=rotation_world_from_camera,
+            height=height,
+            width=width,
+            cx=cx,
+            cy=cy,
+            density_bias=self.medium_density_bias,
+            mlp_type=self.config.mlp_type,
+            zero_medium=self.config.zero_medium,
+            context_mode=getattr(self.config, "medium_context_mode", "dir_only"),
+            camera_center=camera.camera_to_worlds[0, :3, 3],
+            scene_center=scene_center,
+            scene_scale=scene_scale,
+            camera_context_scale=getattr(self.config, "medium_camera_context_scale", 1.0),
+            camera_context_dropout=getattr(self.config, "medium_camera_context_dropout", 0.0),
+            training=self.training,
+            depth_context=depth_context,
+            enable_b_inf=getattr(self.config, "infinite_water_enabled", False),
+        )
+
+    def _uses_medium_depth_context(self) -> bool:
+        return "depth" in getattr(self.config, "medium_context_mode", "dir_only")
+
+    def _normalize_medium_depth_context(self, depth: torch.Tensor) -> torch.Tensor:
+        if getattr(self.config, "medium_depth_context_detach", True):
+            depth = depth.detach()
+
+        if not getattr(self.config, "medium_depth_context_normalize", True):
+            return depth
+
+        valid = torch.isfinite(depth) & (depth > 0)
+        if valid.any():
+            valid_depth = depth[valid]
+            mode = getattr(self.config, "medium_depth_context_normalize_mode", "p95")
+            if mode == "p95":
+                scale = torch.quantile(valid_depth, 0.95)
+            elif mode == "max":
+                scale = valid_depth.max()
+            else:
+                raise ValueError(f"Unknown medium_depth_context_normalize_mode: {mode}")
+            scale = scale.clamp_min(1e-6)
+            return (depth / scale).clamp(0.0, 2.0)
+
+        return torch.zeros_like(depth)
+
+    def _m2_ramp_weight(self, weight: float) -> float:
+        if weight <= 0.0:
+            return 0.0
+        start = getattr(self.config, "infinite_water_loss_start_step", 1000)
+        ramp = max(getattr(self.config, "infinite_water_loss_ramp_steps", 3000), 1)
+        if self.step < start:
+            return 0.0
+        return float(weight) * min((self.step - start) / ramp, 1.0)
+
+    def _appearance_enabled(self) -> bool:
+        return bool(getattr(self.config, "constrained_appearance_enabled", False))
+
+    def _appearance_ramp_weight(self, weight: float) -> float:
+        if weight <= 0.0:
+            return 0.0
+        start = getattr(self.config, "appearance_loss_start_step", 1000)
+        ramp = max(getattr(self.config, "appearance_loss_ramp_steps", 3000), 1)
+        if self.step < start:
+            return 0.0
+        return float(weight) * min((self.step - start) / ramp, 1.0)
+
+    def _get_active_sh_degree(self) -> int:
+        if not (
+            self._appearance_enabled()
+            and getattr(self.config, "appearance_sh_delay_enabled", False)
+        ):
+            return min(self.step // self.config.sh_degree_interval, self.config.sh_degree)
+
+        start = getattr(self.config, "appearance_sh_delay_start_step", 3000)
+        interval = max(getattr(self.config, "appearance_sh_delay_interval", 2000), 1)
+        if self.step < start:
+            return 0
+        return min((self.step - start) // interval + 1, self.config.sh_degree)
+
+    def _cleanup_enabled(self) -> bool:
+        return bool(getattr(self.config, "gaussian_cleanup_enabled", False))
+
+    def _reset_cleanup_accumulators(self) -> None:
+        self.cleanup_alpha_accum = None
+        self.cleanup_ownership_accum = None
+        self.cleanup_sample_counts = None
+        self.cleanup_current_alpha = None
+        self.cleanup_current_ownership = None
+
+    def _cache_cleanup_pixel_evidence(
+        self,
+        *,
+        accumulation: torch.Tensor,
+        ownership: Optional[torch.Tensor],
+        height: int,
+        width: int,
+    ) -> None:
+        if not self._cleanup_enabled() or not self.training:
+            return
+
+        self.cleanup_current_alpha = sample_pixel_map_at_gaussians(
+            accumulation.detach(),
+            self.xys.detach(),
+            self.radii.detach(),
+            height,
+            width,
+        )
+        if ownership is None:
+            self.cleanup_current_ownership = torch.zeros_like(self.cleanup_current_alpha)
+        else:
+            self.cleanup_current_ownership = sample_pixel_map_at_gaussians(
+                ownership.detach(),
+                self.xys.detach(),
+                self.radii.detach(),
+                height,
+                width,
+            )
+
+    def _accumulate_cleanup_evidence(self, visible_mask: torch.Tensor) -> None:
+        if not self._cleanup_enabled() or self.cleanup_current_alpha is None:
+            return
+        if self.cleanup_alpha_accum is None or self.cleanup_alpha_accum.shape[0] != self.num_points:
+            self.cleanup_alpha_accum = torch.zeros_like(self.radii, dtype=torch.float32)
+            self.cleanup_ownership_accum = torch.zeros_like(self.radii, dtype=torch.float32)
+            self.cleanup_sample_counts = torch.zeros_like(self.radii, dtype=torch.float32)
+
+        assert self.cleanup_ownership_accum is not None and self.cleanup_sample_counts is not None
+        visible_mask = visible_mask.reshape(-1)
+        self.cleanup_alpha_accum[visible_mask] += self.cleanup_current_alpha[visible_mask].float()
+        self.cleanup_ownership_accum[visible_mask] += self.cleanup_current_ownership[visible_mask].float()
+        self.cleanup_sample_counts[visible_mask] += 1.0
+
+    def _should_run_cleanup(self) -> bool:
+        if not self._cleanup_enabled():
+            return False
+        if self.step < getattr(self.config, "gaussian_cleanup_start_step", 12000):
+            return False
+        interval = max(getattr(self.config, "gaussian_cleanup_interval", 500), 1)
+        return self.step % interval == 0
+
+    def _compute_cleanup_candidate_mask(self) -> Optional[torch.Tensor]:
+        if not self._should_run_cleanup():
+            return None
+        if self.xys_grad_norm is None or self.vis_counts is None or self.depths_accum is None:
+            return None
+
+        visibility = self.vis_counts.clamp_min(1)
+        contribution = (self.xys_grad_norm / visibility) * 0.5 * max(self.last_size[0], self.last_size[1])
+        avg_depth = self.depths_accum / visibility
+
+        sampled_alpha = None
+        sampled_ownership = None
+        if self.cleanup_alpha_accum is not None and self.cleanup_sample_counts is not None:
+            counts = self.cleanup_sample_counts.clamp_min(1.0)
+            sampled_alpha = self.cleanup_alpha_accum / counts
+            if self.cleanup_ownership_accum is not None:
+                sampled_ownership = self.cleanup_ownership_accum / counts
+
+        require_depth = (
+            bool(getattr(self.config, "gaussian_cleanup_require_depth_gate", False))
+            and getattr(self.config, "gaussian_cleanup_depth_threshold", 0.0) > 0.0
+        )
+        dry_run = bool(getattr(self.config, "gaussian_cleanup_dry_run", True))
+        cleanup_mask, stats = build_cleanup_candidate_mask(
+            step=self.step,
+            opacities=self.opacities,
+            contribution=contribution,
+            visibility=visibility,
+            avg_depth=avg_depth,
+            sampled_alpha=sampled_alpha,
+            sampled_ownership=sampled_ownership,
+            min_visibility=getattr(self.config, "gaussian_cleanup_visibility_min_count", 2),
+            contribution_threshold=getattr(self.config, "gaussian_cleanup_contribution_threshold", 1e-4),
+            opacity_threshold=getattr(self.config, "gaussian_cleanup_opacity_threshold", 0.08),
+            alpha_threshold=getattr(self.config, "gaussian_cleanup_alpha_threshold", 0.25),
+            depth_threshold=getattr(self.config, "gaussian_cleanup_depth_threshold", 0.0),
+            ownership_threshold=getattr(self.config, "gaussian_cleanup_ownership_threshold", 0.35),
+            require_alpha_gate=getattr(self.config, "gaussian_cleanup_require_alpha_gate", True),
+            require_depth_gate=require_depth,
+            require_ownership_gate=getattr(self.config, "gaussian_cleanup_require_ownership_gate", True),
+            dry_run=dry_run,
+        )
+        self.cleanup_last_stats = stats
+        CONSOLE.log(format_cleanup_stats(stats))
+        if dry_run or stats.candidate_count == 0:
+            return None
+        return cleanup_mask
+
     def get_outputs(self, camera: Cameras, obb_box: Optional[OrientedBox] = None) -> Dict[str, Union[torch.Tensor, List]]:
         """Takes in a Ray Bundle and returns a dictionary of outputs.
 
@@ -725,6 +1082,9 @@ class WaterSplattingModel(Model):
             print("Called get_outputs with not a camera")
             return {}
         assert camera.shape[0] == 1, "Only one camera at a time"
+        if self._cleanup_enabled() and self.training:
+            self.cleanup_current_alpha = None
+            self.cleanup_current_ownership = None
         
         camera_downscale = self._get_downscale_factor()
         camera.rescale_output_resolution(1 / camera_downscale)
@@ -748,48 +1108,17 @@ class WaterSplattingModel(Model):
         self.last_fx = camera.fx.item()
         self.last_fy = camera.fy.item()
 
-        # Medium
-        # Encode directions
-        y = torch.linspace(0., H, H, device=self.device)
-        x = torch.linspace(0., W, W, device=self.device)
-        yy, xx = torch.meshgrid(y, x)
-        yy = (yy - cy) / camera.fy.item()
-        xx = (xx - cx) / camera.fx.item()
-        directions = torch.stack([xx, yy, torch.ones_like(xx)], dim=-1)
-        norms = torch.linalg.norm(directions, dim=-1, keepdim=True)
-        directions = directions / norms
-        directions = directions @ R.T
-
-        directions_flat = directions.view(-1, 3)
-        directions_encoded = self.direction_encoding(directions_flat)
-        outputs_shape = directions.shape[:-1]
-
-        # Medium MLP forward pass
-        if self.config.mlp_type == "tcnn":
-            medium_base_out = self.medium_mlp(directions_encoded)
-        else:
-            medium_base_out = self.medium_mlp(directions_encoded.float())
-        
-        # different activations for different outputs
-        medium_rgb = (
-            self.colour_activation(medium_base_out[..., :3])
-            .view(*outputs_shape, -1)
-            .to(directions)
+        medium = self._predict_medium(
+            camera=camera,
+            rotation_world_from_camera=R,
+            height=H,
+            width=W,
+            cx=cx,
+            cy=cy,
         )
-        medium_bs = (
-            self.sigma_activation(medium_base_out[..., 3:6] + self.medium_density_bias)
-            .view(*outputs_shape, -1)
-            .to(directions)
-        )
-        medium_attn = (
-            self.sigma_activation(medium_base_out[..., 6:] + self.medium_density_bias)
-            .view(*outputs_shape, -1)
-            .to(directions)
-        )
-        if self.config.zero_medium:
-            medium_rgb = torch.zeros_like(medium_rgb)
-            medium_bs = torch.zeros_like(medium_bs)
-            medium_attn = torch.zeros_like(medium_attn)
+        medium_rgb = medium.rgb
+        medium_bs = medium.bs
+        medium_attn = medium.attn
 
         if self.crop_box is not None and not self.training:
             crop_ids = self.crop_box.within(self.means).squeeze()
@@ -797,8 +1126,12 @@ class WaterSplattingModel(Model):
                 rgb = medium_rgb
                 depth = medium_rgb.new_ones(*rgb.shape[:2], 1) * 10
                 accumulation = medium_rgb.new_zeros(*rgb.shape[:2], 1)
+                j_empty = torch.zeros_like(rgb)
                 return {"rgb": rgb, "depth": depth, "accumulation": accumulation, "background": medium_rgb, 
-                        "rgb_object": torch.zeros_like(rgb), "rgb_medium": medium_rgb, "pred_image": rgb,
+                        "rgb_object": torch.zeros_like(rgb), "J": j_empty, "J_raw": j_empty,
+                        "J_gaussian": j_empty, "J_gaussian_raw": j_empty,
+                        "J_object": j_empty, "J_object_raw": j_empty,
+                        "rgb_clear": j_empty, "rgb_clear_clamp": j_empty, "rgb_medium": medium_rgb, "pred_image": rgb,
                         "medium_rgb": medium_rgb, "medium_bs": medium_bs, "medium_attn": medium_attn}
         else:
             crop_ids = None
@@ -818,22 +1151,17 @@ class WaterSplattingModel(Model):
             scales_crop = self.scales
             quats_crop = self.quats
 
-        colors_crop = torch.cat((features_dc_crop[:, None, :], features_rest_crop), dim=1)
-        BLOCK_WIDTH = 16  # this controls the tile size of rasterization, 16 is a good default
-
-        self.xys, depths, self.radii, conics, comp, num_tiles_hit, cov3d = project_gaussians(  # type: ignore
-            means_crop,
-            torch.exp(scales_crop),
-            1,
-            quats_crop / quats_crop.norm(dim=-1, keepdim=True),
-            viewmat.squeeze()[:3, :],
-            camera.fx.item(),
-            camera.fy.item(),
-            cx,
-            cy,
-            H,
-            W,
-            BLOCK_WIDTH,
+        self.xys, depths, self.radii, conics, comp, num_tiles_hit, cov3d = self.underwater_rasterizer.project(  # type: ignore
+            means=means_crop,
+            scales=scales_crop,
+            quats=quats_crop,
+            viewmat=viewmat,
+            fx=camera.fx.item(),
+            fy=camera.fy.item(),
+            cx=cx,
+            cy=cy,
+            height=H,
+            width=W,
             clip_thresh=self.config.clip_thresh,
         )  # type: ignore
 
@@ -846,21 +1174,40 @@ class WaterSplattingModel(Model):
             rgb = medium_rgb
             depth = medium_rgb.new_ones(*rgb.shape[:2], 1) * 10
             accumulation = medium_rgb.new_zeros(*rgb.shape[:2], 1)
+            j_empty = torch.zeros_like(rgb)
             return {"rgb": rgb, "depth": depth, "accumulation": accumulation, "background": medium_rgb, 
-                    "rgb_object": torch.zeros_like(rgb), "rgb_clear": torch.zeros_like(rgb), "rgb_clear_clamp": torch.zeros_like(rgb), "rgb_medium": medium_rgb, "pred_image": rgb,
+                    "rgb_object": torch.zeros_like(rgb), "J": j_empty, "J_raw": j_empty,
+                    "J_gaussian": j_empty, "J_gaussian_raw": j_empty,
+                    "J_object": j_empty, "J_object_raw": j_empty,
+                    "rgb_clear": j_empty, "rgb_clear_clamp": j_empty, "rgb_medium": medium_rgb, "pred_image": rgb,
                     "medium_rgb": medium_rgb, "medium_bs": medium_bs, "medium_attn": medium_attn}
 
         if self.training:
             self.xys.retain_grad()
 
-        if self.config.sh_degree > 0:
-            viewdirs = means_crop.detach() - camera.camera_to_worlds.detach()[..., :3, 3]  # (N, 3)
-            viewdirs = viewdirs / viewdirs.norm(dim=-1, keepdim=True)
-            n = min(self.step // self.config.sh_degree_interval, self.config.sh_degree)
-            rgbs = spherical_harmonics(n, viewdirs, colors_crop)
-            rgbs = torch.clamp(rgbs + 0.5, min=0.0)  # type: ignore
-        else:
-            rgbs = torch.sigmoid(colors_crop[:, 0, :])
+        n = self._get_active_sh_degree()
+        self.last_active_sh_degree = int(n)
+        rgbs = compute_gaussian_colors(
+            means=means_crop,
+            features_dc=features_dc_crop,
+            features_rest=features_rest_crop,
+            camera_position=camera.camera_to_worlds[..., :3, 3],
+            sh_degree=self.config.sh_degree,
+            active_sh_degree=n,
+        )
+        sh_residual = None
+        dc_rgb = None
+        visible_mask = (self.radii > 0).reshape(-1)
+        if self._appearance_enabled():
+            sh_residual = compute_gaussian_sh_residual(
+                means=means_crop,
+                features_dc=features_dc_crop,
+                features_rest=features_rest_crop,
+                camera_position=camera.camera_to_worlds[..., :3, 3],
+                sh_degree=self.config.sh_degree,
+                active_sh_degree=n,
+            )
+            dc_rgb = SH2RGB(features_dc_crop) if self.config.sh_degree > 0 else torch.sigmoid(features_dc_crop)
 
         assert (num_tiles_hit > 0).any()  # type: ignore
 
@@ -875,37 +1222,161 @@ class WaterSplattingModel(Model):
         
         self.xys_grad_abs = torch.zeros_like(self.xys)
 
-        rgb_object, rgb_clear, rgb_medium, depth_im, alpha = rasterize_gaussians(  # type: ignore
-            self.xys,
-            self.xys_grad_abs,
-            depths,
-            self.radii,
-            conics,
-            num_tiles_hit,  # type: ignore
-            rgbs,
-            opacities,
-            medium_rgb,
-            medium_bs,
-            medium_attn,
-            H,
-            W,
-            BLOCK_WIDTH,
+        if self._uses_medium_depth_context():
+            depth_seed_render = self.underwater_rasterizer.rasterize(  # type: ignore
+                xys=self.xys,
+                xys_grad_abs=self.xys_grad_abs,
+                depths=depths,
+                radii=self.radii,
+                conics=conics,
+                num_tiles_hit=num_tiles_hit,
+                colors=rgbs,
+                opacities=opacities,
+                medium_rgb=medium_rgb,
+                medium_bs=medium_bs,
+                medium_attn=medium_attn,
+                height=H,
+                width=W,
+                background=medium_rgb,
+                step=self.step,
+            )  # type: ignore
+            depth_context = self._normalize_medium_depth_context(depth_seed_render.depth)
+            medium = self._predict_medium(
+                camera=camera,
+                rotation_world_from_camera=R,
+                height=H,
+                width=W,
+                cx=cx,
+                cy=cy,
+                depth_context=depth_context,
+            )
+            medium_rgb = medium.rgb
+            medium_bs = medium.bs
+            medium_attn = medium.attn
+
+        render = self.underwater_rasterizer.rasterize(  # type: ignore
+            xys=self.xys,
+            xys_grad_abs=self.xys_grad_abs,
+            depths=depths,
+            radii=self.radii,
+            conics=conics,
+            num_tiles_hit=num_tiles_hit,
+            colors=rgbs,
+            opacities=opacities,
+            medium_rgb=medium_rgb,
+            medium_bs=medium_bs,
+            medium_attn=medium_attn,
+            height=H,
+            width=W,
             background=medium_rgb,
-            return_alpha=True,
             step=self.step,
         )  # type: ignore
-        
-        rgb = rgb_object + rgb_medium
-        rgb_clear_clamp = torch.clamp(rgb_clear, 0., 1.)
-        rgb_clear = rgb_clear / (rgb_clear + 1.)
-        
-        depth_im = depth_im[..., None]
-        alpha = alpha[..., None]
-        depth_im = torch.where(alpha > 0, depth_im / alpha, depth_im.detach().max())  
-                 
-        return {"rgb": rgb, "depth": depth_im, "accumulation": alpha, "background": medium_rgb, 
-                "rgb_object": rgb_object, "rgb_clear": rgb_clear, "rgb_clear_clamp": rgb_clear_clamp, "rgb_medium": rgb_medium, "pred_image": rgb,
-                "medium_rgb": medium_rgb, "medium_bs": medium_bs, "medium_attn": medium_attn}  # type: ignore
+
+        rgb = render.rgb
+        rgb_clear = render.rgb_clear
+        j_gaussian_raw = render.j_raw
+        j_gaussian = render.j_gaussian
+        j_object_raw = render.j_raw
+        j_object = j_gaussian
+        ownership = None
+        if getattr(self.config, "infinite_water_enabled", False):
+            if medium.b_inf is None:
+                raise RuntimeError("infinite_water_enabled=True requires medium.b_inf output")
+            ownership = compute_infinite_water_ownership(
+                accumulation=render.accumulation,
+                depth=render.depth,
+                rgb_near=render.rgb,
+                b_inf=medium.b_inf,
+                mode=self.config.infinite_water_ownership_mode,
+                detach_evidence=self.config.infinite_water_detach_evidence,
+                alpha_power=self.config.infinite_water_alpha_power,
+                depth_mid=self.config.infinite_water_depth_mid,
+                depth_temp=self.config.infinite_water_depth_temp,
+                color_temp=self.config.infinite_water_color_temp,
+                depth_normalize_mode=self.config.infinite_water_depth_normalize_mode,
+                occupancy_limited=self.config.infinite_water_occupancy_limited,
+            )
+            m_obj_eff = 1.0 - ownership.m_inf_eff
+            rgb = m_obj_eff * render.rgb + ownership.m_inf_eff * medium.b_inf
+            rgb_clear = m_obj_eff * render.rgb_clear
+            j_object_raw = m_obj_eff * render.j_raw
+            j_object = torch.clamp(j_object_raw, 0.0, 1.0)
+
+        cleanup_ownership = None
+        if ownership is not None:
+            ownership_source = getattr(self.config, "gaussian_cleanup_ownership_source", "m_inf_eff")
+            if ownership_source == "m_inf":
+                cleanup_ownership = ownership.m_inf
+            elif ownership_source == "m_inf_eff":
+                cleanup_ownership = ownership.m_inf_eff
+            else:
+                raise ValueError(f"Unknown gaussian_cleanup_ownership_source: {ownership_source}")
+
+        self._cache_cleanup_pixel_evidence(
+            accumulation=render.accumulation,
+            ownership=cleanup_ownership,
+            height=H,
+            width=W,
+        )
+
+        low_trans_weight = None
+        pixel_low_trans_weight = None
+        if self._appearance_enabled():
+            sampled_attn = sample_pixel_map_at_gaussians(
+                medium_attn.mean(dim=-1, keepdim=True).detach(),
+                self.xys.detach(),
+                self.radii.detach(),
+                H,
+                W,
+            )
+            low_trans_weight = low_transmission_weights(
+                sampled_attn=sampled_attn,
+                depths=depths.detach(),
+                threshold=getattr(self.config, "low_transmission_threshold", 0.35),
+                temperature=getattr(self.config, "low_transmission_temperature", 0.10),
+            )
+            pixel_low_trans_weight = low_transmission_weights(
+                sampled_attn=medium_attn.mean(dim=-1, keepdim=True).detach(),
+                depths=render.depth.detach(),
+                threshold=getattr(self.config, "low_transmission_threshold", 0.35),
+                temperature=getattr(self.config, "low_transmission_temperature", 0.10),
+            ).reshape(H, W, 1)
+
+        outputs = {
+            "rgb": rgb,
+            "depth": render.depth,
+            "accumulation": render.accumulation,
+            "background": medium_rgb,
+            "rgb_object": render.rgb_object,
+            "J": j_gaussian,
+            "J_raw": j_gaussian_raw,
+            "J_gaussian": j_gaussian,
+            "J_gaussian_raw": j_gaussian_raw,
+            "J_object": j_object,
+            "J_object_raw": j_object_raw,
+            "rgb_clear": rgb_clear,
+            "rgb_clear_clamp": j_gaussian,
+            "rgb_medium": render.rgb_medium,
+            "pred_image": rgb,
+            "medium_rgb": medium_rgb,
+            "medium_bs": medium_bs,
+            "medium_attn": medium_attn,
+        }
+        if self._appearance_enabled():
+            outputs["appearance_active_sh_degree"] = torch.tensor(float(n), device=self.device)
+            outputs["appearance_visible_mask"] = visible_mask.detach()
+            outputs["appearance_sh_residual"] = sh_residual
+            outputs["appearance_dc_rgb"] = dc_rgb
+            outputs["appearance_low_trans_weight"] = low_trans_weight
+            outputs["appearance_pixel_low_trans_weight"] = pixel_low_trans_weight
+        if getattr(self.config, "infinite_water_enabled", False):
+            outputs["b_inf"] = medium.b_inf
+            outputs["m_inf"] = ownership.m_inf
+            outputs["m_inf_eff"] = ownership.m_inf_eff
+            outputs["m_inf_alpha_evidence"] = ownership.alpha_evidence
+            outputs["m_inf_depth_evidence"] = ownership.depth_evidence
+            outputs["m_inf_color_evidence"] = ownership.color_evidence
+        return outputs  # type: ignore
         
     def get_gt_img(self, image: torch.Tensor):
         """Compute groundtruth image with iteration dependent downscale factor for evaluation purpose
@@ -950,6 +1421,39 @@ class WaterSplattingModel(Model):
             metrics_dict[f"medium_attn_{i}"] = outputs["medium_attn"][:, :, i].mean()
             metrics_dict[f"medium_bs_{i}"] = outputs["medium_bs"][:, :, i].mean()
             metrics_dict[f"medium_rgb_{i}"] = outputs["medium_rgb"][:, :, i].mean()
+            if "b_inf" in outputs:
+                metrics_dict[f"b_inf_{i}"] = outputs["b_inf"][:, :, i].mean()
+        if "m_inf" in outputs:
+            metrics_dict["m_inf_mean"] = outputs["m_inf"].mean()
+            metrics_dict["m_inf_eff_mean"] = outputs["m_inf_eff"].mean()
+        j_metric = torch.clamp(outputs["J"], 0.0, 1.0)
+        metrics_dict["J_white_ratio"] = (j_metric > 0.95).all(dim=-1).float().mean()
+        metrics_dict["J_saturation_ratio"] = (j_metric > 0.98).float().mean()
+        j_red_dominance = j_metric[..., 0] - torch.maximum(j_metric[..., 1], j_metric[..., 2])
+        metrics_dict["J_red_dominance_ratio"] = (j_red_dominance > 0.05).float().mean()
+        j_blue_dominance = j_metric[..., 2] - torch.maximum(j_metric[..., 0], j_metric[..., 1])
+        metrics_dict["J_blue_dominance_ratio"] = (j_blue_dominance > 0.05).float().mean()
+        rgb_clear_metric = torch.clamp(outputs["rgb_clear"], 0.0, 1.0)
+        metrics_dict["rgb_clear_legacy_white_ratio"] = (rgb_clear_metric > 0.95).all(dim=-1).float().mean()
+        metrics_dict["rgb_clear_legacy_saturation_ratio"] = (rgb_clear_metric > 0.98).float().mean()
+        if "appearance_active_sh_degree" in outputs:
+            metrics_dict["appearance_active_sh_degree"] = outputs["appearance_active_sh_degree"]
+        if "appearance_sh_residual" in outputs:
+            metrics_dict["appearance_sh_residual_abs_mean"] = outputs["appearance_sh_residual"].abs().mean()
+        if "appearance_dc_rgb" in outputs:
+            metrics_dict["appearance_dc_rgb_mean"] = outputs["appearance_dc_rgb"].mean()
+            metrics_dict["appearance_dc_rgb_gt_1_ratio"] = (outputs["appearance_dc_rgb"] > 1.0).float().mean()
+            dc_rgb = outputs["appearance_dc_rgb"]
+            dc_red_dom = dc_rgb[..., 0] - torch.maximum(dc_rgb[..., 1], dc_rgb[..., 2])
+            dc_blue_dom = dc_rgb[..., 2] - torch.maximum(dc_rgb[..., 0], dc_rgb[..., 1])
+            metrics_dict["appearance_dc_red_dominance_ratio"] = (dc_red_dom > 0.05).float().mean()
+            metrics_dict["appearance_dc_blue_dominance_ratio"] = (dc_blue_dom > 0.05).float().mean()
+        if self.cleanup_last_stats is not None:
+            stats = self.cleanup_last_stats
+            metrics_dict["gaussian_cleanup_candidate_count"] = stats.candidate_count
+            metrics_dict["gaussian_cleanup_candidate_fraction"] = stats.candidate_fraction
+            metrics_dict["gaussian_cleanup_mean_contribution"] = stats.mean_contribution
+            metrics_dict["gaussian_cleanup_mean_ownership"] = stats.mean_sampled_ownership
         return metrics_dict
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None) -> Dict[str, torch.Tensor]:
@@ -973,21 +1477,96 @@ class WaterSplattingModel(Model):
             gt_img = gt_img * mask
             pred_img = pred_img * mask
 
-        if self.config.main_loss == "l1":
-            recon_loss = torch.abs(gt_img - pred_img).mean()
-        elif self.config.main_loss == "reg_l1":
-            recon_loss = torch.abs((gt_img - pred_img) / (pred_img.detach() + 1e-3)).mean()
-        else:
-            recon_loss = (((pred_img - gt_img) / (pred_img.detach() + 1e-3)) ** 2).mean()
-        
-        if self.config.ssim_loss != "ssim":
-            simloss = 1 - self.ssim((gt_img / (pred_img.detach() + 1e-3)).permute(2, 0, 1)[None, ...], (pred_img / (pred_img.detach() + 1e-3)).permute(2, 0, 1)[None, ...])
-        else:
-            simloss = 1 - self.ssim(gt_img.permute(2, 0, 1)[None, ...], pred_img.permute(2, 0, 1)[None, ...])
-
-        return {
-            "main_loss": (1 - self.config.ssim_lambda) * recon_loss + self.config.ssim_lambda * simloss,
+        loss_dict = {
+            "main_loss": reconstruction_loss(
+                gt_img=gt_img,
+                pred_img=pred_img,
+                main_loss=self.config.main_loss,
+                ssim_loss=self.config.ssim_loss,
+                ssim_lambda=self.config.ssim_lambda,
+                ssim_metric=self.ssim,
+            ),
         }
+
+        if getattr(self.config, "infinite_water_enabled", False) and "m_inf" in outputs:
+            support = outputs["m_inf"].detach()
+            support_norm = support.sum().clamp_min(1e-6)
+
+            binf_weight = self._m2_ramp_weight(self.config.lambda_infinite_water_binf_rgb)
+            if binf_weight > 0.0:
+                loss_dict["infinite_water_binf_rgb_loss"] = binf_weight * (
+                    support * torch.abs(outputs["b_inf"] - gt_img)
+                ).sum() / (support_norm * 3.0)
+
+            accum_weight = self._m2_ramp_weight(self.config.lambda_infinite_water_accumulation_zero)
+            if accum_weight > 0.0:
+                loss_dict["infinite_water_accumulation_zero_loss"] = accum_weight * (
+                    support * outputs["accumulation"]
+                ).sum() / support_norm
+
+            near_weight = self._m2_ramp_weight(self.config.lambda_infinite_water_near_zero)
+            if near_weight > 0.0:
+                near_rgb = outputs["rgb_object"] + outputs["rgb_medium"]
+                loss_dict["infinite_water_near_zero_loss"] = near_weight * (
+                    support * torch.abs(near_rgb)
+                ).sum() / (support_norm * 3.0)
+
+        if self._appearance_enabled() and "appearance_visible_mask" in outputs:
+            sh_weight = self._appearance_ramp_weight(self.config.lambda_sh_residual_mean)
+            if sh_weight > 0.0 and "appearance_sh_residual" in outputs:
+                loss_dict["appearance_sh_residual_mean_loss"] = sh_weight * sh_residual_mean_anchor_loss(
+                    outputs["appearance_sh_residual"],
+                    outputs["appearance_visible_mask"],
+                )
+
+            dc_weight = self._appearance_ramp_weight(self.config.lambda_dc_softclip)
+            if dc_weight > 0.0 and "appearance_dc_rgb" in outputs:
+                low_trans_weight = (
+                    outputs.get("appearance_low_trans_weight")
+                    if getattr(self.config, "dc_softclip_use_low_transmission_weight", True)
+                    else None
+                )
+                loss_dict["appearance_dc_softclip_loss"] = dc_weight * dc_softclip_loss(
+                    dc_rgb=outputs["appearance_dc_rgb"],
+                    visible_mask=outputs["appearance_visible_mask"],
+                    low_transmission_weight=low_trans_weight,
+                    threshold=self.config.dc_softclip_threshold,
+                    beta=self.config.dc_softclip_beta,
+                )
+
+            dc_balance_weight = self._appearance_ramp_weight(self.config.lambda_dc_channel_balance)
+            if dc_balance_weight > 0.0 and "appearance_dc_rgb" in outputs:
+                low_trans_weight = (
+                    outputs.get("appearance_low_trans_weight")
+                    if getattr(self.config, "dc_channel_balance_use_low_transmission_weight", True)
+                    else None
+                )
+                loss_dict["appearance_dc_channel_balance_loss"] = dc_balance_weight * dc_channel_balance_loss(
+                    dc_rgb=outputs["appearance_dc_rgb"],
+                    visible_mask=outputs["appearance_visible_mask"],
+                    low_transmission_weight=low_trans_weight,
+                    margin=self.config.dc_channel_balance_margin,
+                    beta=self.config.dc_channel_balance_beta,
+                )
+
+            attn_order_weight = self._appearance_ramp_weight(self.config.lambda_medium_attenuation_order)
+            if attn_order_weight > 0.0:
+                pixel_low_trans_weight = (
+                    outputs.get("appearance_pixel_low_trans_weight")
+                    if getattr(self.config, "medium_attenuation_order_use_low_transmission_weight", True)
+                    else None
+                )
+                loss_dict["appearance_medium_attenuation_order_loss"] = (
+                    attn_order_weight
+                    * medium_attenuation_order_loss(
+                        medium_attn=outputs["medium_attn"],
+                        low_transmission_weight=pixel_low_trans_weight,
+                        margin=self.config.medium_attenuation_order_margin,
+                        beta=self.config.medium_attenuation_order_beta,
+                    )
+                )
+
+        return loss_dict
 
     @torch.no_grad()
     def get_outputs_for_camera(self, camera: Cameras, obb_box: Optional[OrientedBox] = None) -> Dict[str, torch.Tensor]:
@@ -1045,5 +1624,27 @@ class WaterSplattingModel(Model):
         metrics_dict = {"psnr": float(psnr.item()), "ssim": float(ssim)}  # type: ignore
         metrics_dict["lpips"] = float(lpips)
 
-        images_dict = {"gt": output_gt_rgb, "rgb_medium": outputs["rgb_medium"], "rgb_object": outputs["rgb_object"], "depth": outputs["depth"], "rgb": outputs["rgb"], "rgb_clear": outputs["rgb_clear"]}
+        j_metric = torch.clamp(outputs["J"], 0.0, 1.0)
+        metrics_dict["J_white_ratio"] = float((j_metric > 0.95).all(dim=-1).float().mean().item())
+        metrics_dict["J_saturation_ratio"] = float((j_metric > 0.98).float().mean().item())
+        j_red_dominance = j_metric[..., 0] - torch.maximum(j_metric[..., 1], j_metric[..., 2])
+        metrics_dict["J_red_dominance_ratio"] = float((j_red_dominance > 0.05).float().mean().item())
+        j_blue_dominance = j_metric[..., 2] - torch.maximum(j_metric[..., 0], j_metric[..., 1])
+        metrics_dict["J_blue_dominance_ratio"] = float((j_blue_dominance > 0.05).float().mean().item())
+
+        images_dict = {
+            "gt": output_gt_rgb,
+            "rgb_medium": outputs["rgb_medium"],
+            "rgb_object": outputs["rgb_object"],
+            "depth": outputs["depth"],
+            "rgb": outputs["rgb"],
+            "J": outputs["J"],
+            "J_gaussian": outputs["J_gaussian"],
+            "J_object": outputs["J_object"],
+            "rgb_clear_legacy": outputs["rgb_clear"],
+        }
+        if "b_inf" in outputs:
+            images_dict["b_inf"] = outputs["b_inf"]
+            images_dict["m_inf"] = outputs["m_inf"].expand_as(outputs["rgb"])
+            images_dict["m_inf_eff"] = outputs["m_inf_eff"].expand_as(outputs["rgb"])
         return metrics_dict, images_dict
