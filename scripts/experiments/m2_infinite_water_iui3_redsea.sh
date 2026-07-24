@@ -29,6 +29,11 @@ INFINITE_WATER_HIT_ALPHA_THRESHOLD="${INFINITE_WATER_HIT_ALPHA_THRESHOLD:-0.20}"
 INFINITE_WATER_HIT_ALPHA_TEMP="${INFINITE_WATER_HIT_ALPHA_TEMP:-0.05}"
 INFINITE_WATER_HIT_CONCENTRATION_KAPPA="${INFINITE_WATER_HIT_CONCENTRATION_KAPPA:-0.20}"
 INFINITE_WATER_CAPACITY_SUPPORT_MODE="${INFINITE_WATER_CAPACITY_SUPPORT_MODE:-m_inf}"
+INFINITE_WATER_HIT_PROTECTION_ENABLED="${INFINITE_WATER_HIT_PROTECTION_ENABLED:-False}"
+INFINITE_WATER_HIT_PROTECTION_THRESHOLD="${INFINITE_WATER_HIT_PROTECTION_THRESHOLD:-0.80}"
+INFINITE_WATER_HIT_PROTECTION_TEMP="${INFINITE_WATER_HIT_PROTECTION_TEMP:-0.05}"
+INFINITE_WATER_CAPACITY_FLOOR="${INFINITE_WATER_CAPACITY_FLOOR:-0.50}"
+INFINITE_WATER_HIT_PROTECTION_START_STEP="${INFINITE_WATER_HIT_PROTECTION_START_STEP:-0}"
 LOSS_START_STEP="${LOSS_START_STEP:-1000}"
 LOSS_RAMP_STEPS="${LOSS_RAMP_STEPS:-3000}"
 STAMP="${STAMP:-$(date -u +%Y%m%d_%H%M%S)}"
@@ -63,6 +68,11 @@ mkdir -p "${LOG_DIR}" "${RENDER_DIR}"
   echo "infinite_water_hit_alpha_temp=${INFINITE_WATER_HIT_ALPHA_TEMP}"
   echo "infinite_water_hit_concentration_kappa=${INFINITE_WATER_HIT_CONCENTRATION_KAPPA}"
   echo "infinite_water_capacity_support_mode=${INFINITE_WATER_CAPACITY_SUPPORT_MODE}"
+  echo "infinite_water_hit_protection_enabled=${INFINITE_WATER_HIT_PROTECTION_ENABLED}"
+  echo "infinite_water_hit_protection_threshold=${INFINITE_WATER_HIT_PROTECTION_THRESHOLD}"
+  echo "infinite_water_hit_protection_temp=${INFINITE_WATER_HIT_PROTECTION_TEMP}"
+  echo "infinite_water_capacity_floor=${INFINITE_WATER_CAPACITY_FLOOR}"
+  echo "infinite_water_hit_protection_start_step=${INFINITE_WATER_HIT_PROTECTION_START_STEP}"
   echo "max_num_iterations=${MAX_NUM_ITERATIONS}"
   echo "binf_rgb_weight=${BINF_RGB_WEIGHT}"
   echo "accumulation_zero_weight=${ACCUM_ZERO_WEIGHT}"
@@ -99,6 +109,11 @@ CUDA_VISIBLE_DEVICES="${GPU}" "${NS_TRAIN}" water-splatting \
   --pipeline.model.infinite-water-hit-alpha-temp "${INFINITE_WATER_HIT_ALPHA_TEMP}" \
   --pipeline.model.infinite-water-hit-concentration-kappa "${INFINITE_WATER_HIT_CONCENTRATION_KAPPA}" \
   --pipeline.model.infinite-water-capacity-support-mode "${INFINITE_WATER_CAPACITY_SUPPORT_MODE}" \
+  --pipeline.model.infinite-water-hit-protection-enabled "${INFINITE_WATER_HIT_PROTECTION_ENABLED}" \
+  --pipeline.model.infinite-water-hit-protection-threshold "${INFINITE_WATER_HIT_PROTECTION_THRESHOLD}" \
+  --pipeline.model.infinite-water-hit-protection-temp "${INFINITE_WATER_HIT_PROTECTION_TEMP}" \
+  --pipeline.model.infinite-water-capacity-floor "${INFINITE_WATER_CAPACITY_FLOOR}" \
+  --pipeline.model.infinite-water-hit-protection-start-step "${INFINITE_WATER_HIT_PROTECTION_START_STEP}" \
   --pipeline.model.infinite-water-loss-start-step "${LOSS_START_STEP}" \
   --pipeline.model.infinite-water-loss-ramp-steps "${LOSS_RAMP_STEPS}" \
   --pipeline.model.lambda-infinite-water-binf-rgb "${BINF_RGB_WEIGHT}" \

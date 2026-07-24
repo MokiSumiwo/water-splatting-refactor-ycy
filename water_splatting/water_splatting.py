@@ -219,6 +219,16 @@ class WaterSplattingModelConfig(ModelConfig):
     """Relative-depth-dispersion scale for hit-aware concentration confidence."""
     infinite_water_capacity_support_mode: Literal["m_inf", "hit_alpha", "hit", "hit_squared"] = "m_inf"
     """Support used by accumulation-zero loss. m_inf preserves first-stage M2 behavior."""
+    infinite_water_hit_protection_enabled: bool = False
+    """If True, attenuate capacity support on high-confidence hit regions with a nonzero floor."""
+    infinite_water_hit_protection_threshold: float = 0.80
+    """Hit-confidence threshold for conservative object protection."""
+    infinite_water_hit_protection_temp: float = 0.05
+    """Temperature for the hit-confidence object-protection sigmoid."""
+    infinite_water_capacity_floor: float = 0.50
+    """Minimum capacity pressure kept on high-confidence object-protection regions."""
+    infinite_water_hit_protection_start_step: int = 0
+    """First training step where hit-protection attenuation is active."""
     infinite_water_loss_start_step: int = 1000
     """First step where M2 auxiliary losses are active."""
     infinite_water_loss_ramp_steps: int = 3000
@@ -948,15 +958,35 @@ class WaterSplattingModel(Model):
         support = outputs["m_inf"].detach()
         mode = getattr(self.config, "infinite_water_capacity_support_mode", "m_inf")
         if mode == "m_inf":
-            return support
-        if mode == "hit_alpha":
-            return support * (1.0 - outputs["hit_q_alpha"].detach()).clamp(0.0, 1.0)
-        if mode == "hit":
-            return support * (1.0 - outputs["hit_confidence"].detach()).clamp(0.0, 1.0)
-        if mode == "hit_squared":
+            capacity_support = support
+        elif mode == "hit_alpha":
+            capacity_support = support * (1.0 - outputs["hit_q_alpha"].detach()).clamp(0.0, 1.0)
+        elif mode == "hit":
+            capacity_support = support * (1.0 - outputs["hit_confidence"].detach()).clamp(0.0, 1.0)
+        elif mode == "hit_squared":
             gate = (1.0 - outputs["hit_confidence"].detach()).clamp(0.0, 1.0)
-            return support * gate.square()
-        raise ValueError(f"Unknown infinite_water_capacity_support_mode: {mode}")
+            capacity_support = support * gate.square()
+        else:
+            raise ValueError(f"Unknown infinite_water_capacity_support_mode: {mode}")
+
+        if bool(getattr(self.config, "infinite_water_hit_protection_enabled", False)):
+            protection = self._infinite_water_hit_object_protection(outputs).detach()
+            capacity_floor = float(getattr(self.config, "infinite_water_capacity_floor", 0.50))
+            capacity_floor = min(max(capacity_floor, 0.0), 1.0)
+            floor_gate = 1.0 - (1.0 - capacity_floor) * protection
+            capacity_support = capacity_support * floor_gate.clamp(capacity_floor, 1.0)
+        return capacity_support
+
+    def _infinite_water_hit_object_protection(self, outputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+        hit_confidence = outputs["hit_confidence"].detach()
+        if not bool(getattr(self.config, "infinite_water_hit_protection_enabled", False)):
+            return torch.zeros_like(hit_confidence)
+        start = int(getattr(self.config, "infinite_water_hit_protection_start_step", 0))
+        if self.step < start:
+            return torch.zeros_like(hit_confidence)
+        threshold = float(getattr(self.config, "infinite_water_hit_protection_threshold", 0.80))
+        temp = max(float(getattr(self.config, "infinite_water_hit_protection_temp", 0.05)), 1e-6)
+        return torch.sigmoid((hit_confidence - threshold) / temp).clamp(0.0, 1.0)
 
     def _appearance_enabled(self) -> bool:
         return bool(getattr(self.config, "constrained_appearance_enabled", False))
@@ -1427,6 +1457,7 @@ class WaterSplattingModel(Model):
             outputs["m_inf_eff"] = ownership.m_inf_eff
             outputs["m_support"] = ownership.m_inf
             outputs["m_render"] = ownership.m_inf_eff
+            outputs["hit_object_protection"] = self._infinite_water_hit_object_protection(outputs)
             outputs["m_capacity"] = self._infinite_water_capacity_support(outputs)
             outputs["m_inf_alpha_evidence"] = ownership.alpha_evidence
             outputs["m_inf_depth_evidence"] = ownership.depth_evidence
@@ -1487,6 +1518,8 @@ class WaterSplattingModel(Model):
             metrics_dict["hit_q_conc_mean"] = outputs["hit_q_conc"].mean()
             metrics_dict["hit_confidence_mean"] = outputs["hit_confidence"].mean()
             metrics_dict["depth_std_relative_mean"] = outputs["depth_std_relative"].mean()
+        if "hit_object_protection" in outputs:
+            metrics_dict["hit_object_protection_mean"] = outputs["hit_object_protection"].mean()
         j_metric = torch.clamp(outputs["J"], 0.0, 1.0)
         metrics_dict["J_white_ratio"] = (j_metric > 0.95).all(dim=-1).float().mean()
         metrics_dict["J_saturation_ratio"] = (j_metric > 0.98).float().mean()
