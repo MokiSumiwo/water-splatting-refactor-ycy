@@ -26,6 +26,7 @@ from typing import Dict, List, Optional, Tuple, Type, Union
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from water_splatting.cleanup import build_cleanup_candidate_mask, format_cleanup_stats, sample_pixel_map_at_gaussians
 from water_splatting.fields import (
     DirectionConditionedMediumField,
@@ -199,8 +200,8 @@ class WaterSplattingModelConfig(ModelConfig):
     """Detach internal render evidence before constructing M_inf."""
     infinite_water_occupancy_limited: bool = True
     """If True, B_inf can only take over low-accumulation pixels."""
-    infinite_water_compose_mode: Literal["rgb_mix", "tail_approx"] = "rgb_mix"
-    """M2 composition mode. rgb_mix preserves current behavior; tail_approx only replaces the low-occupancy tail."""
+    infinite_water_compose_mode: Literal["none", "rgb_mix", "tail_approx", "closed_tail"] = "rgb_mix"
+    """M2 composition mode. rgb_mix preserves current behavior; none disables B_inf RGB composition."""
     infinite_water_alpha_power: float = 1.0
     """Power applied to low-accumulation evidence."""
     infinite_water_depth_mid: float = 0.75
@@ -219,6 +220,12 @@ class WaterSplattingModelConfig(ModelConfig):
     """Relative-depth-dispersion scale for hit-aware concentration confidence."""
     infinite_water_capacity_support_mode: Literal["m_inf", "hit_alpha", "hit", "hit_squared"] = "m_inf"
     """Support used by accumulation-zero loss. m_inf preserves first-stage M2 behavior."""
+    infinite_water_capacity_loss_mode: Literal["none", "current", "depth_monotonic", "relu_budget", "softplus_budget"] = "current"
+    """Capacity loss form. current preserves first-stage M2; budget modes use depth-only far support."""
+    infinite_water_capacity_budget: float = 0.05
+    """Allowed accumulation budget for capacity budget losses."""
+    infinite_water_capacity_budget_temp: float = 0.02
+    """Softplus temperature for softplus capacity budget loss."""
     infinite_water_hit_protection_enabled: bool = False
     """If True, attenuate capacity support on high-confidence hit regions with a nonzero floor."""
     infinite_water_hit_protection_threshold: float = 0.80
@@ -988,6 +995,30 @@ class WaterSplattingModel(Model):
         temp = max(float(getattr(self.config, "infinite_water_hit_protection_temp", 0.05)), 1e-6)
         return torch.sigmoid((hit_confidence - threshold) / temp).clamp(0.0, 1.0)
 
+    def _infinite_water_capacity_loss(self, outputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+        mode = getattr(self.config, "infinite_water_capacity_loss_mode", "current")
+        accumulation = outputs["accumulation"]
+        if mode == "none":
+            return accumulation.new_zeros(())
+        if mode == "current":
+            support = outputs.get("m_capacity", outputs["m_inf"]).detach()
+            return (support * accumulation).sum() / support.sum().clamp_min(1e-6)
+
+        depth_support = outputs["m_inf_depth_evidence"].detach()
+        support_norm = depth_support.sum().clamp_min(1e-6)
+        if mode == "depth_monotonic":
+            penalty = accumulation
+        elif mode == "relu_budget":
+            budget = float(getattr(self.config, "infinite_water_capacity_budget", 0.05))
+            penalty = torch.relu(accumulation - budget)
+        elif mode == "softplus_budget":
+            budget = float(getattr(self.config, "infinite_water_capacity_budget", 0.05))
+            temp = max(float(getattr(self.config, "infinite_water_capacity_budget_temp", 0.02)), 1e-6)
+            penalty = F.softplus((accumulation - budget) / temp) * temp
+        else:
+            raise ValueError(f"Unknown infinite_water_capacity_loss_mode: {mode}")
+        return (depth_support * penalty).sum() / support_norm
+
     def _appearance_enabled(self) -> bool:
         return bool(getattr(self.config, "constrained_appearance_enabled", False))
 
@@ -1332,6 +1363,9 @@ class WaterSplattingModel(Model):
         j_gaussian = render.j_gaussian
         j_object_raw = render.j_raw
         j_object = j_gaussian
+        tail_weight_last = render.final_transmittance * torch.exp(-medium_bs * render.last_depth)
+        tail_medium_original = tail_weight_last * medium_rgb
+        rgb_medium_finite = render.rgb_medium - tail_medium_original
         hit_q_alpha = torch.sigmoid(
             (render.accumulation - self.config.infinite_water_hit_alpha_threshold)
             / max(self.config.infinite_water_hit_alpha_temp, 1e-6)
@@ -1359,7 +1393,11 @@ class WaterSplattingModel(Model):
                 occupancy_limited=self.config.infinite_water_occupancy_limited,
             )
             compose_mode = getattr(self.config, "infinite_water_compose_mode", "rgb_mix")
-            if compose_mode == "rgb_mix":
+            if compose_mode == "none":
+                rgb = render.rgb
+                rgb_clear = render.rgb_clear
+                j_object_raw = render.j_raw
+            elif compose_mode == "rgb_mix":
                 m_obj_eff = 1.0 - ownership.m_inf_eff
                 rgb = m_obj_eff * render.rgb + ownership.m_inf_eff * medium.b_inf
                 rgb_clear = m_obj_eff * render.rgb_clear
@@ -1371,6 +1409,11 @@ class WaterSplattingModel(Model):
                     tail_gate = torch.ones_like(render.accumulation)
                 rgb = render.rgb + ownership.m_inf * tail_gate * (medium.b_inf - medium_rgb)
                 j_object_raw = (1.0 - ownership.m_inf_eff) * render.j_raw
+            elif compose_mode == "closed_tail":
+                tail_color = (1.0 - ownership.m_inf_eff) * medium_rgb + ownership.m_inf_eff * medium.b_inf
+                rgb = render.rgb_object + rgb_medium_finite + tail_weight_last * tail_color
+                rgb_clear = render.rgb_clear
+                j_object_raw = render.j_raw
             else:
                 raise ValueError(f"Unknown infinite_water_compose_mode: {compose_mode}")
             j_object = torch.clamp(j_object_raw, 0.0, 1.0)
@@ -1439,6 +1482,9 @@ class WaterSplattingModel(Model):
             "rgb_clear": rgb_clear,
             "rgb_clear_clamp": j_gaussian,
             "rgb_medium": render.rgb_medium,
+            "rgb_medium_finite": rgb_medium_finite,
+            "tail_weight_last": tail_weight_last,
+            "tail_medium_original": tail_medium_original,
             "pred_image": rgb,
             "medium_rgb": medium_rgb,
             "medium_bs": medium_bs,
@@ -1585,8 +1631,6 @@ class WaterSplattingModel(Model):
         if getattr(self.config, "infinite_water_enabled", False) and "m_inf" in outputs:
             support = outputs["m_inf"].detach()
             support_norm = support.sum().clamp_min(1e-6)
-            capacity_support = outputs.get("m_capacity", support).detach()
-            capacity_support_norm = capacity_support.sum().clamp_min(1e-6)
 
             binf_weight = self._m2_ramp_weight(self.config.lambda_infinite_water_binf_rgb)
             if binf_weight > 0.0:
@@ -1595,10 +1639,8 @@ class WaterSplattingModel(Model):
                 ).sum() / (support_norm * 3.0)
 
             accum_weight = self._m2_ramp_weight(self.config.lambda_infinite_water_accumulation_zero)
-            if accum_weight > 0.0:
-                loss_dict["infinite_water_accumulation_zero_loss"] = accum_weight * (
-                    capacity_support * outputs["accumulation"]
-                ).sum() / capacity_support_norm
+            if accum_weight > 0.0 and getattr(self.config, "infinite_water_capacity_loss_mode", "current") != "none":
+                loss_dict["infinite_water_accumulation_zero_loss"] = accum_weight * self._infinite_water_capacity_loss(outputs)
 
             near_weight = self._m2_ramp_weight(self.config.lambda_infinite_water_near_zero)
             if near_weight > 0.0:
