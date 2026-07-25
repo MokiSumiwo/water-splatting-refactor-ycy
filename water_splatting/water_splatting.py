@@ -30,6 +30,7 @@ import torch.nn.functional as F
 from water_splatting.cleanup import build_cleanup_candidate_mask, format_cleanup_stats, sample_pixel_map_at_gaussians
 from water_splatting.fields import (
     DirectionConditionedMediumField,
+    compute_dual_gaussian_colors,
     compute_gaussian_colors,
     compute_gaussian_sh_residual,
     get_medium_context_extra_dim,
@@ -316,6 +317,30 @@ class WaterSplattingModelConfig(ModelConfig):
     """Transmission midpoint for low-transmission weighting."""
     low_transmission_temperature: float = 0.10
     """Temperature for low-transmission weighting."""
+    dual_color_enabled: bool = False
+    """Enable intrinsic-underwater dual-color Gaussian appearance."""
+    clear_sh_luminance_scale: float = 1.0
+    """Scale applied to SH luminance residual in the clear/intrinsic branch."""
+    clear_sh_chroma_scale: float = 0.0
+    """Scale applied to SH chroma residual in the clear/intrinsic branch."""
+    lambda_intrinsic_near_anchor: float = 0.0
+    """DualColor near-transmission anchor loss weight."""
+    lambda_view_residual_mean: float = 0.0
+    """DualColor visible residual mean anchor loss weight."""
+    lambda_clear_chroma: float = 0.0
+    """DualColor visible SH chroma residual loss weight."""
+    dual_color_loss_start_step: int = 0
+    """First step where DualColor auxiliary losses are active."""
+    dual_color_loss_ramp_steps: int = 0
+    """Linear ramp length for DualColor auxiliary losses."""
+    dual_color_near_transmission_threshold: float = 0.70
+    """Transmission midpoint for near-transmission intrinsic anchoring."""
+    dual_color_near_transmission_temp: float = 0.10
+    """Transmission temperature for near-transmission intrinsic anchoring."""
+    dual_color_freeze_geometry: bool = True
+    """When DualColor is enabled, keep means/scales/quats/opacities fixed."""
+    dual_color_freeze_medium: bool = True
+    """When DualColor is enabled, keep medium MLP and direction encoding fixed."""
 
 
 class WaterSplattingModel(Model):
@@ -588,6 +613,8 @@ class WaterSplattingModel(Model):
 
     def after_train(self, step: int):
         assert step == self.step
+        if getattr(self.config, "dual_color_enabled", False) and getattr(self.config, "dual_color_freeze_geometry", True):
+            return
         # to save some training time, we no longer need to update those stats post refinement
         # if self.step >= self.config.stop_split_at:
         #     return
@@ -630,6 +657,8 @@ class WaterSplattingModel(Model):
 
     def refinement_after(self, optimizers: Optimizers, step):
         assert step == self.step
+        if getattr(self.config, "dual_color_enabled", False) and getattr(self.config, "dual_color_freeze_geometry", True):
+            return
         if self.step <= self.config.warmup_length:
             return
         with torch.no_grad():
@@ -849,10 +878,16 @@ class WaterSplattingModel(Model):
     def get_gaussian_param_groups(self) -> Dict[str, List[Parameter]]:
         # Here we explicitly use the means, scales as parameters so that the user can override this function and
         # specify more if they want to add more optimizable params to gaussians.
-        return {
-            name: [self.gauss_params[name]]
-            for name in ["means", "scales", "quats", "features_dc", "features_rest", "opacities"]
-        }
+        names = ["means", "scales", "quats", "features_dc", "features_rest", "opacities"]
+        if getattr(self.config, "dual_color_enabled", False) and getattr(self.config, "dual_color_freeze_geometry", True):
+            for name in ["means", "scales", "quats", "opacities"]:
+                self.gauss_params[name].requires_grad_(False)
+            for name in ["features_dc", "features_rest"]:
+                self.gauss_params[name].requires_grad_(True)
+        else:
+            for name in names:
+                self.gauss_params[name].requires_grad_(True)
+        return {name: [self.gauss_params[name]] for name in names}
 
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
         """Obtain the parameter groups for the optimizers
@@ -861,6 +896,13 @@ class WaterSplattingModel(Model):
             Mapping of different parameter groups
         """
         gps = self.get_gaussian_param_groups()
+        freeze_medium = getattr(self.config, "dual_color_enabled", False) and getattr(
+            self.config, "dual_color_freeze_medium", True
+        )
+        for param in self.medium_mlp.parameters():
+            param.requires_grad_(not freeze_medium)
+        for param in self.direction_encoding.parameters():
+            param.requires_grad_(not freeze_medium)
         gps["medium_mlp"] = list(self.medium_mlp.parameters())
         gps["direction_encoding"] = list(self.direction_encoding.parameters())
         return gps
@@ -1030,6 +1072,17 @@ class WaterSplattingModel(Model):
         if self.step < start:
             return 0.0
         return float(weight) * min((self.step - start) / ramp, 1.0)
+
+    def _dual_color_ramp_weight(self, weight: float) -> float:
+        if weight <= 0.0:
+            return 0.0
+        start = int(getattr(self.config, "dual_color_loss_start_step", 0))
+        ramp = int(getattr(self.config, "dual_color_loss_ramp_steps", 0))
+        if self.step < start:
+            return 0.0
+        if ramp <= 0:
+            return float(weight)
+        return float(weight) * min((self.step - start) / max(float(ramp), 1.0), 1.0)
 
     def _get_active_sh_degree(self) -> int:
         if not (
@@ -1267,7 +1320,7 @@ class WaterSplattingModel(Model):
                     "rgb_clear": j_empty, "rgb_clear_clamp": j_empty, "rgb_medium": medium_rgb, "pred_image": rgb,
                     "medium_rgb": medium_rgb, "medium_bs": medium_bs, "medium_attn": medium_attn}
 
-        if self.training:
+        if self.training and self.xys.requires_grad:
             self.xys.retain_grad()
 
         n = self._get_active_sh_degree()
@@ -1280,6 +1333,18 @@ class WaterSplattingModel(Model):
             sh_degree=self.config.sh_degree,
             active_sh_degree=n,
         )
+        dual_color = None
+        if getattr(self.config, "dual_color_enabled", False):
+            dual_color = compute_dual_gaussian_colors(
+                means=means_crop,
+                features_dc=features_dc_crop,
+                features_rest=features_rest_crop,
+                camera_position=camera.camera_to_worlds[..., :3, 3],
+                sh_degree=self.config.sh_degree,
+                active_sh_degree=n,
+                luminance_scale=getattr(self.config, "clear_sh_luminance_scale", 1.0),
+                chroma_scale=getattr(self.config, "clear_sh_chroma_scale", 0.0),
+            )
         sh_residual = None
         dc_rgb = None
         visible_mask = (self.radii > 0).reshape(-1)
@@ -1357,12 +1422,38 @@ class WaterSplattingModel(Model):
             step=self.step,
         )  # type: ignore
 
+        dual_render = None
+        if dual_color is not None:
+            dual_render = self.underwater_rasterizer.rasterize(  # type: ignore
+                xys=self.xys,
+                xys_grad_abs=self.xys_grad_abs,
+                depths=depths,
+                radii=self.radii,
+                conics=conics,
+                num_tiles_hit=num_tiles_hit,
+                colors=dual_color.intrinsic_rgb,
+                opacities=opacities,
+                medium_rgb=medium_rgb,
+                medium_bs=medium_bs,
+                medium_attn=medium_attn,
+                height=H,
+                width=W,
+                background=medium_rgb,
+                step=self.step,
+            )  # type: ignore
+
         rgb = render.rgb
         rgb_clear = render.rgb_clear
         j_gaussian_raw = render.j_raw
         j_gaussian = render.j_gaussian
         j_object_raw = render.j_raw
         j_object = j_gaussian
+        if dual_render is not None:
+            rgb_clear = dual_render.rgb_clear
+            j_gaussian_raw = dual_render.j_raw
+            j_gaussian = dual_render.j_gaussian
+            j_object_raw = dual_render.j_raw
+            j_object = dual_render.j_gaussian
         tail_weight_last = render.final_transmittance * torch.exp(-medium_bs * render.last_depth)
         tail_medium_original = tail_weight_last * medium_rgb
         rgb_medium_finite = render.rgb_medium - tail_medium_original
@@ -1395,25 +1486,23 @@ class WaterSplattingModel(Model):
             compose_mode = getattr(self.config, "infinite_water_compose_mode", "rgb_mix")
             if compose_mode == "none":
                 rgb = render.rgb
-                rgb_clear = render.rgb_clear
-                j_object_raw = render.j_raw
+                j_object_raw = j_gaussian_raw
             elif compose_mode == "rgb_mix":
                 m_obj_eff = 1.0 - ownership.m_inf_eff
                 rgb = m_obj_eff * render.rgb + ownership.m_inf_eff * medium.b_inf
-                rgb_clear = m_obj_eff * render.rgb_clear
-                j_object_raw = m_obj_eff * render.j_raw
+                rgb_clear = m_obj_eff * rgb_clear
+                j_object_raw = m_obj_eff * j_gaussian_raw
             elif compose_mode == "tail_approx":
                 if getattr(self.config, "infinite_water_occupancy_limited", True):
                     tail_gate = (1.0 - render.accumulation).detach().clamp(0.0, 1.0)
                 else:
                     tail_gate = torch.ones_like(render.accumulation)
                 rgb = render.rgb + ownership.m_inf * tail_gate * (medium.b_inf - medium_rgb)
-                j_object_raw = (1.0 - ownership.m_inf_eff) * render.j_raw
+                j_object_raw = (1.0 - ownership.m_inf_eff) * j_gaussian_raw
             elif compose_mode == "closed_tail":
                 tail_color = (1.0 - ownership.m_inf_eff) * medium_rgb + ownership.m_inf_eff * medium.b_inf
                 rgb = render.rgb_object + rgb_medium_finite + tail_weight_last * tail_color
-                rgb_clear = render.rgb_clear
-                j_object_raw = render.j_raw
+                j_object_raw = j_gaussian_raw
             else:
                 raise ValueError(f"Unknown infinite_water_compose_mode: {compose_mode}")
             j_object = torch.clamp(j_object_raw, 0.0, 1.0)
@@ -1490,6 +1579,18 @@ class WaterSplattingModel(Model):
             "medium_bs": medium_bs,
             "medium_attn": medium_attn,
         }
+        if dual_color is not None and dual_render is not None:
+            outputs["dual_color_active_sh_degree"] = torch.tensor(float(n), device=self.device)
+            outputs["dual_color_visible_mask"] = visible_mask.detach()
+            outputs["dual_color_underwater_rgb"] = dual_color.underwater_rgb
+            outputs["dual_color_intrinsic_rgb"] = dual_color.intrinsic_rgb
+            outputs["dual_color_view_residual"] = dual_color.view_residual
+            outputs["dual_color_luminance_residual"] = dual_color.luminance_residual
+            outputs["dual_color_chroma_residual"] = dual_color.chroma_residual
+            outputs["dual_color_j_residual_raw"] = render.j_raw - dual_render.j_raw
+            outputs["rgb_object_intrinsic"] = dual_render.rgb_object
+            outputs["J_intrinsic"] = dual_render.j_gaussian
+            outputs["J_intrinsic_raw"] = dual_render.j_raw
         if self._appearance_enabled():
             outputs["appearance_active_sh_degree"] = torch.tensor(float(n), device=self.device)
             outputs["appearance_visible_mask"] = visible_mask.detach()
@@ -1571,6 +1672,8 @@ class WaterSplattingModel(Model):
         metrics_dict["J_saturation_ratio"] = (j_metric > 0.98).float().mean()
         j_red_dominance = j_metric[..., 0] - torch.maximum(j_metric[..., 1], j_metric[..., 2])
         metrics_dict["J_red_dominance_ratio"] = (j_red_dominance > 0.05).float().mean()
+        j_green_dominance = j_metric[..., 1] - torch.maximum(j_metric[..., 0], j_metric[..., 2])
+        metrics_dict["J_green_dominance_ratio"] = (j_green_dominance > 0.05).float().mean()
         j_blue_dominance = j_metric[..., 2] - torch.maximum(j_metric[..., 0], j_metric[..., 1])
         metrics_dict["J_blue_dominance_ratio"] = (j_blue_dominance > 0.05).float().mean()
         rgb_clear_metric = torch.clamp(outputs["rgb_clear"], 0.0, 1.0)
@@ -1578,6 +1681,12 @@ class WaterSplattingModel(Model):
         metrics_dict["rgb_clear_legacy_saturation_ratio"] = (rgb_clear_metric > 0.98).float().mean()
         if "appearance_active_sh_degree" in outputs:
             metrics_dict["appearance_active_sh_degree"] = outputs["appearance_active_sh_degree"]
+        if "dual_color_active_sh_degree" in outputs:
+            metrics_dict["dual_color_active_sh_degree"] = outputs["dual_color_active_sh_degree"]
+        if "dual_color_j_residual_raw" in outputs:
+            metrics_dict["dual_color_j_residual_abs_mean"] = outputs["dual_color_j_residual_raw"].abs().mean()
+        if "dual_color_chroma_residual" in outputs:
+            metrics_dict["dual_color_chroma_residual_abs_mean"] = outputs["dual_color_chroma_residual"].abs().mean()
         if "appearance_sh_residual" in outputs:
             metrics_dict["appearance_sh_residual_abs_mean"] = outputs["appearance_sh_residual"].abs().mean()
         if "appearance_dc_rgb" in outputs:
@@ -1648,6 +1757,29 @@ class WaterSplattingModel(Model):
                 loss_dict["infinite_water_near_zero_loss"] = near_weight * (
                     support * torch.abs(near_rgb)
                 ).sum() / (support_norm * 3.0)
+
+        if getattr(self.config, "dual_color_enabled", False) and "dual_color_visible_mask" in outputs:
+            near_weight = self._dual_color_ramp_weight(self.config.lambda_intrinsic_near_anchor)
+            if near_weight > 0.0 and "dual_color_j_residual_raw" in outputs:
+                mean_attn = outputs["medium_attn"].mean(dim=-1, keepdim=True)
+                transmission = torch.exp(-(mean_attn * outputs["depth"]).clamp_min(0.0)).clamp(0.0, 1.0)
+                threshold = float(getattr(self.config, "dual_color_near_transmission_threshold", 0.70))
+                temp = max(float(getattr(self.config, "dual_color_near_transmission_temp", 0.10)), 1e-6)
+                near_gate = torch.sigmoid((transmission - threshold) / temp).clamp(0.0, 1.0)
+                loss_dict["dual_color_intrinsic_near_anchor_loss"] = near_weight * (
+                    near_gate * outputs["dual_color_j_residual_raw"].abs()
+                ).sum() / (near_gate.sum().clamp_min(1e-6) * 3.0)
+
+            visible_mask = outputs["dual_color_visible_mask"].reshape(-1)
+            mean_weight = self._dual_color_ramp_weight(self.config.lambda_view_residual_mean)
+            if mean_weight > 0.0 and "dual_color_view_residual" in outputs and visible_mask.any():
+                residual = outputs["dual_color_view_residual"][visible_mask]
+                loss_dict["dual_color_view_residual_mean_loss"] = mean_weight * residual.mean(dim=0).abs().mean()
+
+            chroma_weight = self._dual_color_ramp_weight(self.config.lambda_clear_chroma)
+            if chroma_weight > 0.0 and "dual_color_chroma_residual" in outputs and visible_mask.any():
+                chroma = outputs["dual_color_chroma_residual"][visible_mask]
+                loss_dict["dual_color_clear_chroma_loss"] = chroma_weight * chroma.abs().mean()
 
         if self._appearance_enabled() and "appearance_visible_mask" in outputs:
             sh_weight = self._appearance_ramp_weight(self.config.lambda_sh_residual_mean)
@@ -1767,6 +1899,8 @@ class WaterSplattingModel(Model):
         metrics_dict["J_saturation_ratio"] = float((j_metric > 0.98).float().mean().item())
         j_red_dominance = j_metric[..., 0] - torch.maximum(j_metric[..., 1], j_metric[..., 2])
         metrics_dict["J_red_dominance_ratio"] = float((j_red_dominance > 0.05).float().mean().item())
+        j_green_dominance = j_metric[..., 1] - torch.maximum(j_metric[..., 0], j_metric[..., 2])
+        metrics_dict["J_green_dominance_ratio"] = float((j_green_dominance > 0.05).float().mean().item())
         j_blue_dominance = j_metric[..., 2] - torch.maximum(j_metric[..., 0], j_metric[..., 1])
         metrics_dict["J_blue_dominance_ratio"] = float((j_blue_dominance > 0.05).float().mean().item())
 
@@ -1781,6 +1915,10 @@ class WaterSplattingModel(Model):
             "J_object": outputs["J_object"],
             "rgb_clear_legacy": outputs["rgb_clear"],
         }
+        if "J_intrinsic" in outputs:
+            images_dict["J_intrinsic"] = outputs["J_intrinsic"]
+            images_dict["rgb_object_intrinsic"] = outputs["rgb_object_intrinsic"]
+            images_dict["dual_color_j_residual_abs"] = outputs["dual_color_j_residual_raw"].abs().clamp(0.0, 1.0)
         if "b_inf" in outputs:
             images_dict["b_inf"] = outputs["b_inf"]
             images_dict["m_inf"] = outputs["m_inf"].expand_as(outputs["rgb"])
