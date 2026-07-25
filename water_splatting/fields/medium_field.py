@@ -27,6 +27,7 @@ class MediumFieldOutput:
     attn: Tensor
     directions: Tensor
     b_inf: Optional[Tensor] = None
+    b_inf_residual: Optional[Tensor] = None
 
 
 MediumContextMode = Literal[
@@ -89,6 +90,8 @@ class DirectionConditionedMediumField:
         training: bool = False,
         depth_context: Optional[Tensor] = None,
         enable_b_inf: bool = False,
+        b_inf_mode: Literal["implicit", "tied", "bounded_residual", "independent"] = "implicit",
+        b_inf_residual_scale: float = 0.02,
     ) -> MediumFieldOutput:
         y = torch.linspace(0.0, height, height, device=rotation_world_from_camera.device)
         x = torch.linspace(0.0, width, width, device=rotation_world_from_camera.device)
@@ -142,19 +145,31 @@ class DirectionConditionedMediumField:
             .view(*outputs_shape, -1)
             .to(directions)
         )
-        if enable_b_inf:
-            b_inf = (
-                self.colour_activation(medium_base_out[..., 9:12])
-                .view(*outputs_shape, -1)
-                .to(directions)
-            )
-        else:
-            b_inf = None
+        b_inf_raw = medium_base_out[..., 9:12] if enable_b_inf else None
 
         if zero_medium:
             medium_rgb = torch.zeros_like(medium_rgb)
             medium_bs = torch.zeros_like(medium_bs)
             medium_attn = torch.zeros_like(medium_attn)
+
+        b_inf = None
+        b_inf_residual = None
+        if b_inf_mode == "implicit":
+            b_inf = None
+        elif b_inf_mode == "tied":
+            b_inf = medium_rgb
+        elif b_inf_mode == "independent":
+            if b_inf_raw is None:
+                raise RuntimeError("b_inf_mode='independent' requires enable_b_inf=True")
+            b_inf = self.colour_activation(b_inf_raw).view(*outputs_shape, -1).to(directions)
+        elif b_inf_mode == "bounded_residual":
+            if b_inf_raw is None:
+                raise RuntimeError("b_inf_mode='bounded_residual' requires enable_b_inf=True")
+            b_inf_residual = torch.tanh(b_inf_raw).view(*outputs_shape, -1).to(directions)
+            rgb_logit = torch.logit(medium_rgb.clamp(1e-4, 1.0 - 1e-4))
+            b_inf = torch.sigmoid(rgb_logit + float(b_inf_residual_scale) * b_inf_residual)
+        else:
+            raise ValueError(f"Unknown b_inf_mode: {b_inf_mode}")
 
         return MediumFieldOutput(
             rgb=medium_rgb,
@@ -162,6 +177,7 @@ class DirectionConditionedMediumField:
             attn=medium_attn,
             directions=directions,
             b_inf=b_inf,
+            b_inf_residual=b_inf_residual,
         )
 
     def _append_context(

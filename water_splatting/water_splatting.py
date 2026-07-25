@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Type, Union
 
 import numpy as np
@@ -247,6 +248,36 @@ class WaterSplattingModelConfig(ModelConfig):
     """M2 low-accumulation pressure on soft infinite-water support."""
     lambda_infinite_water_near_zero: float = 0.0
     """M2 near-branch RGB suppression on soft infinite-water support."""
+    b_inf_mode: Literal["implicit", "tied", "bounded_residual", "independent"] = "implicit"
+    """Backscatter closure B_inf mode. implicit preserves M1; tied uses B_inf=A without an extra head."""
+    b_inf_residual_scale: float = 0.02
+    """Bounded-residual scale for B_inf around medium_rgb/A."""
+    lambda_background_water_color: float = 0.0
+    """Backscatter closure background-water color supervision weight."""
+    lambda_foreground_transmission_reconstruction: float = 0.0
+    """Extra foreground reconstruction weight for low-transmission pixels."""
+    foreground_transmission_gamma: float = 1.0
+    """Exponent used by foreground transmission-aware reconstruction."""
+    foreground_transmission_max_weight: float = 4.0
+    """Maximum per-channel foreground reconstruction multiplier."""
+    foreground_transmission_detach_weight: bool = True
+    """Detach foreground transmission weights from the weighted reconstruction loss."""
+    lambda_pseudo_depth: float = 0.0
+    """Reserved pseudo-depth rank-consistency loss weight. Off by default."""
+    lambda_medium_context_residual: float = 0.0
+    """Reserved base-residual medium context regularization weight. Off by default."""
+    medium_predictor_mode: Literal["single", "base_residual"] = "single"
+    """Medium predictor structure flag. single preserves the current M1/M2 predictor."""
+    backscatter_region_mask_dir: Optional[str] = None
+    """Directory containing view_XXXX_regions.pt masks with water/object/boundary keys."""
+    background_water_mask_key: str = "water"
+    """Mask key used for background-water B_inf supervision."""
+    foreground_water_mask_key: str = "object"
+    """Mask key used for foreground transmission-aware reconstruction."""
+    backscatter_loss_start_step: int = 0
+    """First step where backscatter-closure auxiliary losses are active."""
+    backscatter_loss_ramp_steps: int = 0
+    """Linear ramp length for backscatter-closure auxiliary losses."""
     gaussian_cleanup_enabled: bool = False
     """M3: enable contribution-aware Gaussian cleanup diagnostics/pruning."""
     gaussian_cleanup_dry_run: bool = True
@@ -377,7 +408,7 @@ class WaterSplattingModel(Model):
         # Medium MLP
         medium_context_mode = getattr(self.config, "medium_context_mode", "dir_only")
         medium_input_dim = self.direction_encoding.get_out_dim() + get_medium_context_extra_dim(medium_context_mode)
-        medium_out_dim = 12 if getattr(self.config, "infinite_water_enabled", False) else 9
+        medium_out_dim = 12 if self._b_inf_requires_head() else 9
         if num_layers_medium > 1:
             self.medium_mlp = MLP(
                 in_dim=medium_input_dim,
@@ -460,6 +491,7 @@ class WaterSplattingModel(Model):
         self.cleanup_current_ownership = None
         self.cleanup_last_stats = None
         self.last_active_sh_degree = 0
+        self._backscatter_mask_cache: Dict[Tuple[str, int, str], Optional[torch.Tensor]] = {}
 
         self.crop_box: Optional[OrientedBox] = None
         if self.config.background_color == "random":
@@ -933,6 +965,26 @@ class WaterSplattingModel(Model):
         scale = torch.linalg.norm(aabb[1] - aabb[0]).clamp_min(1e-6)
         return center, scale
 
+    def _effective_b_inf_mode(self) -> str:
+        mode = getattr(self.config, "b_inf_mode", "implicit")
+        if mode == "implicit" and getattr(self.config, "infinite_water_enabled", False):
+            return "independent"
+        return mode
+
+    def _b_inf_requires_head(self) -> bool:
+        return self._effective_b_inf_mode() in {"bounded_residual", "independent"}
+
+    def _backscatter_ramp_weight(self, weight: float) -> float:
+        if weight <= 0.0:
+            return 0.0
+        start = int(getattr(self.config, "backscatter_loss_start_step", 0))
+        ramp = int(getattr(self.config, "backscatter_loss_ramp_steps", 0))
+        if self.step < start:
+            return 0.0
+        if ramp <= 0:
+            return float(weight)
+        return float(weight) * min((self.step - start) / max(float(ramp), 1.0), 1.0)
+
     def _predict_medium(
         self,
         *,
@@ -966,7 +1018,9 @@ class WaterSplattingModel(Model):
             camera_context_dropout=getattr(self.config, "medium_camera_context_dropout", 0.0),
             training=self.training,
             depth_context=depth_context,
-            enable_b_inf=getattr(self.config, "infinite_water_enabled", False),
+            enable_b_inf=self._b_inf_requires_head(),
+            b_inf_mode=self._effective_b_inf_mode(),
+            b_inf_residual_scale=getattr(self.config, "b_inf_residual_scale", 0.02),
         )
 
     def _uses_medium_depth_context(self) -> bool:
@@ -993,6 +1047,53 @@ class WaterSplattingModel(Model):
             return (depth / scale).clamp(0.0, 2.0)
 
         return torch.zeros_like(depth)
+
+    def _camera_index_from_outputs(self, outputs: Dict[str, torch.Tensor]) -> Optional[int]:
+        camera_index = outputs.get("camera_index")
+        if camera_index is None:
+            return None
+        return int(camera_index.detach().cpu().item())
+
+    def _load_backscatter_region_mask(
+        self,
+        *,
+        outputs: Dict[str, torch.Tensor],
+        key: str,
+        target: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        mask_dir = getattr(self.config, "backscatter_region_mask_dir", None)
+        if not mask_dir:
+            return None
+        image_idx = self._camera_index_from_outputs(outputs)
+        if image_idx is None:
+            return None
+
+        cache_key = (str(mask_dir), image_idx, key)
+        if cache_key not in self._backscatter_mask_cache:
+            path = Path(mask_dir) / f"view_{image_idx:04d}_regions.pt"
+            if not path.exists():
+                self._backscatter_mask_cache[cache_key] = None
+            else:
+                payload = torch.load(path, map_location="cpu")
+                mask = payload.get(key) if isinstance(payload, dict) else None
+                if mask is None:
+                    self._backscatter_mask_cache[cache_key] = None
+                else:
+                    if mask.ndim == 2:
+                        mask = mask[..., None]
+                    self._backscatter_mask_cache[cache_key] = mask.bool().cpu()
+
+        mask_cpu = self._backscatter_mask_cache[cache_key]
+        if mask_cpu is None:
+            return None
+        mask = mask_cpu.to(device=target.device, dtype=target.dtype)
+        if mask.shape[:2] != target.shape[:2]:
+            mask = F.interpolate(
+                mask.permute(2, 0, 1)[None],
+                size=target.shape[:2],
+                mode="nearest",
+            )[0].permute(1, 2, 0)
+        return mask.clamp(0.0, 1.0)
 
     def _m2_ramp_weight(self, weight: float) -> float:
         if weight <= 0.0:
@@ -1220,6 +1321,13 @@ class WaterSplattingModel(Model):
             print("Called get_outputs with not a camera")
             return {}
         assert camera.shape[0] == 1, "Only one camera at a time"
+        camera_index: Optional[int] = None
+        if camera.metadata is not None and "cam_idx" in camera.metadata:
+            camera_index_value = camera.metadata["cam_idx"]
+            if torch.is_tensor(camera_index_value):
+                camera_index = int(camera_index_value.detach().cpu().reshape(-1)[0].item())
+            else:
+                camera_index = int(camera_index_value)
         if self._cleanup_enabled() and self.training:
             self.cleanup_current_alpha = None
             self.cleanup_current_ownership = None
@@ -1457,6 +1565,15 @@ class WaterSplattingModel(Model):
         tail_weight_last = render.final_transmittance * torch.exp(-medium_bs * render.last_depth)
         tail_medium_original = tail_weight_last * medium_rgb
         rgb_medium_finite = render.rgb_medium - tail_medium_original
+        b_inf_mode = self._effective_b_inf_mode()
+        b_inf = medium.b_inf
+        rgb_tail = tail_medium_original
+        if b_inf_mode != "implicit":
+            if b_inf is None:
+                raise RuntimeError(f"b_inf_mode='{b_inf_mode}' requires a B_inf output")
+            rgb_tail = tail_weight_last * b_inf
+            if not getattr(self.config, "infinite_water_enabled", False):
+                rgb = render.rgb_object + rgb_medium_finite + rgb_tail
         hit_q_alpha = torch.sigmoid(
             (render.accumulation - self.config.infinite_water_hit_alpha_threshold)
             / max(self.config.infinite_water_hit_alpha_temp, 1e-6)
@@ -1467,13 +1584,13 @@ class WaterSplattingModel(Model):
         hit_confidence = (hit_q_alpha * hit_q_conc).clamp(0.0, 1.0)
         ownership = None
         if getattr(self.config, "infinite_water_enabled", False):
-            if medium.b_inf is None:
+            if b_inf is None:
                 raise RuntimeError("infinite_water_enabled=True requires medium.b_inf output")
             ownership = compute_infinite_water_ownership(
                 accumulation=render.accumulation,
                 depth=render.depth,
                 rgb_near=render.rgb,
-                b_inf=medium.b_inf,
+                b_inf=b_inf,
                 mode=self.config.infinite_water_ownership_mode,
                 detach_evidence=self.config.infinite_water_detach_evidence,
                 alpha_power=self.config.infinite_water_alpha_power,
@@ -1489,7 +1606,7 @@ class WaterSplattingModel(Model):
                 j_object_raw = j_gaussian_raw
             elif compose_mode == "rgb_mix":
                 m_obj_eff = 1.0 - ownership.m_inf_eff
-                rgb = m_obj_eff * render.rgb + ownership.m_inf_eff * medium.b_inf
+                rgb = m_obj_eff * render.rgb + ownership.m_inf_eff * b_inf
                 rgb_clear = m_obj_eff * rgb_clear
                 j_object_raw = m_obj_eff * j_gaussian_raw
             elif compose_mode == "tail_approx":
@@ -1497,10 +1614,10 @@ class WaterSplattingModel(Model):
                     tail_gate = (1.0 - render.accumulation).detach().clamp(0.0, 1.0)
                 else:
                     tail_gate = torch.ones_like(render.accumulation)
-                rgb = render.rgb + ownership.m_inf * tail_gate * (medium.b_inf - medium_rgb)
+                rgb = render.rgb + ownership.m_inf * tail_gate * (b_inf - medium_rgb)
                 j_object_raw = (1.0 - ownership.m_inf_eff) * j_gaussian_raw
             elif compose_mode == "closed_tail":
-                tail_color = (1.0 - ownership.m_inf_eff) * medium_rgb + ownership.m_inf_eff * medium.b_inf
+                tail_color = (1.0 - ownership.m_inf_eff) * medium_rgb + ownership.m_inf_eff * b_inf
                 rgb = render.rgb_object + rgb_medium_finite + tail_weight_last * tail_color
                 j_object_raw = j_gaussian_raw
             else:
@@ -1574,11 +1691,20 @@ class WaterSplattingModel(Model):
             "rgb_medium_finite": rgb_medium_finite,
             "tail_weight_last": tail_weight_last,
             "tail_medium_original": tail_medium_original,
+            "rgb_tail": rgb_tail,
+            "rgb_implicit_tail": render.rgb,
             "pred_image": rgb,
             "medium_rgb": medium_rgb,
             "medium_bs": medium_bs,
             "medium_attn": medium_attn,
         }
+        if camera_index is not None:
+            outputs["camera_index"] = torch.tensor(float(camera_index), device=self.device)
+        if b_inf is not None:
+            outputs["b_inf"] = b_inf
+            outputs["b_inf_minus_A_abs"] = torch.abs(b_inf - medium_rgb)
+            if medium.b_inf_residual is not None:
+                outputs["b_inf_residual"] = medium.b_inf_residual
         if dual_color is not None and dual_render is not None:
             outputs["dual_color_active_sh_degree"] = torch.tensor(float(n), device=self.device)
             outputs["dual_color_visible_mask"] = visible_mask.detach()
@@ -1599,7 +1725,6 @@ class WaterSplattingModel(Model):
             outputs["appearance_low_trans_weight"] = low_trans_weight
             outputs["appearance_pixel_low_trans_weight"] = pixel_low_trans_weight
         if getattr(self.config, "infinite_water_enabled", False):
-            outputs["b_inf"] = medium.b_inf
             outputs["m_inf"] = ownership.m_inf
             outputs["m_inf_eff"] = ownership.m_inf_eff
             outputs["m_support"] = ownership.m_inf
@@ -1656,6 +1781,13 @@ class WaterSplattingModel(Model):
             metrics_dict[f"medium_rgb_{i}"] = outputs["medium_rgb"][:, :, i].mean()
             if "b_inf" in outputs:
                 metrics_dict[f"b_inf_{i}"] = outputs["b_inf"][:, :, i].mean()
+        if "b_inf_minus_A_abs" in outputs:
+            metrics_dict["b_inf_minus_A_abs_mean"] = outputs["b_inf_minus_A_abs"].mean()
+            metrics_dict["b_inf_minus_A_abs_max"] = outputs["b_inf_minus_A_abs"].max()
+        if "rgb_implicit_tail" in outputs:
+            rgb_abs = torch.abs(outputs["pred_image"] - outputs["rgb_implicit_tail"])
+            metrics_dict["backscatter_closure_rgb_abs_mean"] = rgb_abs.mean()
+            metrics_dict["backscatter_closure_rgb_abs_max"] = rgb_abs.max()
         if "m_inf" in outputs:
             metrics_dict["m_inf_mean"] = outputs["m_inf"].mean()
             metrics_dict["m_inf_eff_mean"] = outputs["m_inf_eff"].mean()
@@ -1736,6 +1868,39 @@ class WaterSplattingModel(Model):
                 ssim_metric=self.ssim,
             ),
         }
+
+        bg_weight = self._backscatter_ramp_weight(getattr(self.config, "lambda_background_water_color", 0.0))
+        if bg_weight > 0.0 and "b_inf" in outputs:
+            bg_mask = self._load_backscatter_region_mask(
+                outputs=outputs,
+                key=getattr(self.config, "background_water_mask_key", "water"),
+                target=gt_img,
+            )
+            if bg_mask is not None and bg_mask.sum() > 0:
+                loss_dict["background_water_color_loss"] = bg_weight * (
+                    bg_mask * torch.abs(outputs["b_inf"] - gt_img)
+                ).sum() / (bg_mask.sum().clamp_min(1e-6) * 3.0)
+
+        fg_weight = self._backscatter_ramp_weight(
+            getattr(self.config, "lambda_foreground_transmission_reconstruction", 0.0)
+        )
+        if fg_weight > 0.0:
+            fg_mask = self._load_backscatter_region_mask(
+                outputs=outputs,
+                key=getattr(self.config, "foreground_water_mask_key", "object"),
+                target=gt_img,
+            )
+            if fg_mask is not None and fg_mask.sum() > 0:
+                transmission = torch.exp(-(outputs["medium_attn"] * outputs["depth"]).clamp_min(0.0)).clamp(0.0, 1.0)
+                gamma = float(getattr(self.config, "foreground_transmission_gamma", 1.0))
+                max_weight = float(getattr(self.config, "foreground_transmission_max_weight", 4.0))
+                weights = 1.0 + fg_weight * fg_mask * torch.pow((1.0 - transmission).clamp(0.0, 1.0), gamma)
+                weights = weights.clamp(1.0, max_weight)
+                if getattr(self.config, "foreground_transmission_detach_weight", True):
+                    weights = weights.detach()
+                loss_dict["foreground_transmission_reconstruction_loss"] = (
+                    (weights - 1.0) * torch.abs(pred_img - gt_img)
+                ).mean()
 
         if getattr(self.config, "infinite_water_enabled", False) and "m_inf" in outputs:
             support = outputs["m_inf"].detach()
@@ -1921,6 +2086,9 @@ class WaterSplattingModel(Model):
             images_dict["dual_color_j_residual_abs"] = outputs["dual_color_j_residual_raw"].abs().clamp(0.0, 1.0)
         if "b_inf" in outputs:
             images_dict["b_inf"] = outputs["b_inf"]
+            images_dict["rgb_tail"] = outputs["rgb_tail"].clamp(0.0, 1.0)
+            images_dict["b_inf_minus_A_abs"] = outputs["b_inf_minus_A_abs"].clamp(0.0, 1.0)
+        if "m_inf" in outputs:
             images_dict["m_inf"] = outputs["m_inf"].expand_as(outputs["rgb"])
             images_dict["m_inf_eff"] = outputs["m_inf_eff"].expand_as(outputs["rgb"])
         return metrics_dict, images_dict
