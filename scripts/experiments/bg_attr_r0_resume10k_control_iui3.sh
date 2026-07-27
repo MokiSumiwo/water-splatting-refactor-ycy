@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_DIR="/mnt/new/home_old/ycy/water-splatting-refactor"
 MASK_DIR="${MASK_DIR:-${REPO_DIR}/common_masks/high_precision_water_m1_core_y025_nsorder_iui3_redsea_20260726}"
-BRANCH_CKPT="${BRANCH_CKPT:-${REPO_DIR}/outputs/bg_attr_n1_precise_raw_binf_iui3_uninterrupted_control/water-splatting/bg_attr_n1_precise_raw_binf_iui3_uninterrupted_control_20260727_n1_uninterrupted_control/nerfstudio_models/step-000009999.ckpt}"
+BRANCH_CKPT="${BRANCH_CKPT:-${REPO_DIR}/outputs/bg_attr_n1_precise_raw_binf_iui3_uninterrupted_control/water-splatting/bg_attr_n1_precise_raw_binf_iui3_uninterrupted_control_20260727_n1_uninterrupted_control/nerfstudio_models/step-000010000.ckpt}"
 
 exec env \
   GPU="${GPU:-7}" \
@@ -14,9 +14,9 @@ exec env \
   LOG_ROOT="${LOG_ROOT:-${REPO_DIR}/logs}" \
   EXPERIMENT_NAME="${EXPERIMENT_NAME:-bg_attr_r0_resume10k_control_iui3_15000}" \
   STAMP="${STAMP:-20260727_r0_resume10k_control}" \
-  MAX_NUM_ITERATIONS="${MAX_NUM_ITERATIONS:-5001}" \
+  MAX_NUM_ITERATIONS="${MAX_NUM_ITERATIONS:-5000}" \
   MODEL_NUM_STEPS="${MODEL_NUM_STEPS:-15000}" \
-  STEPS_PER_SAVE="${STEPS_PER_SAVE:-5001}" \
+  STEPS_PER_SAVE="${STEPS_PER_SAVE:-5000}" \
   SAVE_ONLY_LATEST_CHECKPOINT="${SAVE_ONLY_LATEST_CHECKPOINT:-True}" \
   LOAD_CHECKPOINT="${LOAD_CHECKPOINT:-${BRANCH_CKPT}}" \
   SEED="${SEED:-42}" \

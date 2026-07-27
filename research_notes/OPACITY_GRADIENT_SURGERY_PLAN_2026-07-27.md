@@ -74,10 +74,10 @@ seed=42
 Expected checkpoint:
 
 ```text
-outputs/bg_attr_n1_precise_raw_binf_iui3_uninterrupted_control/water-splatting/bg_attr_n1_precise_raw_binf_iui3_uninterrupted_control_20260727_n1_uninterrupted_control/nerfstudio_models/step-000009999.ckpt
+outputs/bg_attr_n1_precise_raw_binf_iui3_uninterrupted_control/water-splatting/bg_attr_n1_precise_raw_binf_iui3_uninterrupted_control_20260727_n1_uninterrupted_control/nerfstudio_models/step-000010000.ckpt
 ```
 
-Then run R0 from that exact step-9999 checkpoint:
+Then run R0 from that exact step-10000 checkpoint:
 
 ```bash
 GPU=7 \
@@ -106,10 +106,10 @@ Generate candidates from train views only:
 CUDA_VISIBLE_DEVICES=6 /opt/anaconda3/envs/water_splatting/bin/python \
   scripts/diagnostics/diagnose_gaussian_region_sensitivity.py \
   --load-config outputs/bg_attr_n1_precise_raw_binf_iui3_uninterrupted_control/water-splatting/bg_attr_n1_precise_raw_binf_iui3_uninterrupted_control_20260727_n1_uninterrupted_control/config.yml \
-  --load-step 9999 \
+  --load-step 10000 \
   --mask-dir common_masks/high_precision_water_m1_core_y025_nsorder_iui3_redsea_20260726 \
-  --output-json renders/gradient_surgery_20260727/train_region_sensitivity_step9999.json \
-  --candidate-output-prefix renders/gradient_surgery_20260727/candidate_mask_step9999 \
+  --output-json renders/gradient_surgery_20260727/train_region_sensitivity_step10000.json \
+  --candidate-output-prefix renders/gradient_surgery_20260727/candidate_mask_step10000 \
   --split train \
   --max-images 25 \
   --enable-clear-proxy \
@@ -125,8 +125,8 @@ CUDA_VISIBLE_DEVICES=6 /opt/anaconda3/envs/water_splatting/bin/python \
 Candidate output:
 
 ```text
-renders/gradient_surgery_20260727/candidate_mask_step9999.pt
-renders/gradient_surgery_20260727/candidate_mask_step9999.json
+renders/gradient_surgery_20260727/candidate_mask_step10000.pt
+renders/gradient_surgery_20260727/candidate_mask_step10000.json
 ```
 
 Selection rule:
@@ -143,7 +143,7 @@ Eval views may be used only for validation, not for training candidate indices.
 
 ## Priority 2: Opacity Gradient Surgery
 
-Run from the shared train-view step-9999 checkpoint and candidate mask.
+Run from the shared train-view step-10000 checkpoint and candidate mask.
 
 G1:
 
@@ -164,7 +164,7 @@ Shared config:
 ```text
 lambda_background_clear_chroma=0.002
 background_gradient_surgery_enabled=True
-background_candidate_mask_path=renders/gradient_surgery_20260727/candidate_mask_step9999.pt
+background_candidate_mask_path=renders/gradient_surgery_20260727/candidate_mask_step10000.pt
 background_opacity_decrease_multiplier={2.0,4.0}
 background_opacity_increase_multiplier=1.0
 background_gradient_surgery_start_step=10000
