@@ -341,7 +341,7 @@ class WaterSplattingModelConfig(ModelConfig):
     """Multiplier for positive opacity-logit gradients on background candidates."""
     background_opacity_increase_multiplier: float = 1.0
     """Multiplier for negative opacity-logit gradients on background candidates."""
-    background_gradient_surgery_start_step: int = 10000
+    background_gradient_surgery_start_step: int = 10001
     """First step where background gradient surgery may modify opacity gradients."""
     background_gradient_surgery_min_view_count: int = 5
     """Minimum candidate train-view support when loading candidate masks with view_count."""
@@ -567,6 +567,9 @@ class WaterSplattingModel(Model):
         self._background_candidate_mask = None
         self._background_candidate_path = None
         self._background_candidate_num_points = 0
+        self._background_gradient_hook_handle = None
+        self._background_gradient_hook_param_id = None
+        self._background_gradient_surgery_last_log_step = -1
         self._warned_background_clear_gaussian_dead_grad = False
 
         self.crop_box: Optional[OrientedBox] = None
@@ -771,7 +774,6 @@ class WaterSplattingModel(Model):
                 newradii / float(max(self.last_size[0], self.last_size[1])),
             )
             self._accumulate_cleanup_evidence(visible_mask)
-            self._apply_background_gradient_surgery()
 
     def set_crop(self, crop_box: Optional[OrientedBox]):
         self.crop_box = crop_box
@@ -999,6 +1001,7 @@ class WaterSplattingModel(Model):
 
     def step_cb(self, step):
         self.step = step
+        self._ensure_background_gradient_surgery_hook()
 
     def get_gaussian_param_groups(self) -> Dict[str, List[Parameter]]:
         # Here we explicitly use the means, scales as parameters so that the user can override this function and
@@ -1167,30 +1170,32 @@ class WaterSplattingModel(Model):
         )
         return mask
 
-    def _apply_background_gradient_surgery(self) -> None:
+    def _background_gradient_surgery_active(self) -> bool:
         if not getattr(self.config, "background_gradient_surgery_enabled", False):
-            return
-        start = int(getattr(self.config, "background_gradient_surgery_start_step", 10000))
-        if self.step < start:
-            return
-        if self.opacities.grad is None:
-            return
-        mask = self._load_background_candidate_mask().reshape(-1, 1)
-        if mask.numel() != self.opacities.grad.numel():
-            raise ValueError("candidate mask shape does not match opacities.grad")
+            return False
+        start = int(getattr(self.config, "background_gradient_surgery_start_step", 10001))
+        return self.step >= start
 
+    def _background_gradient_surgery_hook(self, grad: torch.Tensor) -> torch.Tensor:
+        if not self._background_gradient_surgery_active():
+            return grad
+        mask = self._load_background_candidate_mask().reshape(-1, 1).to(device=grad.device)
+        if mask.numel() != grad.numel():
+            raise ValueError(
+                f"candidate mask shape {tuple(mask.shape)} does not match "
+                f"opacity gradient shape {tuple(grad.shape)}"
+            )
         decrease_mult = float(getattr(self.config, "background_opacity_decrease_multiplier", 1.0))
         increase_mult = float(getattr(self.config, "background_opacity_increase_multiplier", 1.0))
-        grad = self.opacities.grad
         positive = grad > 0.0
         negative = grad < 0.0
         multiplier = torch.ones_like(grad)
         multiplier = torch.where(mask & positive, torch.full_like(multiplier, decrease_mult), multiplier)
         multiplier = torch.where(mask & negative, torch.full_like(multiplier, increase_mult), multiplier)
-        grad.mul_(multiplier)
 
-        if self.step % 500 == 0:
-            candidate_grad = grad[mask].detach().reshape(-1)
+        if self.step % 500 == 0 and self._background_gradient_surgery_last_log_step != self.step:
+            adjusted = grad * multiplier
+            candidate_grad = adjusted[mask].detach().reshape(-1)
             CONSOLE.log(
                 "Background gradient surgery step="
                 f"{self.step} candidates={int(mask.sum().item())} "
@@ -1198,6 +1203,19 @@ class WaterSplattingModel(Model):
                 f"opacity_increase_x={increase_mult:.3g} "
                 f"candidate_grad_abs_mean={float(candidate_grad.abs().mean().item()) if candidate_grad.numel() else 0.0:.3e}"
             )
+            self._background_gradient_surgery_last_log_step = int(self.step)
+        return grad * multiplier
+
+    def _ensure_background_gradient_surgery_hook(self) -> None:
+        if not getattr(self.config, "background_gradient_surgery_enabled", False):
+            return
+        param_id = id(self.opacities)
+        if self._background_gradient_hook_handle is not None and self._background_gradient_hook_param_id == param_id:
+            return
+        if self._background_gradient_hook_handle is not None:
+            self._background_gradient_hook_handle.remove()
+        self._background_gradient_hook_handle = self.opacities.register_hook(self._background_gradient_surgery_hook)
+        self._background_gradient_hook_param_id = param_id
 
     def _should_prepare_densification_regions(self) -> bool:
         if not getattr(self.config, "backscatter_region_mask_dir", None):

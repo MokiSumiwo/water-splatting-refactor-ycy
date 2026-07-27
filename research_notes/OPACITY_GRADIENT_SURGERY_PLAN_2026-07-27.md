@@ -167,7 +167,7 @@ background_gradient_surgery_enabled=True
 background_candidate_mask_path=renders/gradient_surgery_20260727/candidate_mask_step10000.pt
 background_opacity_decrease_multiplier={2.0,4.0}
 background_opacity_increase_multiplier=1.0
-background_gradient_surgery_start_step=10000
+background_gradient_surgery_start_step=10001
 background_gradient_surgery_min_view_count=5
 ```
 
@@ -343,4 +343,4 @@ GPU=9 scripts/experiments/bg_attr_g2_opacity_surgery_x4_full_iui3.sh
 
 These runs avoid resume RNG mismatch. The candidate mask is fixed from the N1
 step-10000 train-view attribution diagnostic, and intervention starts at step
-10000.
+10001.
