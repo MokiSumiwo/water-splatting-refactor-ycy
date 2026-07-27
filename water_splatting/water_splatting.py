@@ -20,6 +20,7 @@ Python package for combining 3DGS with volume rendering to enable water/fog mode
 from __future__ import annotations
 
 import math
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Type, Union
@@ -39,7 +40,9 @@ from water_splatting.fields import (
 from water_splatting.losses import (
     dc_channel_balance_loss,
     dc_softclip_loss,
+    effective_background_mask,
     low_transmission_weights,
+    masked_rgb_l1_loss,
     medium_attenuation_order_loss,
     reconstruction_loss,
     sh_residual_mean_anchor_loss,
@@ -278,6 +281,42 @@ class WaterSplattingModelConfig(ModelConfig):
     """First step where backscatter-closure auxiliary losses are active."""
     backscatter_loss_ramp_steps: int = 0
     """Linear ramp length for backscatter-closure auxiliary losses."""
+    lambda_background_medium_render: float = 0.0
+    """Renderer-consistent background loss on rgb_medium_finite + rgb_tail."""
+    lambda_background_tail_render: float = 0.0
+    """Renderer-consistent background loss on rgb_tail only."""
+    background_render_loss_start_step: int = 0
+    """First step where renderer-consistent background losses are active."""
+    background_render_loss_ramp_steps: int = 0
+    """Linear ramp length for renderer-consistent background losses."""
+    lambda_background_clear_gaussian: float = 0.0
+    """Background clear-Gaussian suppression loss weight."""
+    background_clear_loss_start_step: int = 3000
+    """First step where background clear-Gaussian loss is active."""
+    background_clear_loss_ramp_steps: int = 3000
+    """Linear ramp length for background clear-Gaussian loss."""
+    background_clear_use_raw_j: bool = True
+    """Use raw unclamped J_gaussian for background clear-Gaussian suppression."""
+    background_clear_exclude_boundary: bool = True
+    """Exclude boundary pixels from background clear-Gaussian suppression."""
+    background_clear_hit_exclusion_threshold: float = -1.0
+    """If >=0, exclude background pixels whose hit_confidence is above this threshold."""
+    background_densification_enabled: bool = False
+    """Enable background region weighting for densification gradient accumulation."""
+    background_densification_weight: float = 1.0
+    """Target densification gradient weight for high-precision background-water pixels."""
+    uncertain_densification_weight: float = 0.5
+    """Densification gradient weight for uncertain pixels."""
+    background_densification_start_step: int = 3000
+    """First step where background densification weighting can ramp."""
+    background_densification_ramp_steps: int = 3000
+    """Linear ramp length for background densification weighting."""
+    background_densification_diagnostic_only: bool = True
+    """If True, log region diagnostics but do not change densification gradients."""
+    densification_region_log_path: Optional[str] = None
+    """Optional JSONL path for per-region densification diagnostics."""
+    opacity_accumulation_diagnostic_enabled: bool = False
+    """Retain/log opacity, scale, and sampled accumulation gradient diagnostics."""
     gaussian_cleanup_enabled: bool = False
     """M3: enable contribution-aware Gaussian cleanup diagnostics/pruning."""
     gaussian_cleanup_dry_run: bool = True
@@ -492,6 +531,10 @@ class WaterSplattingModel(Model):
         self.cleanup_last_stats = None
         self.last_active_sh_degree = 0
         self._backscatter_mask_cache: Dict[Tuple[str, int, str], Optional[torch.Tensor]] = {}
+        self.current_densification_region_weight = None
+        self.current_densification_region_samples = None
+        self.current_densification_accumulation_map = None
+        self.last_densification_region_stats = None
 
         self.crop_box: Optional[OrientedBox] = None
         if self.config.background_color == "random":
@@ -659,16 +702,32 @@ class WaterSplattingModel(Model):
             else:
                 assert self.xys.grad is not None
                 grads = self.xys.grad.detach().norm(dim=-1)
+            weighted_grads = grads
+            if (
+                getattr(self.config, "background_densification_enabled", False)
+                and not getattr(self.config, "background_densification_diagnostic_only", True)
+                and self.current_densification_region_weight is not None
+                and self.current_densification_region_weight.shape[0] == grads.shape[0]
+            ):
+                weighted_grads = grads * self.current_densification_region_weight.to(
+                    device=grads.device,
+                    dtype=grads.dtype,
+                )
             # print(f"grad norm min {grads.min().item()} max {grads.max().item()} mean {grads.mean().item()} size {grads.shape}")
             if self.xys_grad_norm is None:
-                self.xys_grad_norm = grads
+                self.xys_grad_norm = weighted_grads
                 self.depths_accum = self.depths
                 self.vis_counts = torch.ones_like(self.xys_grad_norm)
             else:
                 assert self.vis_counts is not None
                 self.vis_counts[visible_mask] = self.vis_counts[visible_mask] + 1
-                self.xys_grad_norm[visible_mask] = grads[visible_mask] + self.xys_grad_norm[visible_mask]
+                self.xys_grad_norm[visible_mask] = weighted_grads[visible_mask] + self.xys_grad_norm[visible_mask]
                 self.depths_accum[visible_mask] = self.depths[visible_mask] + self.depths_accum[visible_mask]
+            self._record_densification_region_diagnostics(
+                visible_mask=visible_mask,
+                raw_grads=grads,
+                weighted_grads=weighted_grads,
+            )
 
             # update the max screen size, as a ratio of number of pixels
             if self.max_2Dsize is None:
@@ -984,6 +1043,408 @@ class WaterSplattingModel(Model):
         if ramp <= 0:
             return float(weight)
         return float(weight) * min((self.step - start) / max(float(ramp), 1.0), 1.0)
+
+    def _ramped_weight(self, weight: float, start: int, ramp: int) -> float:
+        if weight <= 0.0:
+            return 0.0
+        if self.step < start:
+            return 0.0
+        if ramp <= 0:
+            return float(weight)
+        return float(weight) * min((self.step - start) / max(float(ramp), 1.0), 1.0)
+
+    def _background_render_ramp_weight(self, weight: float) -> float:
+        return self._ramped_weight(
+            weight,
+            int(getattr(self.config, "background_render_loss_start_step", 0)),
+            int(getattr(self.config, "background_render_loss_ramp_steps", 0)),
+        )
+
+    def _background_clear_ramp_weight(self, weight: float) -> float:
+        return self._ramped_weight(
+            weight,
+            int(getattr(self.config, "background_clear_loss_start_step", 3000)),
+            int(getattr(self.config, "background_clear_loss_ramp_steps", 3000)),
+        )
+
+    def _background_densification_effective_weight(self) -> float:
+        target = float(getattr(self.config, "background_densification_weight", 1.0))
+        start = int(getattr(self.config, "background_densification_start_step", 3000))
+        ramp = int(getattr(self.config, "background_densification_ramp_steps", 3000))
+        if self.step < start:
+            return 1.0
+        if ramp <= 0:
+            return target
+        progress = min((self.step - start) / max(float(ramp), 1.0), 1.0)
+        return 1.0 + (target - 1.0) * progress
+
+    def _should_prepare_densification_regions(self) -> bool:
+        if not getattr(self.config, "backscatter_region_mask_dir", None):
+            return False
+        return bool(
+            getattr(self.config, "background_densification_enabled", False)
+            or getattr(self.config, "background_densification_diagnostic_only", True)
+        )
+
+    def _load_region_mask_or_zeros(
+        self,
+        *,
+        outputs: Dict[str, torch.Tensor],
+        key: str,
+        target: torch.Tensor,
+    ) -> torch.Tensor:
+        mask = self._load_backscatter_region_mask(outputs=outputs, key=key, target=target)
+        if mask is None:
+            return torch.zeros(*target.shape[:2], 1, device=target.device, dtype=target.dtype)
+        return mask.to(device=target.device, dtype=target.dtype).clamp(0.0, 1.0)
+
+    def _prepare_densification_region_state(
+        self,
+        *,
+        outputs: Dict[str, torch.Tensor],
+        height: int,
+        width: int,
+    ) -> None:
+        self.current_densification_region_weight = None
+        self.current_densification_region_samples = None
+        self.current_densification_accumulation_map = None
+        if not self.training or not self._should_prepare_densification_regions():
+            return
+        if "camera_index" not in outputs:
+            return
+
+        target = outputs["rgb"]
+        water_key = getattr(self.config, "background_water_mask_key", "water")
+        foreground_key = getattr(self.config, "foreground_water_mask_key", "object")
+        water = self._load_region_mask_or_zeros(outputs=outputs, key=water_key, target=target)
+        foreground = self._load_region_mask_or_zeros(outputs=outputs, key=foreground_key, target=target)
+        boundary = self._load_region_mask_or_zeros(outputs=outputs, key="boundary", target=target)
+        uncertain = self._load_region_mask_or_zeros(outputs=outputs, key="uncertain", target=target)
+
+        bg_weight = self._background_densification_effective_weight()
+        uncertain_weight = float(getattr(self.config, "uncertain_densification_weight", 0.5))
+        weight_map = torch.ones_like(water)
+        weight_map = torch.where(water > 0.5, torch.full_like(weight_map, bg_weight), weight_map)
+        weight_map = torch.where(uncertain > 0.5, torch.full_like(weight_map, uncertain_weight), weight_map)
+        weight_map = torch.where((foreground > 0.5) | (boundary > 0.5), torch.ones_like(weight_map), weight_map)
+
+        self.current_densification_region_weight = sample_pixel_map_at_gaussians(
+            weight_map.detach(),
+            self.xys.detach(),
+            self.radii.detach(),
+            height,
+            width,
+        )
+        self.current_densification_region_samples = {
+            "water": sample_pixel_map_at_gaussians(water.detach(), self.xys.detach(), self.radii.detach(), height, width),
+            "object": sample_pixel_map_at_gaussians(
+                foreground.detach(), self.xys.detach(), self.radii.detach(), height, width
+            ),
+            "boundary": sample_pixel_map_at_gaussians(
+                boundary.detach(), self.xys.detach(), self.radii.detach(), height, width
+            ),
+            "uncertain": sample_pixel_map_at_gaussians(
+                uncertain.detach(), self.xys.detach(), self.radii.detach(), height, width
+            ),
+            "weight": self.current_densification_region_weight,
+        }
+        if getattr(self.config, "opacity_accumulation_diagnostic_enabled", False):
+            if "accumulation" in outputs:
+                accumulation = outputs["accumulation"]
+                self.current_densification_region_samples["sampled_accumulation"] = sample_pixel_map_at_gaussians(
+                    accumulation.detach(), self.xys.detach(), self.radii.detach(), height, width
+                )
+                if accumulation.requires_grad:
+                    accumulation.retain_grad()
+                    self.current_densification_accumulation_map = accumulation
+            if "final_transmittance" in outputs:
+                self.current_densification_region_samples["sampled_final_transmittance"] = (
+                    sample_pixel_map_at_gaussians(
+                        outputs["final_transmittance"].detach(),
+                        self.xys.detach(),
+                        self.radii.detach(),
+                        height,
+                        width,
+                    )
+                )
+            if "J_gaussian_raw" in outputs:
+                self.current_densification_region_samples["sampled_j_gaussian_raw_luma"] = (
+                    sample_pixel_map_at_gaussians(
+                        outputs["J_gaussian_raw"].detach().mean(dim=-1, keepdim=True),
+                        self.xys.detach(),
+                        self.radii.detach(),
+                        height,
+                        width,
+                    )
+                )
+            if "rgb_tail" in outputs:
+                self.current_densification_region_samples["sampled_rgb_tail_luma"] = sample_pixel_map_at_gaussians(
+                    outputs["rgb_tail"].detach().mean(dim=-1, keepdim=True),
+                    self.xys.detach(),
+                    self.radii.detach(),
+                    height,
+                    width,
+                )
+        outputs["background_region_mask"] = water
+        outputs["densification_region_weight"] = weight_map
+
+    def _tensor_region_stats(self, values: torch.Tensor) -> Dict[str, float]:
+        values = values.detach().float().reshape(-1)
+        values = values[torch.isfinite(values)]
+        if values.numel() == 0:
+            return {"mean": 0.0, "median": 0.0, "p90": 0.0, "p95": 0.0}
+        return {
+            "mean": float(values.mean().item()),
+            "median": float(torch.quantile(values, 0.50).item()),
+            "p90": float(torch.quantile(values, 0.90).item()),
+            "p95": float(torch.quantile(values, 0.95).item()),
+        }
+
+    def _signed_tensor_region_stats(self, values: torch.Tensor) -> Dict[str, float]:
+        values = values.detach().float().reshape(-1)
+        values = values[torch.isfinite(values)]
+        if values.numel() == 0:
+            return {
+                "mean": 0.0,
+                "abs_mean": 0.0,
+                "abs_median": 0.0,
+                "abs_p90": 0.0,
+                "abs_p95": 0.0,
+                "positive_ratio": 0.0,
+                "negative_ratio": 0.0,
+                "decrease_pressure_mean": 0.0,
+                "increase_pressure_mean": 0.0,
+            }
+        abs_values = values.abs()
+        positive = values > 0
+        negative = values < 0
+        return {
+            "mean": float(values.mean().item()),
+            "abs_mean": float(abs_values.mean().item()),
+            "abs_median": float(torch.quantile(abs_values, 0.50).item()),
+            "abs_p90": float(torch.quantile(abs_values, 0.90).item()),
+            "abs_p95": float(torch.quantile(abs_values, 0.95).item()),
+            "positive_ratio": float(positive.float().mean().item()),
+            "negative_ratio": float(negative.float().mean().item()),
+            "decrease_pressure_mean": float(torch.relu(values).mean().item()),
+            "increase_pressure_mean": float(torch.relu(-values).mean().item()),
+        }
+
+    def _tensor_correlation(self, a: torch.Tensor, b: torch.Tensor) -> float:
+        a = a.detach().float().reshape(-1)
+        b = b.detach().float().reshape(-1)
+        finite = torch.isfinite(a) & torch.isfinite(b)
+        if finite.sum() < 2:
+            return 0.0
+        a = a[finite]
+        b = b[finite]
+        a = a - a.mean()
+        b = b - b.mean()
+        denom = torch.sqrt((a * a).mean() * (b * b).mean()).clamp_min(1e-12)
+        return float(((a * b).mean() / denom).item())
+
+    def _record_densification_region_diagnostics(
+        self,
+        *,
+        visible_mask: torch.Tensor,
+        raw_grads: torch.Tensor,
+        weighted_grads: torch.Tensor,
+    ) -> None:
+        if self.current_densification_region_samples is None:
+            self.last_densification_region_stats = None
+            return
+        final_step = max(int(getattr(self.config, "num_steps", 0)) - 1, 0)
+        if self.step % 500 != 0 and self.step != final_step:
+            return
+
+        visible = visible_mask.reshape(-1)
+        if visible.numel() != raw_grads.reshape(-1).numel():
+            return
+        scale_factor = 0.5 * float(max(self.last_size[0], self.last_size[1]))
+        raw_scaled = raw_grads.reshape(-1).detach().float() * scale_factor
+        weighted_scaled = weighted_grads.reshape(-1).detach().float() * scale_factor
+        opacity = torch.sigmoid(self.opacities.detach()).reshape(-1).float()
+        depth = self.depths.detach().reshape(-1).float()
+        scale = self.scales.detach().exp().max(dim=-1).values.reshape(-1).float()
+        opacity_grad_available = self.opacities.grad is not None and self.opacities.grad.numel() == opacity.numel()
+        if opacity_grad_available:
+            opacity_logit_grad = self.opacities.grad.detach().reshape(-1).float()
+        else:
+            opacity_logit_grad = torch.zeros_like(opacity)
+        opacity_alpha_grad = opacity_logit_grad / (opacity * (1.0 - opacity)).clamp_min(1e-6)
+        scale_grad_available = self.scales.grad is not None and self.scales.grad.shape[0] == raw_scaled.shape[0]
+        if scale_grad_available:
+            scale_grad_norm = self.scales.grad.detach().reshape(raw_scaled.shape[0], -1).float().norm(dim=-1)
+        else:
+            scale_grad_norm = torch.zeros_like(raw_scaled)
+        visibility_count = (
+            self.vis_counts.detach().reshape(-1).float()
+            if self.vis_counts is not None
+            else torch.ones_like(raw_scaled)
+        )
+        high_raw = raw_scaled > float(getattr(self.config, "densify_grad_thresh", 0.0008))
+        high_weighted = weighted_scaled > float(getattr(self.config, "densify_grad_thresh", 0.0008))
+        split_size = scale > float(getattr(self.config, "densify_size_thresh", 0.001))
+        split_raw = high_raw & split_size
+        dup_raw = high_raw & ~split_size
+        split_weighted = high_weighted & split_size
+        dup_weighted = high_weighted & ~split_size
+
+        samples = self.current_densification_region_samples
+        water = samples["water"].reshape(-1) > 0.5
+        obj = samples["object"].reshape(-1) > 0.5
+        boundary = samples["boundary"].reshape(-1) > 0.5
+        uncertain = samples["uncertain"].reshape(-1) > 0.5
+        regions = {
+            "water": water,
+            "object": obj,
+            "boundary": boundary,
+            "uncertain": uncertain,
+            "other": ~(water | obj | boundary | uncertain),
+        }
+        sampled_accumulation = samples.get("sampled_accumulation", torch.zeros_like(raw_scaled)).reshape(-1).float()
+        sampled_final_transmittance = samples.get(
+            "sampled_final_transmittance",
+            torch.zeros_like(raw_scaled),
+        ).reshape(-1).float()
+        sampled_j_luma = samples.get("sampled_j_gaussian_raw_luma", torch.zeros_like(raw_scaled)).reshape(-1).float()
+        sampled_tail_luma = samples.get("sampled_rgb_tail_luma", torch.zeros_like(raw_scaled)).reshape(-1).float()
+        accumulation_grad_available = False
+        sampled_accumulation_grad = torch.zeros_like(raw_scaled)
+        accumulation_map = self.current_densification_accumulation_map
+        if accumulation_map is not None and accumulation_map.grad is not None:
+            grad_map = accumulation_map.grad.detach()
+            sampled_accumulation_grad = sample_pixel_map_at_gaussians(
+                grad_map,
+                self.xys.detach(),
+                self.radii.detach(),
+                int(grad_map.shape[0]),
+                int(grad_map.shape[1]),
+            ).reshape(-1).float()
+            accumulation_grad_available = True
+
+        region_payload: Dict[str, Dict[str, Union[int, float, Dict[str, float]]]] = {}
+        for name, region in regions.items():
+            mask = visible & region
+            count = int(mask.sum().item())
+            denom = max(count, 1)
+            region_payload[name] = {
+                "visible_count": count,
+                "raw_grad": self._tensor_region_stats(raw_scaled[mask]),
+                "weighted_grad": self._tensor_region_stats(weighted_scaled[mask]),
+                "grad_gt_densify_thresh_ratio": float((high_raw & mask).sum().item() / denom),
+                "weighted_grad_gt_densify_thresh_ratio": float((high_weighted & mask).sum().item() / denom),
+                "split_candidate_count": int((split_raw & mask).sum().item()),
+                "duplicate_candidate_count": int((dup_raw & mask).sum().item()),
+                "weighted_split_candidate_count": int((split_weighted & mask).sum().item()),
+                "weighted_duplicate_candidate_count": int((dup_weighted & mask).sum().item()),
+                "mean_opacity": float(opacity[mask].mean().item()) if count else 0.0,
+                "mean_depth": float(depth[mask].mean().item()) if count else 0.0,
+                "mean_scale": float(scale[mask].mean().item()) if count else 0.0,
+                "mean_visibility_count": float(visibility_count[mask].mean().item()) if count else 0.0,
+                "opacity_logit_grad": self._signed_tensor_region_stats(opacity_logit_grad[mask]),
+                "opacity_alpha_grad": self._signed_tensor_region_stats(opacity_alpha_grad[mask]),
+                "scale_grad_norm": self._tensor_region_stats(scale_grad_norm[mask]),
+                "sampled_accumulation": self._tensor_region_stats(sampled_accumulation[mask]),
+                "sampled_final_transmittance": self._tensor_region_stats(sampled_final_transmittance[mask]),
+                "sampled_j_gaussian_raw_luma": self._tensor_region_stats(sampled_j_luma[mask]),
+                "sampled_rgb_tail_luma": self._tensor_region_stats(sampled_tail_luma[mask]),
+                "accumulation_grad": self._signed_tensor_region_stats(sampled_accumulation_grad[mask]),
+                "accumulation_opacity_grad_corr": self._tensor_correlation(
+                    sampled_accumulation[mask],
+                    opacity_logit_grad[mask],
+                )
+                if count
+                else 0.0,
+            }
+
+        visible_grad_sum = raw_scaled[visible].sum().clamp_min(1e-12)
+        bg_mask = visible & water
+        total_split = int((split_raw & visible).sum().item())
+        total_dup = int((dup_raw & visible).sum().item())
+        total_split_weighted = int((split_weighted & visible).sum().item())
+        total_dup_weighted = int((dup_weighted & visible).sum().item())
+        visible_opacity_abs = opacity_logit_grad[visible].abs().sum().clamp_min(1e-12)
+        visible_opacity_decrease = torch.relu(opacity_logit_grad[visible]).sum().clamp_min(1e-12)
+        visible_opacity_increase = torch.relu(-opacity_logit_grad[visible]).sum().clamp_min(1e-12)
+        visible_accum_abs = sampled_accumulation_grad[visible].abs().sum().clamp_min(1e-12)
+        visible_accum_decrease = torch.relu(sampled_accumulation_grad[visible]).sum().clamp_min(1e-12)
+        visible_accum_increase = torch.relu(-sampled_accumulation_grad[visible]).sum().clamp_min(1e-12)
+        payload: Dict[str, Union[int, float, str, bool, Dict[str, object]]] = {
+            "step": int(self.step),
+            "total_gaussians": int(self.num_points),
+            "visible_gaussians": int(visible.sum().item()),
+            "background_densification_enabled": bool(getattr(self.config, "background_densification_enabled", False)),
+            "background_densification_diagnostic_only": bool(
+                getattr(self.config, "background_densification_diagnostic_only", True)
+            ),
+            "background_densification_effective_weight": float(self._background_densification_effective_weight()),
+            "opacity_accumulation_diagnostic_enabled": bool(
+                getattr(self.config, "opacity_accumulation_diagnostic_enabled", False)
+            ),
+            "opacity_grad_available": bool(opacity_grad_available),
+            "scale_grad_available": bool(scale_grad_available),
+            "accumulation_grad_available": bool(accumulation_grad_available),
+            "regions": region_payload,
+            "background_gradient_fraction": float(raw_scaled[bg_mask].sum().item() / visible_grad_sum.item())
+            if bg_mask.any()
+            else 0.0,
+            "background_split_candidate_fraction": float((split_raw & bg_mask).sum().item() / max(total_split, 1)),
+            "background_duplicate_candidate_fraction": float((dup_raw & bg_mask).sum().item() / max(total_dup, 1)),
+            "background_weighted_split_candidate_fraction": float(
+                (split_weighted & bg_mask).sum().item() / max(total_split_weighted, 1)
+            ),
+            "background_weighted_duplicate_candidate_fraction": float(
+                (dup_weighted & bg_mask).sum().item() / max(total_dup_weighted, 1)
+            ),
+            "background_opacity_grad_abs_fraction": float(
+                opacity_logit_grad[bg_mask].abs().sum().item() / visible_opacity_abs.item()
+            )
+            if bg_mask.any() and opacity_grad_available
+            else 0.0,
+            "background_opacity_decrease_pressure_fraction": float(
+                torch.relu(opacity_logit_grad[bg_mask]).sum().item() / visible_opacity_decrease.item()
+            )
+            if bg_mask.any() and opacity_grad_available
+            else 0.0,
+            "background_opacity_increase_pressure_fraction": float(
+                torch.relu(-opacity_logit_grad[bg_mask]).sum().item() / visible_opacity_increase.item()
+            )
+            if bg_mask.any() and opacity_grad_available
+            else 0.0,
+            "background_accumulation_grad_abs_fraction": float(
+                sampled_accumulation_grad[bg_mask].abs().sum().item() / visible_accum_abs.item()
+            )
+            if bg_mask.any() and accumulation_grad_available
+            else 0.0,
+            "background_accumulation_decrease_pressure_fraction": float(
+                torch.relu(sampled_accumulation_grad[bg_mask]).sum().item() / visible_accum_decrease.item()
+            )
+            if bg_mask.any() and accumulation_grad_available
+            else 0.0,
+            "background_accumulation_increase_pressure_fraction": float(
+                torch.relu(-sampled_accumulation_grad[bg_mask]).sum().item() / visible_accum_increase.item()
+            )
+            if bg_mask.any() and accumulation_grad_available
+            else 0.0,
+        }
+        self.last_densification_region_stats = payload
+        CONSOLE.log(
+            "Densification region step="
+            f"{self.step} bg_grad_frac={payload['background_gradient_fraction']:.4f} "
+            f"bg_split_frac={payload['background_split_candidate_fraction']:.4f} "
+            f"bg_dup_frac={payload['background_duplicate_candidate_fraction']:.4f}"
+        )
+
+        log_path = getattr(self.config, "densification_region_log_path", None)
+        if log_path:
+            try:
+                path = Path(log_path)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf8") as f:
+                    f.write(json.dumps(payload) + "\n")
+            except Exception as exc:
+                CONSOLE.log(f"[yellow]Failed to write densification region log: {exc}[/yellow]")
 
     def _predict_medium(
         self,
@@ -1331,6 +1792,8 @@ class WaterSplattingModel(Model):
         if self._cleanup_enabled() and self.training:
             self.cleanup_current_alpha = None
             self.cleanup_current_ownership = None
+        self.current_densification_region_weight = None
+        self.current_densification_region_samples = None
         
         camera_downscale = self._get_downscale_factor()
         camera.rescale_output_resolution(1 / camera_downscale)
@@ -1574,6 +2037,7 @@ class WaterSplattingModel(Model):
             rgb_tail = tail_weight_last * b_inf
             if not getattr(self.config, "infinite_water_enabled", False):
                 rgb = render.rgb_object + rgb_medium_finite + rgb_tail
+        rgb_medium_total = rgb_medium_finite + rgb_tail
         hit_q_alpha = torch.sigmoid(
             (render.accumulation - self.config.infinite_water_hit_alpha_threshold)
             / max(self.config.infinite_water_hit_alpha_temp, 1e-6)
@@ -1689,6 +2153,7 @@ class WaterSplattingModel(Model):
             "rgb_clear_clamp": j_gaussian,
             "rgb_medium": render.rgb_medium,
             "rgb_medium_finite": rgb_medium_finite,
+            "rgb_medium_total": rgb_medium_total,
             "tail_weight_last": tail_weight_last,
             "tail_medium_original": tail_medium_original,
             "rgb_tail": rgb_tail,
@@ -1734,6 +2199,7 @@ class WaterSplattingModel(Model):
             outputs["m_inf_alpha_evidence"] = ownership.alpha_evidence
             outputs["m_inf_depth_evidence"] = ownership.depth_evidence
             outputs["m_inf_color_evidence"] = ownership.color_evidence
+        self._prepare_densification_region_state(outputs=outputs, height=H, width=W)
         return outputs  # type: ignore
         
     def get_gt_img(self, image: torch.Tensor):
@@ -1835,6 +2301,44 @@ class WaterSplattingModel(Model):
             metrics_dict["gaussian_cleanup_candidate_fraction"] = stats.candidate_fraction
             metrics_dict["gaussian_cleanup_mean_contribution"] = stats.mean_contribution
             metrics_dict["gaussian_cleanup_mean_ownership"] = stats.mean_sampled_ownership
+        if self.last_densification_region_stats is not None:
+            stats = self.last_densification_region_stats
+            metrics_dict["background_gradient_fraction"] = torch.tensor(
+                float(stats.get("background_gradient_fraction", 0.0)),
+                device=self.device,
+            )
+            metrics_dict["background_split_candidate_fraction"] = torch.tensor(
+                float(stats.get("background_split_candidate_fraction", 0.0)),
+                device=self.device,
+            )
+            metrics_dict["background_duplicate_candidate_fraction"] = torch.tensor(
+                float(stats.get("background_duplicate_candidate_fraction", 0.0)),
+                device=self.device,
+            )
+            metrics_dict["background_weighted_split_candidate_fraction"] = torch.tensor(
+                float(stats.get("background_weighted_split_candidate_fraction", 0.0)),
+                device=self.device,
+            )
+            metrics_dict["background_weighted_duplicate_candidate_fraction"] = torch.tensor(
+                float(stats.get("background_weighted_duplicate_candidate_fraction", 0.0)),
+                device=self.device,
+            )
+            metrics_dict["background_opacity_grad_abs_fraction"] = torch.tensor(
+                float(stats.get("background_opacity_grad_abs_fraction", 0.0)),
+                device=self.device,
+            )
+            metrics_dict["background_opacity_decrease_pressure_fraction"] = torch.tensor(
+                float(stats.get("background_opacity_decrease_pressure_fraction", 0.0)),
+                device=self.device,
+            )
+            metrics_dict["background_accumulation_grad_abs_fraction"] = torch.tensor(
+                float(stats.get("background_accumulation_grad_abs_fraction", 0.0)),
+                device=self.device,
+            )
+            metrics_dict["background_accumulation_decrease_pressure_fraction"] = torch.tensor(
+                float(stats.get("background_accumulation_decrease_pressure_fraction", 0.0)),
+                device=self.device,
+            )
         return metrics_dict
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None) -> Dict[str, torch.Tensor]:
@@ -1880,6 +2384,59 @@ class WaterSplattingModel(Model):
                 loss_dict["background_water_color_loss"] = bg_weight * (
                     bg_mask * torch.abs(outputs["b_inf"] - gt_img)
                 ).sum() / (bg_mask.sum().clamp_min(1e-6) * 3.0)
+
+        bg_medium_weight = self._background_render_ramp_weight(
+            getattr(self.config, "lambda_background_medium_render", 0.0)
+        )
+        bg_tail_weight = self._background_render_ramp_weight(
+            getattr(self.config, "lambda_background_tail_render", 0.0)
+        )
+        if bg_medium_weight > 0.0 or bg_tail_weight > 0.0:
+            bg_mask = self._load_backscatter_region_mask(
+                outputs=outputs,
+                key=getattr(self.config, "background_water_mask_key", "water"),
+                target=gt_img,
+            )
+            if bg_mask is not None and bg_mask.sum() > 0:
+                if bg_medium_weight > 0.0:
+                    loss_dict["background_medium_render_loss"] = bg_medium_weight * masked_rgb_l1_loss(
+                        outputs["rgb_medium_total"],
+                        gt_img,
+                        bg_mask,
+                    )
+                if bg_tail_weight > 0.0:
+                    loss_dict["background_tail_render_loss"] = bg_tail_weight * masked_rgb_l1_loss(
+                        outputs["rgb_tail"],
+                        gt_img,
+                        bg_mask,
+                    )
+
+        bg_clear_weight = self._background_clear_ramp_weight(
+            getattr(self.config, "lambda_background_clear_gaussian", 0.0)
+        )
+        if bg_clear_weight > 0.0:
+            bg_mask = self._load_backscatter_region_mask(
+                outputs=outputs,
+                key=getattr(self.config, "background_water_mask_key", "water"),
+                target=gt_img,
+            )
+            if bg_mask is not None and bg_mask.sum() > 0:
+                boundary_mask = None
+                if getattr(self.config, "background_clear_exclude_boundary", True):
+                    boundary_mask = self._load_backscatter_region_mask(outputs=outputs, key="boundary", target=gt_img)
+                bg_clear_mask = effective_background_mask(
+                    water_mask=bg_mask,
+                    boundary_mask=boundary_mask,
+                    hit_confidence=outputs.get("hit_confidence"),
+                    hit_threshold=float(getattr(self.config, "background_clear_hit_exclusion_threshold", -1.0)),
+                )
+                if bg_clear_mask.sum() > 0:
+                    j_key = "J_gaussian_raw" if getattr(self.config, "background_clear_use_raw_j", True) else "J_gaussian"
+                    loss_dict["background_clear_gaussian_loss"] = bg_clear_weight * masked_rgb_l1_loss(
+                        outputs[j_key],
+                        torch.zeros_like(outputs[j_key]),
+                        bg_clear_mask,
+                    )
 
         fg_weight = self._backscatter_ramp_weight(
             getattr(self.config, "lambda_foreground_transmission_reconstruction", 0.0)
@@ -2072,21 +2629,30 @@ class WaterSplattingModel(Model):
         images_dict = {
             "gt": output_gt_rgb,
             "rgb_medium": outputs["rgb_medium"],
+            "rgb_medium_finite": outputs["rgb_medium_finite"].clamp(0.0, 1.0),
+            "rgb_medium_total": outputs["rgb_medium_total"].clamp(0.0, 1.0),
+            "rgb_tail": outputs["rgb_tail"].clamp(0.0, 1.0),
             "rgb_object": outputs["rgb_object"],
             "depth": outputs["depth"],
+            "accumulation": outputs["accumulation"].expand_as(outputs["rgb"]),
             "rgb": outputs["rgb"],
             "J": outputs["J"],
+            "J_raw": outputs["J_raw"].clamp(0.0, 1.0),
             "J_gaussian": outputs["J_gaussian"],
+            "J_gaussian_raw": outputs["J_gaussian_raw"].clamp(0.0, 1.0),
             "J_object": outputs["J_object"],
             "rgb_clear_legacy": outputs["rgb_clear"],
         }
+        if "background_region_mask" in outputs:
+            images_dict["background_region_mask"] = outputs["background_region_mask"].expand_as(outputs["rgb"])
+        if "densification_region_weight" in outputs:
+            images_dict["densification_region_weight"] = outputs["densification_region_weight"].expand_as(outputs["rgb"])
         if "J_intrinsic" in outputs:
             images_dict["J_intrinsic"] = outputs["J_intrinsic"]
             images_dict["rgb_object_intrinsic"] = outputs["rgb_object_intrinsic"]
             images_dict["dual_color_j_residual_abs"] = outputs["dual_color_j_residual_raw"].abs().clamp(0.0, 1.0)
         if "b_inf" in outputs:
             images_dict["b_inf"] = outputs["b_inf"]
-            images_dict["rgb_tail"] = outputs["rgb_tail"].clamp(0.0, 1.0)
             images_dict["b_inf_minus_A_abs"] = outputs["b_inf_minus_A_abs"].clamp(0.0, 1.0)
         if "m_inf" in outputs:
             images_dict["m_inf"] = outputs["m_inf"].expand_as(outputs["rgb"])
