@@ -3,23 +3,20 @@ set -euo pipefail
 
 REPO_DIR="/mnt/new/home_old/ycy/water-splatting-refactor"
 MASK_DIR="${MASK_DIR:-${REPO_DIR}/common_masks/high_precision_water_m1_core_y025_nsorder_iui3_redsea_20260726}"
-BRANCH_CKPT="${BRANCH_CKPT:-${REPO_DIR}/outputs/bg_attr_n1_precise_raw_binf_iui3_uninterrupted_control/water-splatting/bg_attr_n1_precise_raw_binf_iui3_uninterrupted_control_20260727_n1_uninterrupted_control/nerfstudio_models/step-000010000.ckpt}"
-CANDIDATE_MASK="${CANDIDATE_MASK:-${REPO_DIR}/renders/gradient_surgery_20260727/candidate_mask_step10000.pt}"
 
 exec env \
-  GPU="${GPU:-9}" \
+  GPU="${GPU:-7}" \
   PYTHON="/opt/anaconda3/envs/water_splatting/bin/python" \
   DATA_PATH="${DATA_PATH:-${REPO_DIR}/undistorted_data/undistorted_IUI3-RedSea}" \
   OUTPUT_DIR="${OUTPUT_DIR:-${REPO_DIR}/outputs}" \
   RENDER_ROOT="${RENDER_ROOT:-${REPO_DIR}/renders}" \
   LOG_ROOT="${LOG_ROOT:-${REPO_DIR}/logs}" \
-  EXPERIMENT_NAME="${EXPERIMENT_NAME:-bg_attr_g2_c5_opacity_surgery_x4_iui3_15000}" \
-  STAMP="${STAMP:-20260727_g2_c5_opacity_x4}" \
-  MAX_NUM_ITERATIONS="${MAX_NUM_ITERATIONS:-4999}" \
+  EXPERIMENT_NAME="${EXPERIMENT_NAME:-bg_attr_c5_proxy_chroma002_iui3_full_15000}" \
+  STAMP="${STAMP:-20260727_c5_chroma002_full}" \
+  MAX_NUM_ITERATIONS="${MAX_NUM_ITERATIONS:-15000}" \
   MODEL_NUM_STEPS="${MODEL_NUM_STEPS:-15000}" \
-  STEPS_PER_SAVE="${STEPS_PER_SAVE:-4999}" \
+  STEPS_PER_SAVE="${STEPS_PER_SAVE:-15000}" \
   SAVE_ONLY_LATEST_CHECKPOINT="${SAVE_ONLY_LATEST_CHECKPOINT:-True}" \
-  LOAD_CHECKPOINT="${LOAD_CHECKPOINT:-${BRANCH_CKPT}}" \
   SEED="${SEED:-42}" \
   MEDIUM_CONTEXT_MODE="dir_xy_camera" \
   BINF_MODE="tied" \
@@ -34,12 +31,6 @@ exec env \
   BACKSCATTER_REGION_MASK_DIR="${MASK_DIR}" \
   BACKGROUND_WATER_MASK_KEY="water" \
   FOREGROUND_WATER_MASK_KEY="object" \
-  BACKGROUND_GRADIENT_SURGERY_ENABLED="True" \
-  BACKGROUND_CANDIDATE_MASK_PATH="${BACKGROUND_CANDIDATE_MASK_PATH:-${CANDIDATE_MASK}}" \
-  BACKGROUND_OPACITY_DECREASE_MULTIPLIER="${BACKGROUND_OPACITY_DECREASE_MULTIPLIER:-4.0}" \
-  BACKGROUND_OPACITY_INCREASE_MULTIPLIER="${BACKGROUND_OPACITY_INCREASE_MULTIPLIER:-1.0}" \
-  BACKGROUND_GRADIENT_SURGERY_START_STEP="${BACKGROUND_GRADIENT_SURGERY_START_STEP:-10000}" \
-  BACKGROUND_GRADIENT_SURGERY_MIN_VIEW_COUNT="${BACKGROUND_GRADIENT_SURGERY_MIN_VIEW_COUNT:-5}" \
   BACKGROUND_DENSIFICATION_ENABLED="False" \
   BACKGROUND_DENSIFICATION_DIAGNOSTIC_ONLY="True" \
   RUN_EVAL="${RUN_EVAL:-1}" \

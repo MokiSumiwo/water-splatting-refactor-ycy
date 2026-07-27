@@ -214,3 +214,133 @@ Stop or revise before running stronger interventions if:
 
 Do not re-enable accumulation-zero loss, hard pruning, opacity decay, capacity
 floor, or old M2 ownership as the mainline.
+
+## Execution Update: 2026-07-27
+
+### N1 Uninterrupted Control
+
+Completed:
+
+```bash
+GPU=6 scripts/experiments/bg_attr_n1_uninterrupted_control_iui3.sh
+```
+
+Output:
+
+```text
+outputs/bg_attr_n1_precise_raw_binf_iui3_uninterrupted_control/water-splatting/bg_attr_n1_precise_raw_binf_iui3_uninterrupted_control_20260727_n1_uninterrupted_control
+renders/bg_attr_n1_precise_raw_binf_iui3_uninterrupted_control_20260727_n1_uninterrupted_control
+```
+
+Checkpoints:
+
+```text
+step-000005000.ckpt
+step-000010000.ckpt
+step-000014999.ckpt
+```
+
+Metrics:
+
+| run | PSNR | SSIM | LPIPS | J Blue | Far Accum | Far Clear | Water Accum | Water J |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| N1 uninterrupted | 31.1573 | 0.9142 | 0.1752 | 0.1213 | 0.3798 | 0.0693 | 0.0748 | 0.000699 |
+
+### Resume Control Result
+
+Two resume controls were tested from `step-000010000.ckpt`.
+
+R0 to step 15000:
+
+```bash
+GPU=7 scripts/experiments/bg_attr_r0_resume10k_control_iui3.sh
+```
+
+R0b to step 14999:
+
+```bash
+GPU=7 EXPERIMENT_NAME=bg_attr_r0b_resume10k_control_iui3_14999 \
+  STAMP=20260727_r0b_resume10k_control_14999 \
+  MAX_NUM_ITERATIONS=4999 STEPS_PER_SAVE=4999 \
+  scripts/experiments/bg_attr_r0_resume10k_control_iui3.sh
+```
+
+Result:
+
+| run | PSNR | SSIM | LPIPS | J Blue | Far Accum | Far Clear | Water Accum | Water J |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| N1 uninterrupted | 31.1573 | 0.9142 | 0.1752 | 0.1213 | 0.3798 | 0.0693 | 0.0748 | 0.000699 |
+| R0 step 15000 | 31.0520 | 0.9143 | 0.1752 | 0.1333 | 0.3912 | 0.0698 | 0.0941 | 0.000644 |
+| R0b step 14999 | 31.0410 | 0.9141 | 0.1754 | 0.1332 | 0.3823 | 0.0701 | 0.0852 | 0.000647 |
+
+Conclusion:
+
+- Resume control fails the planned gate: PSNR differs by roughly `0.11 dB`,
+  and J Blue differs by roughly `9.8%`.
+- The step-15000 cull explained part of the Far Accum difference, but not the
+  PSNR/J Blue mismatch.
+- Inspection of `FullImageDatamanager` shows train camera order is driven by a
+  Python `random.Random(train_cameras_sampling_seed)` object. Its state is not
+  serialized in the Nerfstudio checkpoint, so resumed training repeats a
+  different 10k-15k image order than the uninterrupted run.
+
+Decision:
+
+- Do not promote resume-10k C/G experiments as formal candidates.
+- Use uninterrupted full 15k runs for C5/G1/G2 so the 0-10k prefix is
+  deterministic and comparable.
+
+### Train-View Candidate Mask
+
+Completed:
+
+```bash
+CUDA_VISIBLE_DEVICES=6 /opt/anaconda3/envs/water_splatting/bin/python \
+  scripts/diagnostics/diagnose_gaussian_region_sensitivity.py \
+  --load-config outputs/bg_attr_n1_precise_raw_binf_iui3_uninterrupted_control/water-splatting/bg_attr_n1_precise_raw_binf_iui3_uninterrupted_control_20260727_n1_uninterrupted_control/config.yml \
+  --load-step 10000 \
+  --mask-dir common_masks/high_precision_water_m1_core_y025_nsorder_iui3_redsea_20260726 \
+  --output-json renders/gradient_surgery_20260727/train_region_sensitivity_step10000.json \
+  --candidate-output-prefix renders/gradient_surgery_20260727/candidate_mask_step10000 \
+  --split train --max-images 25 --enable-clear-proxy \
+  --candidate-min-view-count 5 \
+  --candidate-water-quantile 0.995 \
+  --candidate-proxy-quantile 0.95 \
+  --candidate-object-ratio-max 0.10 \
+  --candidate-boundary-ratio-max 0.10 \
+  --candidate-require-proxy \
+  --top-k 100
+```
+
+Candidate result:
+
+```text
+candidate_count = 28
+candidate_fraction = 0.00331%
+active_gaussian_count = 840,531
+water_threshold = 0.001715
+proxy_threshold = 0.00000386
+selected_water_score_sum = 0.114294
+selected_proxy_score_sum = 0.027808
+```
+
+Candidate files:
+
+```text
+renders/gradient_surgery_20260727/candidate_mask_step10000.pt
+renders/gradient_surgery_20260727/candidate_mask_step10000.json
+```
+
+### Revised Formal Runs
+
+Run matched full 15k experiments:
+
+```bash
+GPU=7 scripts/experiments/bg_attr_c5_proxy_chroma002_full_iui3.sh
+GPU=8 scripts/experiments/bg_attr_g1_opacity_surgery_x2_full_iui3.sh
+GPU=9 scripts/experiments/bg_attr_g2_opacity_surgery_x4_full_iui3.sh
+```
+
+These runs avoid resume RNG mismatch. The candidate mask is fixed from the N1
+step-10000 train-view attribution diagnostic, and intervention starts at step
+10000.
