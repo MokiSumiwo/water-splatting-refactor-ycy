@@ -40,6 +40,12 @@ BACKGROUND_CLEAR_CHROMA_ACCUMULATION_TEMPERATURE="${BACKGROUND_CLEAR_CHROMA_ACCU
 BACKGROUND_CLEAR_CHROMA_MARGIN="${BACKGROUND_CLEAR_CHROMA_MARGIN:-0.02}"
 BACKGROUND_CLEAR_CHROMA_MEDIUM_DETACH="${BACKGROUND_CLEAR_CHROMA_MEDIUM_DETACH:-True}"
 CLEAR_PROXY_ENABLED="${CLEAR_PROXY_ENABLED:-False}"
+BACKGROUND_GRADIENT_SURGERY_ENABLED="${BACKGROUND_GRADIENT_SURGERY_ENABLED:-False}"
+BACKGROUND_CANDIDATE_MASK_PATH="${BACKGROUND_CANDIDATE_MASK_PATH:-}"
+BACKGROUND_OPACITY_DECREASE_MULTIPLIER="${BACKGROUND_OPACITY_DECREASE_MULTIPLIER:-1.0}"
+BACKGROUND_OPACITY_INCREASE_MULTIPLIER="${BACKGROUND_OPACITY_INCREASE_MULTIPLIER:-1.0}"
+BACKGROUND_GRADIENT_SURGERY_START_STEP="${BACKGROUND_GRADIENT_SURGERY_START_STEP:-10000}"
+BACKGROUND_GRADIENT_SURGERY_MIN_VIEW_COUNT="${BACKGROUND_GRADIENT_SURGERY_MIN_VIEW_COUNT:-5}"
 BACKGROUND_DENSIFICATION_ENABLED="${BACKGROUND_DENSIFICATION_ENABLED:-False}"
 BACKGROUND_DENSIFICATION_WEIGHT="${BACKGROUND_DENSIFICATION_WEIGHT:-1.0}"
 UNCERTAIN_DENSIFICATION_WEIGHT="${UNCERTAIN_DENSIFICATION_WEIGHT:-0.5}"
@@ -114,6 +120,12 @@ mkdir -p "${LOG_DIR}" "${RENDER_DIR}" "${DIAG_DIR}"
   echo "background_clear_chroma_margin=${BACKGROUND_CLEAR_CHROMA_MARGIN}"
   echo "background_clear_chroma_medium_detach=${BACKGROUND_CLEAR_CHROMA_MEDIUM_DETACH}"
   echo "clear_proxy_enabled=${CLEAR_PROXY_ENABLED}"
+  echo "background_gradient_surgery_enabled=${BACKGROUND_GRADIENT_SURGERY_ENABLED}"
+  echo "background_candidate_mask_path=${BACKGROUND_CANDIDATE_MASK_PATH}"
+  echo "background_opacity_decrease_multiplier=${BACKGROUND_OPACITY_DECREASE_MULTIPLIER}"
+  echo "background_opacity_increase_multiplier=${BACKGROUND_OPACITY_INCREASE_MULTIPLIER}"
+  echo "background_gradient_surgery_start_step=${BACKGROUND_GRADIENT_SURGERY_START_STEP}"
+  echo "background_gradient_surgery_min_view_count=${BACKGROUND_GRADIENT_SURGERY_MIN_VIEW_COUNT}"
   echo "background_densification_enabled=${BACKGROUND_DENSIFICATION_ENABLED}"
   echo "background_densification_weight=${BACKGROUND_DENSIFICATION_WEIGHT}"
   echo "uncertain_densification_weight=${UNCERTAIN_DENSIFICATION_WEIGHT}"
@@ -180,6 +192,11 @@ model_args=(
   --pipeline.model.background-clear-chroma-margin "${BACKGROUND_CLEAR_CHROMA_MARGIN}"
   --pipeline.model.background-clear-chroma-medium-detach "${BACKGROUND_CLEAR_CHROMA_MEDIUM_DETACH}"
   --pipeline.model.clear-proxy-enabled "${CLEAR_PROXY_ENABLED}"
+  --pipeline.model.background-gradient-surgery-enabled "${BACKGROUND_GRADIENT_SURGERY_ENABLED}"
+  --pipeline.model.background-opacity-decrease-multiplier "${BACKGROUND_OPACITY_DECREASE_MULTIPLIER}"
+  --pipeline.model.background-opacity-increase-multiplier "${BACKGROUND_OPACITY_INCREASE_MULTIPLIER}"
+  --pipeline.model.background-gradient-surgery-start-step "${BACKGROUND_GRADIENT_SURGERY_START_STEP}"
+  --pipeline.model.background-gradient-surgery-min-view-count "${BACKGROUND_GRADIENT_SURGERY_MIN_VIEW_COUNT}"
   --pipeline.model.background-densification-enabled "${BACKGROUND_DENSIFICATION_ENABLED}"
   --pipeline.model.background-densification-weight "${BACKGROUND_DENSIFICATION_WEIGHT}"
   --pipeline.model.uncertain-densification-weight "${UNCERTAIN_DENSIFICATION_WEIGHT}"
@@ -203,6 +220,9 @@ model_args=(
 
 if [[ -n "${BACKSCATTER_REGION_MASK_DIR}" ]]; then
   model_args+=(--pipeline.model.backscatter-region-mask-dir "${BACKSCATTER_REGION_MASK_DIR}")
+fi
+if [[ -n "${BACKGROUND_CANDIDATE_MASK_PATH}" ]]; then
+  model_args+=(--pipeline.model.background-candidate-mask-path "${BACKGROUND_CANDIDATE_MASK_PATH}")
 fi
 
 trainer_args=(

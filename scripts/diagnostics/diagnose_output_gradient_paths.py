@@ -78,6 +78,8 @@ def _collect_grad_stats(model: torch.nn.Module) -> Dict[str, Dict[str, float]]:
             stats["screen.xys"] = _zero_like_stats()
     if hasattr(model, "xys_grad_abs") and getattr(model, "xys_grad_abs") is not None:
         stats["screen.xys_grad_abs"] = _tensor_stats(model.xys_grad_abs)
+    if hasattr(model, "xys_grad_abs_proxy") and getattr(model, "xys_grad_abs_proxy") is not None:
+        stats["screen.xys_grad_abs_proxy"] = _tensor_stats(model.xys_grad_abs_proxy)
     return stats
 
 
@@ -144,6 +146,7 @@ def _run_probe(model: torch.nn.Module, camera: Any, probe_name: str, probe_fn: P
             "medium_norm": _sum_norm(stats, "medium_mlp.") + _sum_norm(stats, "direction_encoding."),
             "screen_xys_norm": stats.get("screen.xys", _zero_like_stats())["norm"],
             "screen_abs_grad_norm": stats.get("screen.xys_grad_abs", _zero_like_stats())["norm"],
+            "screen_proxy_abs_grad_norm": stats.get("screen.xys_grad_abs_proxy", _zero_like_stats())["norm"],
             "opacities_norm": stats.get("gaussian.opacities", _zero_like_stats())["norm"],
             "scales_norm": stats.get("gaussian.scales", _zero_like_stats())["norm"],
             "features_dc_norm": stats.get("gaussian.features_dc", _zero_like_stats())["norm"],
@@ -169,6 +172,7 @@ def _aggregate_probe_results(images: List[Dict[str, Any]]) -> Dict[str, Any]:
             "medium_norm",
             "screen_xys_norm",
             "screen_abs_grad_norm",
+            "screen_proxy_abs_grad_norm",
             "opacities_norm",
             "scales_norm",
             "features_dc_norm",
@@ -192,7 +196,15 @@ def _aggregate_probe_results(images: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
-    config, pipeline, checkpoint_path, step = eval_setup(args.load_config)
+    def _update_config(config: Any) -> Any:
+        if args.load_step is not None:
+            config.load_step = int(args.load_step)
+        return config
+
+    config, pipeline, checkpoint_path, step = eval_setup(
+        args.load_config,
+        update_config_callback=_update_config,
+    )
     pipeline.eval()
     model = pipeline.model
     if args.enable_clear_proxy:
@@ -229,6 +241,7 @@ def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--load-config", type=Path, required=True)
+    parser.add_argument("--load-step", type=int, default=None)
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--max-images", type=int, default=2)
     parser.add_argument("--enable-clear-proxy", action="store_true")

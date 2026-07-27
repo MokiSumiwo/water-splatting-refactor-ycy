@@ -26,7 +26,7 @@ def rasterize_gaussians(
     img_height: int,
     img_width: int,
     block_width: int,
-    background: Optional[Float[Tensor, "*height width channels"]] = None,
+    background: Optional[Float[Tensor, "channels"]] = None,
     return_alpha: Optional[bool] = False,
     step: Optional[int] = None,
     return_hit_stats: Optional[bool] = False,
@@ -52,7 +52,7 @@ def rasterize_gaussians(
         img_height (int): height of the rendered image.
         img_width (int): width of the rendered image.
         block_width (int): MUST match whatever block width was used in the project_gaussians call. integer number of pixels between 2 and 16 inclusive
-        background (Tensor): background color
+        background (Tensor): background color of shape (channels,)
         return_alpha (bool): whether to return alpha channel
         force_white_background (bool): preserve legacy behavior by replacing
             the provided background with white. Set False only for diagnostics
@@ -75,11 +75,11 @@ def rasterize_gaussians(
     if force_white_background or background is None:
         background = torch.ones(colors.shape[-1], dtype=torch.float32, device=colors.device)
     else:
-        if background.ndim == 3:
-            background = background.reshape(-1, background.shape[-1])[0]
-        assert (
-            background.ndim == 1 and background.shape[0] == colors.shape[-1]
-        ), f"incorrect shape of background color tensor, expected shape ({colors.shape[-1]},)"
+        if background.ndim != 1 or background.shape[0] != colors.shape[-1]:
+            raise ValueError(
+                "background must be a single color tensor with shape "
+                f"({colors.shape[-1]},); got {tuple(background.shape)}"
+            )
         background = background.to(device=colors.device, dtype=torch.float32)
 
     if xys.ndimension() != 2 or xys.size(1) != 2:

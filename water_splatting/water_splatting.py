@@ -333,6 +333,18 @@ class WaterSplattingModelConfig(ModelConfig):
     """Retain/log opacity, scale, and sampled accumulation gradient diagnostics."""
     clear_proxy_enabled: bool = False
     """Enable an auxiliary zero-medium black-background clear proxy render."""
+    background_gradient_surgery_enabled: bool = False
+    """Enable candidate-mask opacity-gradient modulation for open-water contributors."""
+    background_candidate_mask_path: Optional[str] = None
+    """Path to a train-view contribution candidate .pt mask."""
+    background_opacity_decrease_multiplier: float = 1.0
+    """Multiplier for positive opacity-logit gradients on background candidates."""
+    background_opacity_increase_multiplier: float = 1.0
+    """Multiplier for negative opacity-logit gradients on background candidates."""
+    background_gradient_surgery_start_step: int = 10000
+    """First step where background gradient surgery may modify opacity gradients."""
+    background_gradient_surgery_min_view_count: int = 5
+    """Minimum candidate train-view support when loading candidate masks with view_count."""
     gaussian_cleanup_enabled: bool = False
     """M3: enable contribution-aware Gaussian cleanup diagnostics/pruning."""
     gaussian_cleanup_dry_run: bool = True
@@ -551,6 +563,11 @@ class WaterSplattingModel(Model):
         self.current_densification_region_samples = None
         self.current_densification_accumulation_map = None
         self.last_densification_region_stats = None
+        self.xys_grad_abs_proxy = None
+        self._background_candidate_mask = None
+        self._background_candidate_path = None
+        self._background_candidate_num_points = 0
+        self._warned_background_clear_gaussian_dead_grad = False
 
         self.crop_box: Optional[OrientedBox] = None
         if self.config.background_color == "random":
@@ -754,6 +771,7 @@ class WaterSplattingModel(Model):
                 newradii / float(max(self.last_size[0], self.last_size[1])),
             )
             self._accumulate_cleanup_evidence(visible_mask)
+            self._apply_background_gradient_surgery()
 
     def set_crop(self, crop_box: Optional[OrientedBox]):
         self.crop_box = crop_box
@@ -1093,6 +1111,93 @@ class WaterSplattingModel(Model):
             return target
         progress = min((self.step - start) / max(float(ramp), 1.0), 1.0)
         return 1.0 + (target - 1.0) * progress
+
+    def _load_background_candidate_mask(self) -> torch.Tensor:
+        path_text = getattr(self.config, "background_candidate_mask_path", None)
+        if not path_text:
+            raise RuntimeError(
+                "background_gradient_surgery_enabled=True requires "
+                "background_candidate_mask_path"
+            )
+        path = Path(path_text)
+        num_points = int(self.num_points)
+        if (
+            self._background_candidate_mask is not None
+            and self._background_candidate_path == str(path)
+            and self._background_candidate_num_points == num_points
+        ):
+            return self._background_candidate_mask
+
+        if not path.exists():
+            raise FileNotFoundError(path)
+        payload = torch.load(path, map_location="cpu")
+        if isinstance(payload, dict):
+            mask = payload.get("candidate_mask")
+            if mask is None:
+                mask = payload.get("mask")
+            view_count = payload.get("view_count")
+        else:
+            mask = payload
+            view_count = None
+        if mask is None:
+            raise KeyError(f"{path} does not contain candidate_mask or mask")
+        mask = mask.reshape(-1).bool()
+        if mask.numel() != num_points:
+            raise ValueError(
+                f"candidate mask length {mask.numel()} does not match current "
+                f"Gaussian count {num_points}"
+            )
+        if view_count is not None:
+            view_count_t = torch.as_tensor(view_count).reshape(-1)
+            if view_count_t.numel() != num_points:
+                raise ValueError(
+                    f"candidate view_count length {view_count_t.numel()} does not "
+                    f"match current Gaussian count {num_points}"
+                )
+            min_view_count = int(getattr(self.config, "background_gradient_surgery_min_view_count", 5))
+            if min_view_count > 0:
+                mask &= view_count_t >= min_view_count
+        mask = mask.to(device=self.device)
+        self._background_candidate_mask = mask
+        self._background_candidate_path = str(path)
+        self._background_candidate_num_points = num_points
+        CONSOLE.log(
+            f"Loaded background candidate mask from {path}: "
+            f"{int(mask.sum().item())}/{num_points} candidates"
+        )
+        return mask
+
+    def _apply_background_gradient_surgery(self) -> None:
+        if not getattr(self.config, "background_gradient_surgery_enabled", False):
+            return
+        start = int(getattr(self.config, "background_gradient_surgery_start_step", 10000))
+        if self.step < start:
+            return
+        if self.opacities.grad is None:
+            return
+        mask = self._load_background_candidate_mask().reshape(-1, 1)
+        if mask.numel() != self.opacities.grad.numel():
+            raise ValueError("candidate mask shape does not match opacities.grad")
+
+        decrease_mult = float(getattr(self.config, "background_opacity_decrease_multiplier", 1.0))
+        increase_mult = float(getattr(self.config, "background_opacity_increase_multiplier", 1.0))
+        grad = self.opacities.grad
+        positive = grad > 0.0
+        negative = grad < 0.0
+        multiplier = torch.ones_like(grad)
+        multiplier = torch.where(mask & positive, torch.full_like(multiplier, decrease_mult), multiplier)
+        multiplier = torch.where(mask & negative, torch.full_like(multiplier, increase_mult), multiplier)
+        grad.mul_(multiplier)
+
+        if self.step % 500 == 0:
+            candidate_grad = grad[mask].detach().reshape(-1)
+            CONSOLE.log(
+                "Background gradient surgery step="
+                f"{self.step} candidates={int(mask.sum().item())} "
+                f"opacity_decrease_x={decrease_mult:.3g} "
+                f"opacity_increase_x={increase_mult:.3g} "
+                f"candidate_grad_abs_mean={float(candidate_grad.abs().mean().item()) if candidate_grad.numel() else 0.0:.3e}"
+            )
 
     def _should_prepare_densification_regions(self) -> bool:
         if not getattr(self.config, "backscatter_region_mask_dir", None):
@@ -1958,6 +2063,7 @@ class WaterSplattingModel(Model):
             raise ValueError("Unknown rasterize_mode: %s", self.config.rasterize_mode)
         
         self.xys_grad_abs = torch.zeros_like(self.xys)
+        self.xys_grad_abs_proxy = None
 
         if self._uses_medium_depth_context():
             depth_seed_render = self.underwater_rasterizer.rasterize(  # type: ignore
@@ -2042,14 +2148,20 @@ class WaterSplattingModel(Model):
             j_object_raw = dual_render.j_raw
             j_object = dual_render.j_gaussian
         clear_proxy_render = None
+        chroma_weight_config = float(getattr(self.config, "lambda_background_clear_chroma", 0.0))
+        chroma_active_by_step = (
+            chroma_weight_config > 0.0
+            and (not self.training or self.step >= int(getattr(self.config, "background_clear_chroma_start_step", 10000)))
+        )
         clear_proxy_required = bool(
             getattr(self.config, "clear_proxy_enabled", False)
-            or getattr(self.config, "lambda_background_clear_chroma", 0.0) > 0.0
+            or chroma_active_by_step
         )
         if clear_proxy_required:
+            self.xys_grad_abs_proxy = torch.zeros_like(self.xys)
             clear_proxy_render = self.underwater_rasterizer.rasterize_clear_proxy(  # type: ignore
                 xys=self.xys,
-                xys_grad_abs=self.xys_grad_abs,
+                xys_grad_abs=self.xys_grad_abs_proxy,
                 depths=depths,
                 radii=self.radii,
                 conics=conics,
@@ -2459,6 +2571,15 @@ class WaterSplattingModel(Model):
             getattr(self.config, "lambda_background_clear_gaussian", 0.0)
         )
         if bg_clear_weight > 0.0:
+            if not self._warned_background_clear_gaussian_dead_grad:
+                CONSOLE.log(
+                    "[yellow]lambda_background_clear_gaussian targets "
+                    "J_gaussian_raw, whose Gaussian backward path is inactive "
+                    "in the current CUDA wrapper. Prefer "
+                    "lambda_background_clear_chroma with J_proxy_raw for active "
+                    "clear/dewatered optimization.[/yellow]"
+                )
+                self._warned_background_clear_gaussian_dead_grad = True
             bg_mask = self._load_backscatter_region_mask(
                 outputs=outputs,
                 key=getattr(self.config, "background_water_mask_key", "water"),
