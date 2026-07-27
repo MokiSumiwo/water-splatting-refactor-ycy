@@ -12,6 +12,7 @@ RENDER_ROOT="${RENDER_ROOT:-${REPO_DIR}/renders}"
 LOG_ROOT="${LOG_ROOT:-${REPO_DIR}/logs}"
 
 MAX_NUM_ITERATIONS="${MAX_NUM_ITERATIONS:-15000}"
+MODEL_NUM_STEPS="${MODEL_NUM_STEPS:-${MAX_NUM_ITERATIONS}}"
 RUN_EVAL="${RUN_EVAL:-1}"
 RUN_CLOSURE_DIAG="${RUN_CLOSURE_DIAG:-1}"
 RUN_FAR_DIAG="${RUN_FAR_DIAG:-0}"
@@ -31,6 +32,14 @@ BACKGROUND_CLEAR_LOSS_RAMP_STEPS="${BACKGROUND_CLEAR_LOSS_RAMP_STEPS:-3000}"
 BACKGROUND_CLEAR_USE_RAW_J="${BACKGROUND_CLEAR_USE_RAW_J:-True}"
 BACKGROUND_CLEAR_EXCLUDE_BOUNDARY="${BACKGROUND_CLEAR_EXCLUDE_BOUNDARY:-True}"
 BACKGROUND_CLEAR_HIT_EXCLUSION_THRESHOLD="${BACKGROUND_CLEAR_HIT_EXCLUSION_THRESHOLD:--1.0}"
+BG_CLEAR_CHROMA_WEIGHT="${BG_CLEAR_CHROMA_WEIGHT:-0.0}"
+BACKGROUND_CLEAR_CHROMA_START_STEP="${BACKGROUND_CLEAR_CHROMA_START_STEP:-10000}"
+BACKGROUND_CLEAR_CHROMA_RAMP_STEPS="${BACKGROUND_CLEAR_CHROMA_RAMP_STEPS:-1000}"
+BACKGROUND_CLEAR_CHROMA_ACCUMULATION_MAX="${BACKGROUND_CLEAR_CHROMA_ACCUMULATION_MAX:-0.65}"
+BACKGROUND_CLEAR_CHROMA_ACCUMULATION_TEMPERATURE="${BACKGROUND_CLEAR_CHROMA_ACCUMULATION_TEMPERATURE:-0.05}"
+BACKGROUND_CLEAR_CHROMA_MARGIN="${BACKGROUND_CLEAR_CHROMA_MARGIN:-0.02}"
+BACKGROUND_CLEAR_CHROMA_MEDIUM_DETACH="${BACKGROUND_CLEAR_CHROMA_MEDIUM_DETACH:-True}"
+CLEAR_PROXY_ENABLED="${CLEAR_PROXY_ENABLED:-False}"
 BACKGROUND_DENSIFICATION_ENABLED="${BACKGROUND_DENSIFICATION_ENABLED:-False}"
 BACKGROUND_DENSIFICATION_WEIGHT="${BACKGROUND_DENSIFICATION_WEIGHT:-1.0}"
 UNCERTAIN_DENSIFICATION_WEIGHT="${UNCERTAIN_DENSIFICATION_WEIGHT:-0.5}"
@@ -50,6 +59,10 @@ BACKSCATTER_LOSS_RAMP_STEPS="${BACKSCATTER_LOSS_RAMP_STEPS:-0}"
 MEDIUM_PREDICTOR_MODE="${MEDIUM_PREDICTOR_MODE:-single}"
 LAMBDA_PSEUDO_DEPTH="${LAMBDA_PSEUDO_DEPTH:-0.0}"
 LAMBDA_MEDIUM_CONTEXT_RESIDUAL="${LAMBDA_MEDIUM_CONTEXT_RESIDUAL:-0.0}"
+STEPS_PER_SAVE="${STEPS_PER_SAVE:-1000}"
+SAVE_ONLY_LATEST_CHECKPOINT="${SAVE_ONLY_LATEST_CHECKPOINT:-True}"
+LOAD_DIR="${LOAD_DIR:-}"
+LOAD_CHECKPOINT="${LOAD_CHECKPOINT:-}"
 COMMON_FAR_MASK_DIR="${COMMON_FAR_MASK_DIR:-${REPO_DIR}/common_masks/m1_q90_iui3_redsea_20260724}"
 REGION_MASK_DIR="${REGION_MASK_DIR:-${REPO_DIR}/common_masks/m1_auto_eval_regions_iui3_redsea_20260724}"
 REFERENCE_CONFIG="${REFERENCE_CONFIG:-${REPO_DIR}/outputs/m1_dir_xy_camera_iui3_redsea_15000/water-splatting/m1_dir_xy_camera_iui3_redsea_15000_20260723_072412/config.yml}"
@@ -93,6 +106,14 @@ mkdir -p "${LOG_DIR}" "${RENDER_DIR}" "${DIAG_DIR}"
   echo "background_clear_use_raw_j=${BACKGROUND_CLEAR_USE_RAW_J}"
   echo "background_clear_exclude_boundary=${BACKGROUND_CLEAR_EXCLUDE_BOUNDARY}"
   echo "background_clear_hit_exclusion_threshold=${BACKGROUND_CLEAR_HIT_EXCLUSION_THRESHOLD}"
+  echo "lambda_background_clear_chroma=${BG_CLEAR_CHROMA_WEIGHT}"
+  echo "background_clear_chroma_start_step=${BACKGROUND_CLEAR_CHROMA_START_STEP}"
+  echo "background_clear_chroma_ramp_steps=${BACKGROUND_CLEAR_CHROMA_RAMP_STEPS}"
+  echo "background_clear_chroma_accumulation_max=${BACKGROUND_CLEAR_CHROMA_ACCUMULATION_MAX}"
+  echo "background_clear_chroma_accumulation_temperature=${BACKGROUND_CLEAR_CHROMA_ACCUMULATION_TEMPERATURE}"
+  echo "background_clear_chroma_margin=${BACKGROUND_CLEAR_CHROMA_MARGIN}"
+  echo "background_clear_chroma_medium_detach=${BACKGROUND_CLEAR_CHROMA_MEDIUM_DETACH}"
+  echo "clear_proxy_enabled=${CLEAR_PROXY_ENABLED}"
   echo "background_densification_enabled=${BACKGROUND_DENSIFICATION_ENABLED}"
   echo "background_densification_weight=${BACKGROUND_DENSIFICATION_WEIGHT}"
   echo "uncertain_densification_weight=${UNCERTAIN_DENSIFICATION_WEIGHT}"
@@ -115,6 +136,11 @@ mkdir -p "${LOG_DIR}" "${RENDER_DIR}" "${DIAG_DIR}"
   echo "lambda_medium_context_residual=${LAMBDA_MEDIUM_CONTEXT_RESIDUAL}"
   echo "reference_config=${REFERENCE_CONFIG}"
   echo "max_num_iterations=${MAX_NUM_ITERATIONS}"
+  echo "model_num_steps=${MODEL_NUM_STEPS}"
+  echo "steps_per_save=${STEPS_PER_SAVE}"
+  echo "save_only_latest_checkpoint=${SAVE_ONLY_LATEST_CHECKPOINT}"
+  echo "load_dir=${LOAD_DIR}"
+  echo "load_checkpoint=${LOAD_CHECKPOINT}"
   echo -n "git_commit="
   git -C "${REPO_DIR}" rev-parse HEAD || true
   git -C "${REPO_DIR}" status --short || true
@@ -122,7 +148,7 @@ mkdir -p "${LOG_DIR}" "${RENDER_DIR}" "${DIAG_DIR}"
 } | tee "${LOG_DIR}/run_manifest.txt"
 
 model_args=(
-  --pipeline.model.num-steps "${MAX_NUM_ITERATIONS}"
+  --pipeline.model.num-steps "${MODEL_NUM_STEPS}"
   --pipeline.model.medium-context-mode "${MEDIUM_CONTEXT_MODE}"
   --pipeline.model.medium-camera-context-scale 1.0
   --pipeline.model.medium-camera-context-dropout 0.0
@@ -146,6 +172,14 @@ model_args=(
   --pipeline.model.background-clear-use-raw-j "${BACKGROUND_CLEAR_USE_RAW_J}"
   --pipeline.model.background-clear-exclude-boundary "${BACKGROUND_CLEAR_EXCLUDE_BOUNDARY}"
   --pipeline.model.background-clear-hit-exclusion-threshold "${BACKGROUND_CLEAR_HIT_EXCLUSION_THRESHOLD}"
+  --pipeline.model.lambda-background-clear-chroma "${BG_CLEAR_CHROMA_WEIGHT}"
+  --pipeline.model.background-clear-chroma-start-step "${BACKGROUND_CLEAR_CHROMA_START_STEP}"
+  --pipeline.model.background-clear-chroma-ramp-steps "${BACKGROUND_CLEAR_CHROMA_RAMP_STEPS}"
+  --pipeline.model.background-clear-chroma-accumulation-max "${BACKGROUND_CLEAR_CHROMA_ACCUMULATION_MAX}"
+  --pipeline.model.background-clear-chroma-accumulation-temperature "${BACKGROUND_CLEAR_CHROMA_ACCUMULATION_TEMPERATURE}"
+  --pipeline.model.background-clear-chroma-margin "${BACKGROUND_CLEAR_CHROMA_MARGIN}"
+  --pipeline.model.background-clear-chroma-medium-detach "${BACKGROUND_CLEAR_CHROMA_MEDIUM_DETACH}"
+  --pipeline.model.clear-proxy-enabled "${CLEAR_PROXY_ENABLED}"
   --pipeline.model.background-densification-enabled "${BACKGROUND_DENSIFICATION_ENABLED}"
   --pipeline.model.background-densification-weight "${BACKGROUND_DENSIFICATION_WEIGHT}"
   --pipeline.model.uncertain-densification-weight "${UNCERTAIN_DENSIFICATION_WEIGHT}"
@@ -171,13 +205,25 @@ if [[ -n "${BACKSCATTER_REGION_MASK_DIR}" ]]; then
   model_args+=(--pipeline.model.backscatter-region-mask-dir "${BACKSCATTER_REGION_MASK_DIR}")
 fi
 
+trainer_args=(
+  --output-dir "${OUTPUT_DIR}"
+  --experiment-name "${EXPERIMENT_NAME}"
+  --timestamp "${TIMESTAMP}"
+  --vis tensorboard
+  --machine.seed "${SEED}"
+  --max-num-iterations "${MAX_NUM_ITERATIONS}"
+  --steps-per-save "${STEPS_PER_SAVE}"
+  --save-only-latest-checkpoint "${SAVE_ONLY_LATEST_CHECKPOINT}"
+)
+if [[ -n "${LOAD_DIR}" ]]; then
+  trainer_args+=(--load-dir "${LOAD_DIR}")
+fi
+if [[ -n "${LOAD_CHECKPOINT}" ]]; then
+  trainer_args+=(--load-checkpoint "${LOAD_CHECKPOINT}")
+fi
+
 CUDA_VISIBLE_DEVICES="${GPU}" "${NS_TRAIN}" water-splatting \
-  --output-dir "${OUTPUT_DIR}" \
-  --experiment-name "${EXPERIMENT_NAME}" \
-  --timestamp "${TIMESTAMP}" \
-  --vis tensorboard \
-  --machine.seed "${SEED}" \
-  --max-num-iterations "${MAX_NUM_ITERATIONS}" \
+  "${trainer_args[@]}" \
   "${model_args[@]}" \
   colmap \
   --data "${DATA_PATH}" \

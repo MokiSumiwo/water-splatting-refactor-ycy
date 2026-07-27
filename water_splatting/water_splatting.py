@@ -301,6 +301,20 @@ class WaterSplattingModelConfig(ModelConfig):
     """Exclude boundary pixels from background clear-Gaussian suppression."""
     background_clear_hit_exclusion_threshold: float = -1.0
     """If >=0, exclude background pixels whose hit_confidence is above this threshold."""
+    lambda_background_clear_chroma: float = 0.0
+    """Accumulation-gated water-chroma suppression on differentiable clear proxy."""
+    background_clear_chroma_start_step: int = 10000
+    """First step where proxy clear-chroma loss is active."""
+    background_clear_chroma_ramp_steps: int = 1000
+    """Linear ramp length for proxy clear-chroma loss."""
+    background_clear_chroma_accumulation_max: float = 0.65
+    """Detached accumulation gate midpoint for proxy clear-chroma loss."""
+    background_clear_chroma_accumulation_temperature: float = 0.05
+    """Detached accumulation gate temperature for proxy clear-chroma loss."""
+    background_clear_chroma_margin: float = 0.02
+    """Allowed clear-proxy chroma projection margin before penalty."""
+    background_clear_chroma_medium_detach: bool = True
+    """Detach medium chroma direction in proxy clear-chroma loss."""
     background_densification_enabled: bool = False
     """Enable background region weighting for densification gradient accumulation."""
     background_densification_weight: float = 1.0
@@ -317,6 +331,8 @@ class WaterSplattingModelConfig(ModelConfig):
     """Optional JSONL path for per-region densification diagnostics."""
     opacity_accumulation_diagnostic_enabled: bool = False
     """Retain/log opacity, scale, and sampled accumulation gradient diagnostics."""
+    clear_proxy_enabled: bool = False
+    """Enable an auxiliary zero-medium black-background clear proxy render."""
     gaussian_cleanup_enabled: bool = False
     """M3: enable contribution-aware Gaussian cleanup diagnostics/pruning."""
     gaussian_cleanup_dry_run: bool = True
@@ -2025,6 +2041,25 @@ class WaterSplattingModel(Model):
             j_gaussian = dual_render.j_gaussian
             j_object_raw = dual_render.j_raw
             j_object = dual_render.j_gaussian
+        clear_proxy_render = None
+        clear_proxy_required = bool(
+            getattr(self.config, "clear_proxy_enabled", False)
+            or getattr(self.config, "lambda_background_clear_chroma", 0.0) > 0.0
+        )
+        if clear_proxy_required:
+            clear_proxy_render = self.underwater_rasterizer.rasterize_clear_proxy(  # type: ignore
+                xys=self.xys,
+                xys_grad_abs=self.xys_grad_abs,
+                depths=depths,
+                radii=self.radii,
+                conics=conics,
+                num_tiles_hit=num_tiles_hit,
+                colors=rgbs,
+                opacities=opacities,
+                height=H,
+                width=W,
+                step=self.step,
+            )
         tail_weight_last = render.final_transmittance * torch.exp(-medium_bs * render.last_depth)
         tail_medium_original = tail_weight_last * medium_rgb
         rgb_medium_finite = render.rgb_medium - tail_medium_original
@@ -2163,6 +2198,15 @@ class WaterSplattingModel(Model):
             "medium_bs": medium_bs,
             "medium_attn": medium_attn,
         }
+        if clear_proxy_render is not None:
+            j_proxy_raw = clear_proxy_render.rgb
+            outputs["J_proxy_raw"] = j_proxy_raw
+            outputs["J_proxy"] = torch.clamp(j_proxy_raw, 0.0, 1.0)
+            outputs["J_proxy_abs_diff_from_renderer_clear"] = torch.abs(
+                j_proxy_raw.detach() - j_gaussian_raw.detach()
+            )
+            outputs["J_proxy_rgb_object"] = clear_proxy_render.rgb_object
+            outputs["J_proxy_accumulation"] = clear_proxy_render.accumulation
         if camera_index is not None:
             outputs["camera_index"] = torch.tensor(float(camera_index), device=self.device)
         if b_inf is not None:
@@ -2438,6 +2482,37 @@ class WaterSplattingModel(Model):
                         bg_clear_mask,
                     )
 
+        bg_chroma_weight = self._ramped_weight(
+            float(getattr(self.config, "lambda_background_clear_chroma", 0.0)),
+            int(getattr(self.config, "background_clear_chroma_start_step", 10000)),
+            int(getattr(self.config, "background_clear_chroma_ramp_steps", 1000)),
+        )
+        if bg_chroma_weight > 0.0 and "J_proxy_raw" in outputs:
+            bg_mask = self._load_backscatter_region_mask(
+                outputs=outputs,
+                key=getattr(self.config, "background_water_mask_key", "water"),
+                target=gt_img,
+            )
+            if bg_mask is not None and bg_mask.sum() > 0:
+                acc_max = float(getattr(self.config, "background_clear_chroma_accumulation_max", 0.65))
+                acc_temp = max(float(getattr(self.config, "background_clear_chroma_accumulation_temperature", 0.05)), 1e-6)
+                margin = float(getattr(self.config, "background_clear_chroma_margin", 0.02))
+                acc_gate = torch.sigmoid((acc_max - outputs["accumulation"].detach()) / acc_temp).clamp(0.0, 1.0)
+                j_proxy = outputs["J_proxy_raw"]
+                medium_chroma_source = outputs["medium_rgb"]
+                if getattr(self.config, "background_clear_chroma_medium_detach", True):
+                    medium_chroma_source = medium_chroma_source.detach()
+                j_chroma = j_proxy - j_proxy.mean(dim=-1, keepdim=True)
+                medium_chroma = medium_chroma_source - medium_chroma_source.mean(dim=-1, keepdim=True)
+                medium_dir = medium_chroma / medium_chroma.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+                projection = (j_chroma * medium_dir).sum(dim=-1, keepdim=True)
+                penalty = F.relu(projection - margin)
+                bg_chroma_mask = bg_mask * acc_gate
+                if bg_chroma_mask.sum() > 0:
+                    loss_dict["background_clear_chroma_loss"] = bg_chroma_weight * (
+                        bg_chroma_mask * penalty
+                    ).sum() / bg_chroma_mask.sum().clamp_min(1e-6)
+
         fg_weight = self._backscatter_ramp_weight(
             getattr(self.config, "lambda_foreground_transmission_reconstruction", 0.0)
         )
@@ -2643,6 +2718,12 @@ class WaterSplattingModel(Model):
             "J_object": outputs["J_object"],
             "rgb_clear_legacy": outputs["rgb_clear"],
         }
+        if "J_proxy_raw" in outputs:
+            images_dict["J_proxy"] = outputs["J_proxy"]
+            images_dict["J_proxy_raw"] = outputs["J_proxy_raw"].clamp(0.0, 1.0)
+            images_dict["J_proxy_abs_diff_from_renderer_clear"] = outputs[
+                "J_proxy_abs_diff_from_renderer_clear"
+            ].clamp(0.0, 1.0)
         if "background_region_mask" in outputs:
             images_dict["background_region_mask"] = outputs["background_region_mask"].expand_as(outputs["rgb"])
         if "densification_region_weight" in outputs:

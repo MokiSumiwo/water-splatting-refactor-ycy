@@ -30,6 +30,7 @@ def rasterize_gaussians(
     return_alpha: Optional[bool] = False,
     step: Optional[int] = None,
     return_hit_stats: Optional[bool] = False,
+    force_white_background: Optional[bool] = True,
 ) -> Tensor:
     """Rasterizes 2D gaussians by sorting and binning gaussian intersections for each tile and returns an N-dimensional output using alpha-compositing.
 
@@ -53,6 +54,9 @@ def rasterize_gaussians(
         block_width (int): MUST match whatever block width was used in the project_gaussians call. integer number of pixels between 2 and 16 inclusive
         background (Tensor): background color
         return_alpha (bool): whether to return alpha channel
+        force_white_background (bool): preserve legacy behavior by replacing
+            the provided background with white. Set False only for diagnostics
+            that explicitly need a trainable black-background clear proxy.
 
     Returns:
         A Tensor:
@@ -68,14 +72,15 @@ def rasterize_gaussians(
         # make sure colors are float [0,1]
         colors = colors.float() / 255
 
-    # if background is not None:
-    #     assert (
-    #         background.shape[0] == colors.shape[-1]
-    #     ), f"incorrect shape of background color tensor, expected shape {colors.shape[-1]}"
-    # else:
-    background = torch.ones(
-        colors.shape[-1], dtype=torch.float32, device=colors.device
-    )
+    if force_white_background or background is None:
+        background = torch.ones(colors.shape[-1], dtype=torch.float32, device=colors.device)
+    else:
+        if background.ndim == 3:
+            background = background.reshape(-1, background.shape[-1])[0]
+        assert (
+            background.ndim == 1 and background.shape[0] == colors.shape[-1]
+        ), f"incorrect shape of background color tensor, expected shape ({colors.shape[-1]},)"
+        background = background.to(device=colors.device, dtype=torch.float32)
 
     if xys.ndimension() != 2 or xys.size(1) != 2:
         raise ValueError("xys must have dimensions (N, 2)")
@@ -102,6 +107,7 @@ def rasterize_gaussians(
         return_alpha,
         step,
         return_hit_stats,
+        force_white_background,
     )
 
 
@@ -129,6 +135,7 @@ class _RasterizeGaussians(Function):
         return_alpha: Optional[bool] = False,
         step: Optional[int] = None,
         return_hit_stats: Optional[bool] = False,
+        force_white_background: Optional[bool] = True,
     ) -> Tensor:
         num_points = xys.size(0)
         tile_bounds = (
@@ -354,4 +361,5 @@ class _RasterizeGaussians(Function):
             None,  # return_alpha
             None,  # step
             None,  # return_hit_stats
+            None,  # force_white_background
         )
