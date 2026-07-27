@@ -822,6 +822,7 @@ class WaterSplattingModel(Model):
                     self.gauss_params[name] = torch.nn.Parameter(
                         torch.cat([param.detach(), split_params[name], dup_params[name]], dim=0)
                     )
+                self._sync_background_candidate_mask_for_densification(splits, dups, nsamps)
 
                 # append zeros to the max_2Dsize tensor
                 self.max_2Dsize = torch.cat(
@@ -920,6 +921,7 @@ class WaterSplattingModel(Model):
             toobigs_count = torch.sum(toobigs).item()
         for name, param in self.gauss_params.items():
             self.gauss_params[name] = torch.nn.Parameter(param[~culls])
+        self._sync_background_candidate_mask_for_cull(culls)
 
         CONSOLE.log(
             f"Culled {n_bef - self.num_points} gaussians "
@@ -1114,6 +1116,42 @@ class WaterSplattingModel(Model):
             return target
         progress = min((self.step - start) / max(float(ramp), 1.0), 1.0)
         return 1.0 + (target - 1.0) * progress
+
+    def _sync_background_candidate_mask_for_densification(
+        self,
+        splits: torch.Tensor,
+        dups: torch.Tensor,
+        nsamps: int,
+    ) -> None:
+        """Keep candidate flags aligned when densification appends children."""
+        if self._background_candidate_mask is None:
+            return
+        mask = self._background_candidate_mask.reshape(-1).to(device=self.device)
+        splits = splits.reshape(-1).to(device=self.device)
+        dups = dups.reshape(-1).to(device=self.device)
+        if mask.numel() != splits.numel() or mask.numel() != dups.numel():
+            raise ValueError(
+                "background candidate mask cannot be synchronized with densification: "
+                f"mask={mask.numel()} splits={splits.numel()} dups={dups.numel()}"
+            )
+        split_children = mask[splits].repeat(int(nsamps))
+        dup_children = mask[dups]
+        self._background_candidate_mask = torch.cat([mask, split_children, dup_children], dim=0).bool()
+        self._background_candidate_num_points = int(self._background_candidate_mask.numel())
+
+    def _sync_background_candidate_mask_for_cull(self, culls: torch.Tensor) -> None:
+        """Keep candidate flags aligned when Gaussian parameters are culled."""
+        if self._background_candidate_mask is None:
+            return
+        mask = self._background_candidate_mask.reshape(-1).to(device=self.device)
+        culls = culls.reshape(-1).to(device=self.device)
+        if mask.numel() != culls.numel():
+            raise ValueError(
+                "background candidate mask cannot be synchronized with culling: "
+                f"mask={mask.numel()} culls={culls.numel()}"
+            )
+        self._background_candidate_mask = mask[~culls].detach().bool()
+        self._background_candidate_num_points = int(self._background_candidate_mask.numel())
 
     def _load_background_candidate_mask(self) -> torch.Tensor:
         path_text = getattr(self.config, "background_candidate_mask_path", None)
