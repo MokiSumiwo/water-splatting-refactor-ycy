@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import deque
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
 
+import numpy as np
 import torch
 
 from nerfstudio.utils.eval_utils import eval_setup
@@ -39,6 +41,51 @@ def _masked_values(image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
 def _luma(rgb: torch.Tensor) -> torch.Tensor:
     weights = rgb.new_tensor([0.2126, 0.7152, 0.0722])
     return (rgb * weights).sum(dim=-1, keepdim=True)
+
+
+def _chroma(rgb: torch.Tensor) -> torch.Tensor:
+    return rgb - rgb.mean(dim=-1, keepdim=True)
+
+
+def _medium_projection(j_proxy: torch.Tensor, medium_rgb: torch.Tensor) -> torch.Tensor:
+    j_chroma = _chroma(j_proxy.detach().float())
+    medium_chroma = _chroma(medium_rgb.detach().float())
+    medium_dir = medium_chroma / medium_chroma.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    return (j_chroma * medium_dir).sum(dim=-1, keepdim=True)
+
+
+def _largest_connected_component_pixels(mask: torch.Tensor) -> int:
+    arr = np.asarray(mask.detach().cpu().squeeze(-1).numpy(), dtype=bool)
+    if arr.size == 0 or not arr.any():
+        return 0
+    try:
+        from scipy import ndimage  # type: ignore
+
+        labels, num = ndimage.label(arr)
+        if num == 0:
+            return 0
+        sizes = np.bincount(labels.reshape(-1))
+        return int(sizes[1:].max()) if sizes.size > 1 else 0
+    except Exception:
+        visited = np.zeros_like(arr, dtype=bool)
+        h, w = arr.shape
+        best = 0
+        for y in range(h):
+            for x in range(w):
+                if not arr[y, x] or visited[y, x]:
+                    continue
+                visited[y, x] = True
+                count = 0
+                queue: deque[tuple[int, int]] = deque([(y, x)])
+                while queue:
+                    cy, cx = queue.popleft()
+                    count += 1
+                    for ny, nx in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
+                        if 0 <= ny < h and 0 <= nx < w and arr[ny, nx] and not visited[ny, nx]:
+                            visited[ny, nx] = True
+                            queue.append((ny, nx))
+                best = max(best, count)
+        return int(best)
 
 
 def _fraction_gt(values: torch.Tensor, threshold: float) -> float:
@@ -82,6 +129,9 @@ def _maybe_save_heatmaps(
     m_capacity: torch.Tensor | None,
     hit_confidence: torch.Tensor | None,
     depth_std_relative: torch.Tensor | None,
+    proxy_luma: torch.Tensor | None,
+    medium_projection: torch.Tensor | None,
+    far_bg_residual_mask: torch.Tensor | None,
 ) -> None:
     from torchvision.utils import save_image
 
@@ -112,11 +162,24 @@ def _maybe_save_heatmaps(
             depth_std_relative.clamp(0, 1).permute(2, 0, 1).cpu(),
             output_dir / f"depth_std_relative_{image_idx:04d}.png",
         )
+    if proxy_luma is not None:
+        save_image(proxy_luma.clamp(0, 1).permute(2, 0, 1).cpu(), output_dir / f"J_proxy_luma_{image_idx:04d}.png")
+    if medium_projection is not None:
+        save_image(
+            (medium_projection / 0.10).clamp(0, 1).permute(2, 0, 1).cpu(),
+            output_dir / f"proxy_medium_projection_{image_idx:04d}.png",
+        )
+    if far_bg_residual_mask is not None:
+        save_image(
+            far_bg_residual_mask.float().permute(2, 0, 1).cpu(),
+            output_dir / f"far_bg_residual_mask_{image_idx:04d}.png",
+        )
 
 
 def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
     config, pipeline, checkpoint_path, step = eval_setup(Path(args.load_config))
     pipeline.eval()
+    pipeline.model.config.clear_proxy_enabled = True
 
     image_summaries: List[Dict[str, Any]] = []
     all_far_alpha: List[torch.Tensor] = []
@@ -127,6 +190,9 @@ def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
     all_far_m_inf_eff: List[torch.Tensor] = []
     all_far_m_capacity: List[torch.Tensor] = []
     all_far_hit_confidence: List[torch.Tensor] = []
+    all_far_bg_luma: List[torch.Tensor] = []
+    all_far_bg_accumulation: List[torch.Tensor] = []
+    all_far_bg_projection: List[torch.Tensor] = []
 
     with torch.no_grad():
         for image_idx, (camera, _batch) in enumerate(pipeline.datamanager.fixed_indices_eval_dataloader):
@@ -137,6 +203,10 @@ def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
             object_luma = _luma(rgb_object.abs())
             clear_luma = _luma(outputs.get("J_gaussian", outputs["J"]).detach().float().clamp(0.0, 1.0))
             j_object_luma = _luma(outputs.get("J_object", outputs.get("J_gaussian", outputs["J"])).detach().float().clamp(0.0, 1.0))
+            j_proxy = outputs.get("J_proxy_raw", outputs.get("J_gaussian_raw", outputs["J"])).detach().float()
+            proxy_luma = _luma(j_proxy)
+            medium_rgb = outputs.get("b_inf", outputs["medium_rgb"]).detach().float()
+            medium_projection = _medium_projection(j_proxy, medium_rgb)
             m_inf = outputs.get("m_inf")
             m_inf_eff = outputs.get("m_inf_eff")
             m_capacity = outputs.get("m_capacity")
@@ -181,6 +251,15 @@ def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
                 if hit_confidence is not None
                 else torch.empty(0, device=depth.device)
             )
+            far_bg_residual_mask = (
+                far_mask
+                & (medium_projection > float(args.bg_chroma_threshold))
+                & (proxy_luma > float(args.bg_luma_threshold))
+            )
+            far_bg_luma = _masked_values(proxy_luma, far_bg_residual_mask)
+            far_bg_accumulation = _masked_values(accumulation, far_bg_residual_mask)
+            far_bg_projection = _masked_values(medium_projection, far_bg_residual_mask)
+            far_bg_largest_component_pixels = _largest_connected_component_pixels(far_bg_residual_mask)
 
             all_far_alpha.append(far_alpha.detach().cpu())
             all_far_object.append(far_object.detach().cpu())
@@ -194,8 +273,15 @@ def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
                 all_far_m_capacity.append(far_m_capacity.detach().cpu())
             if far_hit_confidence.numel() > 0:
                 all_far_hit_confidence.append(far_hit_confidence.detach().cpu())
+            if far_bg_luma.numel() > 0:
+                all_far_bg_luma.append(far_bg_luma.detach().cpu())
+            if far_bg_accumulation.numel() > 0:
+                all_far_bg_accumulation.append(far_bg_accumulation.detach().cpu())
+            if far_bg_projection.numel() > 0:
+                all_far_bg_projection.append(far_bg_projection.detach().cpu())
 
             far_pixels = int(far_mask.sum().item())
+            far_bg_pixels = int(far_bg_residual_mask.sum().item())
             total_pixels = int(far_mask.numel())
             image_summary = {
                 "image_index": image_idx,
@@ -218,6 +304,13 @@ def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
                 "far_clear_gt_threshold_fraction": _fraction_gt(far_clear, args.clear_threshold),
                 "far_m_inf_gt_0p5_fraction": _fraction_gt(far_m_inf, 0.5),
                 "far_m_inf_eff_gt_0p5_fraction": _fraction_gt(far_m_inf_eff, 0.5),
+                "far_bg_residual_pixels": far_bg_pixels,
+                "far_bg_residual_fraction": far_bg_pixels / max(far_pixels, 1),
+                "far_bg_residual_luma": _stats(far_bg_luma),
+                "far_bg_residual_accumulation": _stats(far_bg_accumulation),
+                "far_bg_residual_projection": _stats(far_bg_projection),
+                "far_bg_largest_component_pixels": far_bg_largest_component_pixels,
+                "far_bg_largest_component_fraction": far_bg_largest_component_pixels / max(far_pixels, 1),
             }
             image_summaries.append(image_summary)
 
@@ -235,6 +328,9 @@ def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
                     m_capacity=m_capacity,
                     hit_confidence=hit_confidence,
                     depth_std_relative=depth_std_relative,
+                    proxy_luma=proxy_luma,
+                    medium_projection=medium_projection,
+                    far_bg_residual_mask=far_bg_residual_mask,
                 )
 
     far_alpha_all = torch.cat(all_far_alpha) if all_far_alpha else torch.empty(0)
@@ -245,9 +341,20 @@ def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
     far_m_inf_eff_all = torch.cat(all_far_m_inf_eff) if all_far_m_inf_eff else torch.empty(0)
     far_m_capacity_all = torch.cat(all_far_m_capacity) if all_far_m_capacity else torch.empty(0)
     far_hit_confidence_all = torch.cat(all_far_hit_confidence) if all_far_hit_confidence else torch.empty(0)
+    far_bg_luma_all = torch.cat(all_far_bg_luma) if all_far_bg_luma else torch.empty(0)
+    far_bg_accumulation_all = (
+        torch.cat(all_far_bg_accumulation) if all_far_bg_accumulation else torch.empty(0)
+    )
+    far_bg_projection_all = torch.cat(all_far_bg_projection) if all_far_bg_projection else torch.empty(0)
+    total_far_pixels = int(sum(item["far_pixels"] for item in image_summaries))
+    total_far_bg_pixels = int(sum(item["far_bg_residual_pixels"] for item in image_summaries))
+    total_largest_component_pixels = int(sum(item["far_bg_largest_component_pixels"] for item in image_summaries))
+    max_largest_component_fraction = (
+        max((float(item["far_bg_largest_component_fraction"]) for item in image_summaries), default=0.0)
+    )
 
     aggregate = {
-        "far_pixels": int(sum(item["far_pixels"] for item in image_summaries)),
+        "far_pixels": total_far_pixels,
         "far_accumulation": _stats(far_alpha_all),
         "far_rgb_object_luma": _stats(far_object_all),
         "far_clear_luma": _stats(far_clear_all),
@@ -261,6 +368,14 @@ def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
         "far_clear_gt_threshold_fraction": _fraction_gt(far_clear_all, args.clear_threshold),
         "far_m_inf_gt_0p5_fraction": _fraction_gt(far_m_inf_all, 0.5),
         "far_m_inf_eff_gt_0p5_fraction": _fraction_gt(far_m_inf_eff_all, 0.5),
+        "far_bg_residual_pixels": total_far_bg_pixels,
+        "far_bg_residual_fraction": total_far_bg_pixels / max(total_far_pixels, 1),
+        "far_bg_residual_luma": _stats(far_bg_luma_all),
+        "far_bg_residual_accumulation": _stats(far_bg_accumulation_all),
+        "far_bg_residual_projection": _stats(far_bg_projection_all),
+        "far_bg_largest_component_pixels_sum": total_largest_component_pixels,
+        "far_bg_largest_component_fraction_sum": total_largest_component_pixels / max(total_far_pixels, 1),
+        "far_bg_largest_component_fraction_max": max_largest_component_fraction,
     }
     repo = Path(__file__).resolve().parents[2]
     result = {
@@ -277,6 +392,8 @@ def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
         "alpha_threshold": args.alpha_threshold,
         "object_threshold": args.object_threshold,
         "clear_threshold": args.clear_threshold,
+        "bg_chroma_threshold": args.bg_chroma_threshold,
+        "bg_luma_threshold": args.bg_luma_threshold,
         "aggregate": aggregate,
         "images": image_summaries,
     }
@@ -292,6 +409,8 @@ def main() -> None:
     parser.add_argument("--alpha-threshold", type=float, default=0.05)
     parser.add_argument("--object-threshold", type=float, default=0.03)
     parser.add_argument("--clear-threshold", type=float, default=0.03)
+    parser.add_argument("--bg-chroma-threshold", type=float, default=0.015)
+    parser.add_argument("--bg-luma-threshold", type=float, default=0.02)
     parser.add_argument("--save-heatmaps", action="store_true")
     args = parser.parse_args()
 

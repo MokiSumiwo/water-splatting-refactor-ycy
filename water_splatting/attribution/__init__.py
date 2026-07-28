@@ -3,6 +3,7 @@
 from .medium_explainability import (
     MediumExplainabilitySupport,
     budgeted_capacity_loss,
+    build_residual_gated_halo_support,
     build_route_capacity_support,
     build_training_routed_prediction,
     clear_proxy_chroma_loss,
@@ -17,6 +18,7 @@ from .medium_explainability import (
 __all__ = [
     "MediumExplainabilitySupport",
     "budgeted_capacity_loss",
+    "build_residual_gated_halo_support",
     "build_route_capacity_support",
     "build_training_routed_prediction",
     "clear_proxy_chroma_loss",

@@ -31,6 +31,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from water_splatting.attribution import (
     budgeted_capacity_loss,
+    build_residual_gated_halo_support,
     build_route_capacity_support,
     build_training_routed_prediction,
     clear_proxy_chroma_loss,
@@ -356,6 +357,28 @@ class WaterSplattingModelConfig(ModelConfig):
     """Weight for budgeted Gaussian capacity suppression."""
     budgeted_capacity_post_scale: float = 0.5
     """Capacity weight multiplier after proxy refinement begins."""
+    halo_capacity_enabled: bool = False
+    """Enable residual-gated halo capacity pressure around medium-explainable core water."""
+    lambda_halo_capacity: float = 0.0
+    """Weight for residual-gated halo capacity suppression."""
+    halo_capacity_value: float = 0.03
+    """Allowed Gaussian accumulation budget on residual-gated halo support."""
+    halo_capacity_temperature: float = 0.02
+    """Softplus temperature for halo capacity budget loss."""
+    halo_capacity_start_step: int = 4000
+    """First step where halo capacity loss may ramp."""
+    halo_capacity_ramp_steps: int = 1000
+    """Ramp length for halo capacity loss."""
+    halo_capacity_post_scale: float = 0.5
+    """Halo capacity multiplier after proxy refinement begins."""
+    halo_chroma_margin: float = 0.015
+    """Medium-direction clear-proxy chroma residual threshold for halo support."""
+    halo_chroma_temperature: float = 0.01
+    """Sigmoid temperature for halo chroma gate."""
+    halo_luma_min: float = 0.02
+    """Minimum clear-proxy luma threshold for halo support."""
+    halo_luma_temperature: float = 0.01
+    """Sigmoid temperature for halo luma gate."""
     medium_support_gradient_tau: float = 0.05
     """Image-gradient temperature for flat-water support."""
     medium_support_variance_tau: float = 0.02
@@ -400,6 +423,8 @@ class WaterSplattingModelConfig(ModelConfig):
     """Retain/log opacity, scale, and sampled accumulation gradient diagnostics."""
     clear_proxy_enabled: bool = False
     """Enable an auxiliary zero-medium black-background clear proxy render."""
+    clear_proxy_appearance_only: bool = False
+    """Detach clear-proxy geometry and opacity so chroma loss updates only Gaussian appearance."""
     background_gradient_surgery_enabled: bool = False
     """Enable candidate-mask opacity-gradient modulation for open-water contributors."""
     background_candidate_mask_path: Optional[str] = None
@@ -2319,21 +2344,39 @@ class WaterSplattingModel(Model):
             chroma_weight_config > 0.0
             and (not self.training or self.step >= int(getattr(self.config, "background_clear_chroma_start_step", 10000)))
         )
+        halo_weight_config = float(getattr(self.config, "lambda_halo_capacity", 0.0))
+        halo_active_by_step = (
+            bool(getattr(self.config, "halo_capacity_enabled", False))
+            and halo_weight_config > 0.0
+            and (not self.training or self.step >= int(getattr(self.config, "halo_capacity_start_step", 4000)))
+        )
         clear_proxy_required = bool(
             getattr(self.config, "clear_proxy_enabled", False)
             or chroma_active_by_step
+            or halo_active_by_step
         )
         if clear_proxy_required:
             self.xys_grad_abs_proxy = torch.zeros_like(self.xys)
+            proxy_xys = self.xys
+            proxy_depths = depths
+            proxy_radii = self.radii
+            proxy_conics = conics
+            proxy_opacities = opacities
+            if bool(getattr(self.config, "clear_proxy_appearance_only", False)):
+                proxy_xys = proxy_xys.detach()
+                proxy_depths = proxy_depths.detach()
+                proxy_radii = proxy_radii.detach()
+                proxy_conics = proxy_conics.detach()
+                proxy_opacities = proxy_opacities.detach()
             clear_proxy_render = self.underwater_rasterizer.rasterize_clear_proxy(  # type: ignore
-                xys=self.xys,
+                xys=proxy_xys,
                 xys_grad_abs=self.xys_grad_abs_proxy,
-                depths=depths,
-                radii=self.radii,
-                conics=conics,
+                depths=proxy_depths,
+                radii=proxy_radii,
+                conics=proxy_conics,
                 num_tiles_hit=num_tiles_hit,
                 colors=rgbs,
-                opacities=opacities,
+                opacities=proxy_opacities,
                 height=H,
                 width=W,
                 step=self.step,
@@ -2688,13 +2731,16 @@ class WaterSplattingModel(Model):
 
         medium_supports = None
         support_route = None
+        support_broad = None
         support_capacity = None
+        support_halo_base = None
         support_bootstrap = None
         needs_medium_support = any(
             [
                 bool(getattr(self.config, "medium_explainability_enabled", False)),
                 bool(getattr(self.config, "training_gradient_routing_enabled", False)),
                 bool(getattr(self.config, "budgeted_capacity_enabled", False)),
+                bool(getattr(self.config, "halo_capacity_enabled", False)),
                 bool(getattr(self.config, "background_clear_chroma_use_medium_support", False)),
                 float(getattr(self.config, "lambda_proxy_clear_luma", 0.0)) > 0.0,
             ]
@@ -2717,17 +2763,24 @@ class WaterSplattingModel(Model):
                 use_far=bool(getattr(self.config, "medium_support_use_far", True)),
             )
             support_route = medium_supports.route
-            support_capacity = medium_supports.capacity
+            support_broad = medium_supports.broad
+            support_capacity = medium_supports.core
+            support_halo_base = medium_supports.halo_base
             support_bootstrap = medium_supports.bootstrap
             if image_mask is not None:
                 support_route = support_route * image_mask
+                support_broad = support_broad * image_mask
                 support_capacity = support_capacity * image_mask
+                support_halo_base = support_halo_base * image_mask
                 support_bootstrap = support_bootstrap * image_mask
             outputs["medium_support_flat"] = medium_supports.flat
             outputs["medium_support_med"] = medium_supports.medium
             outputs["medium_support_far"] = medium_supports.far
             outputs["medium_support_route"] = support_route
+            outputs["medium_support_broad"] = support_broad
+            outputs["medium_support_core"] = support_capacity
             outputs["medium_support_capacity"] = support_capacity
+            outputs["medium_support_halo_base"] = support_halo_base
             outputs["medium_support_bootstrap"] = support_bootstrap
             outputs["medium_support_error"] = medium_supports.medium_error
             if metrics_dict is not None:
@@ -2814,6 +2867,44 @@ class WaterSplattingModel(Model):
                 budget=float(getattr(self.config, "budgeted_capacity_value", 0.05)),
                 temperature=float(getattr(self.config, "budgeted_capacity_temperature", 0.02)),
             )
+
+        halo_weight = self._ramped_weight(
+            float(getattr(self.config, "lambda_halo_capacity", 0.0)),
+            int(getattr(self.config, "halo_capacity_start_step", 4000)),
+            int(getattr(self.config, "halo_capacity_ramp_steps", 1000)),
+        )
+        if (
+            bool(getattr(self.config, "halo_capacity_enabled", False))
+            and halo_weight > 0.0
+            and support_broad is not None
+            and support_capacity is not None
+            and "J_proxy_raw" in outputs
+        ):
+            halo_support = build_residual_gated_halo_support(
+                j_proxy=outputs["J_proxy_raw"],
+                medium_rgb=outputs.get("b_inf", outputs["medium_rgb"]),
+                broad_support=support_broad,
+                core_support=support_capacity,
+                chroma_margin=float(getattr(self.config, "halo_chroma_margin", 0.015)),
+                chroma_temperature=float(getattr(self.config, "halo_chroma_temperature", 0.01)),
+                luma_min=float(getattr(self.config, "halo_luma_min", 0.02)),
+                luma_temperature=float(getattr(self.config, "halo_luma_temperature", 0.01)),
+            )
+            if image_mask is not None:
+                halo_support = halo_support * image_mask
+            post_start = int(getattr(self.config, "background_clear_chroma_start_step", 10000))
+            if self.step >= post_start:
+                halo_weight *= float(getattr(self.config, "halo_capacity_post_scale", 0.5))
+            outputs["medium_support_halo"] = halo_support
+            loss_dict["halo_capacity_loss"] = halo_weight * budgeted_capacity_loss(
+                accumulation=outputs["accumulation"],
+                support=halo_support,
+                budget=float(getattr(self.config, "halo_capacity_value", 0.03)),
+                temperature=float(getattr(self.config, "halo_capacity_temperature", 0.02)),
+            )
+            if metrics_dict is not None:
+                metrics_dict["medium_support_halo_mean"] = halo_support.mean()
+                metrics_dict["medium_support_halo_gt_0p25_fraction"] = (halo_support > 0.25).float().mean()
 
         bg_weight = self._backscatter_ramp_weight(getattr(self.config, "lambda_background_water_color", 0.0))
         if bg_weight > 0.0 and "b_inf" in outputs:

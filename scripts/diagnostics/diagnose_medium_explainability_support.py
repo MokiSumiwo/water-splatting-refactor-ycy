@@ -14,7 +14,7 @@ import torch
 from PIL import Image
 
 from nerfstudio.utils.eval_utils import eval_setup
-from water_splatting.attribution import build_route_capacity_support
+from water_splatting.attribution import build_residual_gated_halo_support, build_route_capacity_support
 
 
 def _git_commit(repo: Path) -> str:
@@ -145,6 +145,16 @@ def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
         grad_proxy = _gradient_proxy(gt)
         j_proxy = outputs.get("J_proxy_raw", torch.zeros_like(gt))
         proxy_bluegreen = torch.relu(torch.maximum(j_proxy[..., 1:2], j_proxy[..., 2:3]) - j_proxy[..., 0:1])
+        halo_support = build_residual_gated_halo_support(
+            j_proxy=j_proxy,
+            medium_rgb=b_inf,
+            broad_support=support.broad,
+            core_support=support.core,
+            chroma_margin=args.halo_chroma_margin,
+            chroma_temperature=args.halo_chroma_temperature,
+            luma_min=args.halo_luma_min,
+            luma_temperature=args.halo_luma_temperature,
+        )
 
         prefix = args.output_dir / f"{args.split}_{image_idx:04d}"
         _save_png(prefix.with_name(prefix.name + "_gt.png"), gt)
@@ -156,19 +166,32 @@ def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
         _save_png(prefix.with_name(prefix.name + "_S_med.png"), support.medium)
         _save_png(prefix.with_name(prefix.name + "_S_far.png"), support.far)
         _save_png(prefix.with_name(prefix.name + "_S_route.png"), support.route)
+        _save_png(prefix.with_name(prefix.name + "_S_broad.png"), support.broad)
+        _save_png(prefix.with_name(prefix.name + "_S_core.png"), support.core)
         _save_png(prefix.with_name(prefix.name + "_S_cap.png"), support.capacity)
+        _save_png(prefix.with_name(prefix.name + "_S_halo_base.png"), support.halo_base)
+        _save_png(prefix.with_name(prefix.name + "_S_halo.png"), halo_support)
 
         image_stats = {
             "image_index": image_idx,
             "support_route_mean": float(support.route.mean().item()),
+            "support_broad_mean": float(support.broad.mean().item()),
+            "support_core_mean": float(support.core.mean().item()),
             "support_capacity_mean": float(support.capacity.mean().item()),
+            "support_halo_base_mean": float(support.halo_base.mean().item()),
+            "support_halo_mean": float(halo_support.mean().item()),
             "support_capacity_gt_0p25_fraction": float((support.capacity > 0.25).float().mean().item()),
+            "support_halo_gt_0p25_fraction": float((halo_support > 0.25).float().mean().item()),
             "support_accumulation_corr": _corr(support.capacity, outputs["accumulation"]),
+            "support_halo_accumulation_corr": _corr(halo_support, outputs["accumulation"]),
             "support_gradient_corr": _corr(support.capacity, grad_proxy),
             "support_medium_error_corr": _corr(support.capacity, support.medium_error),
             "water_support_capacity_mean": _masked_mean(support.capacity, masks["water"]),
+            "water_support_halo_mean": _masked_mean(halo_support, masks["water"]),
             "object_support_capacity_mean": _masked_mean(support.capacity, masks["object"]),
+            "object_support_halo_mean": _masked_mean(halo_support, masks["object"]),
             "boundary_support_capacity_mean": _masked_mean(support.capacity, masks["boundary"]),
+            "boundary_support_halo_mean": _masked_mean(halo_support, masks["boundary"]),
         }
         water = max(image_stats["water_support_capacity_mean"], 1e-12)
         image_stats["object_over_water_support"] = image_stats["object_support_capacity_mean"] / water
@@ -213,6 +236,10 @@ def main() -> None:
     parser.add_argument("--far-floor", type=float, default=0.50)
     parser.add_argument("--depth-mid", type=float, default=0.75)
     parser.add_argument("--depth-temperature", type=float, default=0.15)
+    parser.add_argument("--halo-chroma-margin", type=float, default=0.015)
+    parser.add_argument("--halo-chroma-temperature", type=float, default=0.01)
+    parser.add_argument("--halo-luma-min", type=float, default=0.02)
+    parser.add_argument("--halo-luma-temperature", type=float, default=0.01)
     parser.add_argument("--disable-flatness", action="store_true")
     parser.add_argument("--disable-medium", action="store_true")
     parser.add_argument("--disable-far", action="store_true")

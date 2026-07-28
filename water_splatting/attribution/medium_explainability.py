@@ -25,7 +25,10 @@ class MediumExplainabilitySupport:
     far: Tensor
     far_effective: Tensor
     route: Tensor
+    broad: Tensor
+    core: Tensor
     capacity: Tensor
+    halo_base: Tensor
     bootstrap: Tensor
     medium_error: Tensor
 
@@ -181,7 +184,9 @@ def build_route_capacity_support(
         else (ones, ones)
     )
     route = (flat * medium).clamp(0.0, 1.0).detach()
-    capacity = (flat.square() * medium.square() * far_effective).clamp(0.0, 1.0).detach()
+    broad = (flat * medium * far_effective).clamp(0.0, 1.0).detach()
+    core = (flat.square() * medium.square() * far_effective).clamp(0.0, 1.0).detach()
+    halo_base = torch.relu(broad - core).clamp(0.0, 1.0).detach()
     bootstrap = (flat * far_effective).clamp(0.0, 1.0).detach()
     return MediumExplainabilitySupport(
         flat=flat.detach(),
@@ -189,7 +194,10 @@ def build_route_capacity_support(
         far=far.detach(),
         far_effective=far_effective.detach(),
         route=route,
-        capacity=capacity,
+        broad=broad,
+        core=core,
+        capacity=core,
+        halo_base=halo_base,
         bootstrap=bootstrap,
         medium_error=medium_error.detach(),
     )
@@ -252,6 +260,45 @@ def clear_proxy_chroma_loss(
     return (support * penalty).sum() / support.sum().clamp_min(1e-6)
 
 
+def build_residual_gated_halo_support(
+    *,
+    j_proxy: Tensor,
+    medium_rgb: Tensor,
+    broad_support: Tensor,
+    core_support: Tensor,
+    chroma_margin: float,
+    chroma_temperature: float,
+    luma_min: float,
+    luma_temperature: float,
+) -> Tensor:
+    """Build a detached halo support gated by visible medium-colored clear residual.
+
+    The halo base widens the core support from S_flat^2 S_med^2 S_far to
+    S_flat S_med S_far, then gates that transition band by detached
+    clear-proxy luma and medium-direction chroma residual. This keeps capacity
+    pressure focused on blue-green far-water halos without using accumulation to
+    define the support.
+    """
+
+    j = j_proxy.detach().float()
+    medium = medium_rgb.detach().float()
+    core = core_support.detach().to(device=j.device, dtype=j.dtype).clamp(0.0, 1.0)
+    broad = broad_support.detach().to(device=j.device, dtype=j.dtype).clamp(0.0, 1.0)
+    halo_base = torch.relu(broad - core).clamp(0.0, 1.0)
+
+    j_chroma = _chroma(j)
+    medium_chroma = _chroma(medium)
+    medium_dir = medium_chroma / medium_chroma.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    projection = (j_chroma * medium_dir).sum(dim=-1, keepdim=True)
+    chroma_gate = torch.sigmoid(
+        (projection - float(chroma_margin)) / max(float(chroma_temperature), 1e-6)
+    ).clamp(0.0, 1.0)
+    luma_gate = torch.sigmoid(
+        (_luma(j) - float(luma_min)) / max(float(luma_temperature), 1e-6)
+    ).clamp(0.0, 1.0)
+    return (halo_base * chroma_gate * luma_gate).clamp(0.0, 1.0).detach()
+
+
 def clear_proxy_luma_budget_loss(
     *,
     j_proxy: Tensor,
@@ -275,7 +322,10 @@ def support_coverage_stats(supports: MediumExplainabilitySupport) -> Dict[str, T
         "medium_mean": supports.medium.mean(),
         "far_mean": supports.far.mean(),
         "route_mean": supports.route.mean(),
+        "broad_mean": supports.broad.mean(),
+        "core_mean": supports.core.mean(),
         "capacity_mean": supports.capacity.mean(),
+        "halo_base_mean": supports.halo_base.mean(),
         "bootstrap_mean": supports.bootstrap.mean(),
         "medium_error_mean": supports.medium_error.mean(),
     }
