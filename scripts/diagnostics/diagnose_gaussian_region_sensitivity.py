@@ -278,6 +278,9 @@ def _top_candidates(
     scale = model.scales.detach().exp().max(dim=-1).values.reshape(-1)
     dc_rgb = SH2RGB(model.features_dc.detach()).clamp(0.0, 1.0)
     sh_rest_norm = model.features_rest.detach().reshape(model.features_rest.shape[0], -1).norm(dim=-1)
+    lineage_ids = getattr(model, "gaussian_lineage_ids", None)
+    if lineage_ids is None or lineage_ids.numel() != water_score.numel():
+        lineage_ids = torch.arange(water_score.numel(), device=water_score.device)
     out: List[Dict[str, Any]] = []
     for value, idx in zip(top_vals.detach().cpu(), top_idx.detach().cpu()):
         if not torch.isfinite(value):
@@ -287,6 +290,7 @@ def _top_candidates(
         out.append(
             {
                 "index": i,
+                "lineage_id": int(lineage_ids[i].detach().cpu().item()),
                 "candidate_score": float(value.item()),
                 "selected_candidate": bool(candidate_mask[i].item()) if candidate_mask is not None else False,
                 "water_score": float(water_score[i].item()),
@@ -460,6 +464,9 @@ def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
         pt_path = args.candidate_output_prefix.with_suffix(".pt")
         json_path = args.candidate_output_prefix.with_suffix(".json")
         pt_path.parent.mkdir(parents=True, exist_ok=True)
+        lineage_ids = getattr(model, "gaussian_lineage_ids", None)
+        if lineage_ids is None or lineage_ids.numel() != water.numel():
+            lineage_ids = torch.arange(water.numel(), dtype=torch.long, device=water.device)
         candidate_payload = {
             "candidate_mask": candidate_mask.detach().cpu(),
             "candidate_score": candidate_score.detach().cpu(),
@@ -469,6 +476,12 @@ def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
             "water_proxy_bluegreen_score": proxy.detach().cpu(),
             "features_rest_score": features_rest.detach().cpu(),
             "view_count": view_count.detach().cpu(),
+            "gaussian_lineage_ids": lineage_ids.detach().cpu().long(),
+            "means": model.means.detach().cpu(),
+            "opacity": torch.sigmoid(model.opacities.detach()).reshape(-1).cpu(),
+            "max_scale": model.scales.detach().exp().max(dim=-1).values.reshape(-1).cpu(),
+            "dc_rgb": SH2RGB(model.features_dc.detach()).clamp(0.0, 1.0).cpu(),
+            "sh_rest_norm": model.features_rest.detach().reshape(model.features_rest.shape[0], -1).norm(dim=-1).cpu(),
             "summary": candidate_summary,
             "split": args.split,
             "load_config": str(args.load_config),

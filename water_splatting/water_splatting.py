@@ -542,6 +542,11 @@ class WaterSplattingModel(Model):
                 "opacities": opacities,
             }
         )
+        self.register_buffer(
+            "gaussian_lineage_ids",
+            torch.arange(num_points, dtype=torch.long, device=means.device),
+            persistent=True,
+        )
 
         # metrics
         from torchmetrics.image import PeakSignalNoiseRatio
@@ -640,10 +645,18 @@ class WaterSplattingModel(Model):
             for p in ["means", "scales", "quats", "features_dc", "features_rest", "opacities"]:
                 dict[f"gauss_params.{p}"] = dict[p]
         newp = dict["gauss_params.means"].shape[0]
+        if "gaussian_lineage_ids" not in dict:
+            dict["gaussian_lineage_ids"] = torch.arange(newp, dtype=torch.long)
+        if tuple(self.gaussian_lineage_ids.shape) != (newp,):
+            self.gaussian_lineage_ids.data = torch.zeros(newp, device=self.device, dtype=torch.long)
         for name, param in self.gauss_params.items():
             old_shape = param.shape
             new_shape = (newp,) + old_shape[1:]
-            self.gauss_params[name] = torch.nn.Parameter(torch.zeros(new_shape, device=self.device))
+            if tuple(old_shape) != tuple(new_shape):
+                # Keep the Parameter object identity stable: Nerfstudio builds optimizers
+                # before loading checkpoints, so replacing Parameter objects here leaves
+                # optimizer param groups attached to stale tensors.
+                param.data = torch.zeros(new_shape, device=self.device, dtype=param.dtype)
         super().load_state_dict(dict, **kwargs)
 
     def k_nearest_sklearn(self, x: torch.Tensor, k: int):
@@ -822,6 +835,7 @@ class WaterSplattingModel(Model):
                     self.gauss_params[name] = torch.nn.Parameter(
                         torch.cat([param.detach(), split_params[name], dup_params[name]], dim=0)
                     )
+                self._sync_gaussian_lineage_ids_for_densification(splits, dups, nsamps)
                 self._sync_background_candidate_mask_for_densification(splits, dups, nsamps)
 
                 # append zeros to the max_2Dsize tensor
@@ -921,6 +935,7 @@ class WaterSplattingModel(Model):
             toobigs_count = torch.sum(toobigs).item()
         for name, param in self.gauss_params.items():
             self.gauss_params[name] = torch.nn.Parameter(param[~culls])
+        self._sync_gaussian_lineage_ids_for_cull(culls)
         self._sync_background_candidate_mask_for_cull(culls)
 
         CONSOLE.log(
@@ -1138,6 +1153,34 @@ class WaterSplattingModel(Model):
         dup_children = mask[dups]
         self._background_candidate_mask = torch.cat([mask, split_children, dup_children], dim=0).bool()
         self._background_candidate_num_points = int(self._background_candidate_mask.numel())
+
+    def _sync_gaussian_lineage_ids_for_densification(
+        self,
+        splits: torch.Tensor,
+        dups: torch.Tensor,
+        nsamps: int,
+    ) -> None:
+        ids = self.gaussian_lineage_ids.reshape(-1).to(device=self.device)
+        splits = splits.reshape(-1).to(device=self.device)
+        dups = dups.reshape(-1).to(device=self.device)
+        if ids.numel() != splits.numel() or ids.numel() != dups.numel():
+            raise ValueError(
+                "gaussian lineage ids cannot be synchronized with densification: "
+                f"ids={ids.numel()} splits={splits.numel()} dups={dups.numel()}"
+            )
+        split_children = ids[splits].repeat(int(nsamps))
+        dup_children = ids[dups]
+        self.gaussian_lineage_ids = torch.cat([ids, split_children, dup_children], dim=0).detach().long()
+
+    def _sync_gaussian_lineage_ids_for_cull(self, culls: torch.Tensor) -> None:
+        ids = self.gaussian_lineage_ids.reshape(-1).to(device=self.device)
+        culls = culls.reshape(-1).to(device=self.device)
+        if ids.numel() != culls.numel():
+            raise ValueError(
+                "gaussian lineage ids cannot be synchronized with culling: "
+                f"ids={ids.numel()} culls={culls.numel()}"
+            )
+        self.gaussian_lineage_ids = ids[~culls].detach().long()
 
     def _sync_background_candidate_mask_for_cull(self, culls: torch.Tensor) -> None:
         """Keep candidate flags aligned when Gaussian parameters are culled."""

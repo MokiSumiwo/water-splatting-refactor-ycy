@@ -558,3 +558,269 @@ Next experimental direction:
 4. for any future index-based intervention, either select candidates online
    after the step-10200/10500 culls or persist Gaussian lineage IDs through
    split/dup/cull.
+
+## 2026-07-28 Deterministic Resume Follow-up
+
+Implemented two resume-control fixes:
+
+- `CheckpointableFullImageDatamanager` persists `FullImageDatamanager` camera
+  sampler state (`train_unseen_cameras`, `eval_unseen_cameras`,
+  `random_generator`, and `train_unsampled_epoch_count`) inside checkpoints.
+- `WaterSplattingModel.load_state_dict()` now resizes Gaussian parameter
+  tensors in place instead of replacing `Parameter` objects, because
+  Nerfstudio constructs optimizers before loading checkpoints.
+
+Additional diagnostic-only tracking:
+
+- `gaussian_lineage_ids` are now checkpointed and synchronized through
+  split/duplicate/cull so contribution turnover can be compared across
+  checkpoints without relying on unstable array indices.
+- `diagnose_gaussian_region_sensitivity.py` candidate `.pt` outputs now include
+  lineage ids, means, opacity, max scale, DC RGB, SH-rest norm, and
+  features-rest sensitivity.
+- Added `scripts/diagnostics/compare_sensitivity_turnover.py` to compare
+  candidate/top-contributor survival, Jaccard overlap, new contributor mass,
+  and attribute summaries across candidate `.pt` files.
+
+Deterministic N1 control:
+
+```bash
+GPU=6 \
+  EXPERIMENT_NAME=bg_attr_n1_detresume_control_iui3_15000 \
+  STAMP=20260728_n1_detresume_control \
+  MAX_NUM_ITERATIONS=15000 MODEL_NUM_STEPS=15000 \
+  STEPS_PER_SAVE=5000 SAVE_ONLY_LATEST_CHECKPOINT=False \
+  RUN_EVAL=1 RUN_CLOSURE_DIAG=1 RUN_FAR_DIAG=1 RUN_REGION_DIAG=1 \
+  scripts/experiments/bg_attr_n1_uninterrupted_control_iui3.sh
+```
+
+N1 result:
+
+| run | step | PSNR | SSIM | LPIPS | Eval J Blue | Far Accum | Far Clear | Water Accum | Water J |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| N1 detresume uninterrupted | 14999 | 30.8818 | 0.9131 | 0.1780 | 0.1193 | 0.7898 | 0.0800 | 0.7864 | 0.0250 |
+
+Matched R0 resume from the same step-10000 checkpoint:
+
+```bash
+GPU=7 \
+  BRANCH_CKPT=outputs/bg_attr_n1_detresume_control_iui3_15000/water-splatting/bg_attr_n1_detresume_control_iui3_15000_20260728_n1_detresume_control/nerfstudio_models/step-000010000.ckpt \
+  EXPERIMENT_NAME=bg_attr_r0_detresume_control_iui3_15000 \
+  STAMP=20260728_r0_detresume_control \
+  MAX_NUM_ITERATIONS=5000 MODEL_NUM_STEPS=15000 \
+  STEPS_PER_SAVE=5000 SAVE_ONLY_LATEST_CHECKPOINT=False \
+  RUN_EVAL=1 RUN_CLOSURE_DIAG=1 RUN_FAR_DIAG=1 RUN_REGION_DIAG=1 \
+  scripts/experiments/bg_attr_r0_resume10k_control_iui3.sh
+```
+
+R0 step-15000 comparison:
+
+| metric | N1 | R0 | delta | gate |
+| --- | ---: | ---: | ---: | --- |
+| PSNR | 30.8818 | 30.9000 | +0.0182 | pass |
+| SSIM | 0.913073 | 0.913056 | -0.000017 | pass |
+| LPIPS | 0.177963 | 0.178009 | +0.000046 | pass |
+| Eval J Blue ratio | 0.1193 | 0.1099 | -7.9% | fail vs 3% strict gate |
+| Far Accum mean | 0.7898 | 0.8003 | +1.3% | pass |
+| Far Clear mean | 0.0800 | 0.0792 | -1.1% | pass |
+| Water Accum mean | 0.7864 | 0.7869 | +0.1% | pass |
+| Water J mean | 0.0250 | 0.0251 | +0.6% | pass |
+
+Interpretation:
+
+- The original large resume mismatch is mostly fixed.
+- Reconstruction and region/far residual diagnostics are now within gate.
+- Eval J Blue dominance still exceeds the strict 3% reproducibility gate, so a
+  second R0 ending exactly at step 14999 is running to rule out final-step
+  checkpoint mismatch before upgrading C4/C4.5 to formal matched candidates.
+
+R0 rerun ending exactly at step 14999:
+
+```bash
+GPU=7 \
+  BRANCH_CKPT=outputs/bg_attr_n1_detresume_control_iui3_15000/water-splatting/bg_attr_n1_detresume_control_iui3_15000_20260728_n1_detresume_control/nerfstudio_models/step-000010000.ckpt \
+  EXPERIMENT_NAME=bg_attr_r0_detresume_control_iui3_14999 \
+  STAMP=20260728_r0_detresume_control_14999 \
+  MAX_NUM_ITERATIONS=4999 MODEL_NUM_STEPS=15000 \
+  STEPS_PER_SAVE=4999 SAVE_ONLY_LATEST_CHECKPOINT=False \
+  RUN_EVAL=1 RUN_CLOSURE_DIAG=1 RUN_FAR_DIAG=1 RUN_REGION_DIAG=1 \
+  scripts/experiments/bg_attr_r0_resume10k_control_iui3.sh
+```
+
+R0 step-14999 comparison:
+
+| metric | N1 | R0 14999 | delta | gate |
+| --- | ---: | ---: | ---: | --- |
+| PSNR | 30.8818 | 30.8838 | +0.0020 | pass |
+| SSIM | 0.913073 | 0.913116 | +0.000042 | pass |
+| LPIPS | 0.177963 | 0.178125 | +0.000163 | pass |
+| Eval J Blue ratio | 0.1193 | 0.1166 | -2.3% | pass |
+| Far alpha>0.05 frac | 0.9943 | 0.9954 | +0.1% | pass |
+| Far clear>0.03 frac | 0.4753 | 0.4867 | +2.4% | pass |
+| Object accum retention | 0.9984 | 1.0002 | +0.18% | pass |
+| Boundary J-gradient retention | 0.9807 | 0.9832 | +0.25% | pass |
+
+Interpretation:
+
+- Deterministic resume is now good enough for matched 10k-to-14999 causal
+  ablations, provided the final step is matched exactly.
+- The absolute deterministic N1 branch is still much worse than the older
+  formal N1 reference (`30.88` PSNR and high far/water accumulation), so these
+  matched C4/C4.5/C5 reruns are branch-internal mechanism tests, not formal
+  replacements for M1/N1.
+- Started matched proxy-chroma reruns from the same step-10000 checkpoint:
+  `C4=0.001`, `C4.5=0.0015`, and `C5=0.002`, all with
+  `MAX_NUM_ITERATIONS=4999`.
+
+## 2026-07-28 Matched C4/C4.5/C5 Results
+
+All runs below resume from:
+
+```text
+outputs/bg_attr_n1_detresume_control_iui3_15000/water-splatting/bg_attr_n1_detresume_control_iui3_15000_20260728_n1_detresume_control/nerfstudio_models/step-000010000.ckpt
+```
+
+Shared settings:
+
+```text
+MAX_NUM_ITERATIONS=4999
+MODEL_NUM_STEPS=15000
+STEPS_PER_SAVE=4999
+SAVE_ONLY_LATEST_CHECKPOINT=False
+mask=common_masks/high_precision_water_m1_core_y025_nsorder_iui3_redsea_20260726
+```
+
+Results:
+
+| run | chroma w | PSNR | SSIM | LPIPS | J Blue | Far alpha>0.05 | Far clear>0.03 | Water Accum | Water J | Obj Acc Ret | Obj J Ret | Boundary Ret |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| R0 | 0 | 30.8838 | 0.9131 | 0.1781 | 0.1166 | 0.9954 | 0.4867 | 0.7952 | 0.02636 | 1.0002 | 0.9961 | 0.9832 |
+| C4 | 0.0010 | 30.8953 | 0.9131 | 0.1780 | 0.1096 | 0.9955 | 0.4802 | 0.7957 | 0.02475 | 1.0041 | 0.9944 | 0.9810 |
+| C4.5 | 0.0015 | 30.8791 | 0.9131 | 0.1782 | 0.1045 | 0.9984 | 0.4764 | 0.7899 | 0.02405 | 1.0033 | 0.9913 | 0.9771 |
+| C5 | 0.0020 | 30.8877 | 0.9131 | 0.1780 | 0.1014 | 0.9995 | 0.4815 | 0.7997 | 0.02462 | 1.0043 | 0.9890 | 0.9758 |
+
+Relative to matched R0:
+
+| run | dPSNR | J Blue | Far clear | Water Accum | Water J | Obj J Ret | Boundary Ret |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| C4 | +0.0115 | -5.9% | -1.3% | +0.1% | -6.1% | -0.17% | -0.22% |
+| C4.5 | -0.0046 | -10.4% | -2.1% | -0.7% | -8.8% | -0.48% | -0.62% |
+| C5 | +0.0040 | -13.0% | -1.1% | +0.6% | -6.6% | -0.71% | -0.76% |
+
+Contact sheet:
+
+```text
+renders/contact_sheets/detresume_proxy_chroma_c4_c45_c5_long_20260728.png
+```
+
+Interpretation:
+
+- `C4` is the most reconstruction-safe and improves PSNR, but clear residual
+  pressure is weaker.
+- `C5` gives the lowest eval J Blue, but gives back Water Accum and has the
+  weakest object/boundary retention of the three.
+- `C4.5` is the current branch-internal balance point: best Water J and Far
+  clear reduction, useful J Blue reduction, and still acceptable reconstruction
+  and object retention in this matched branch.
+- None of these should be promoted to a formal replacement yet because the
+  deterministic N1 prefix itself remains worse than the older formal N1/M1
+  references.
+
+## 2026-07-28 Contribution Turnover Diagnostic
+
+Train-view sensitivity diagnostics were generated with:
+
+```text
+split=train
+max_images=25
+enable_clear_proxy=True
+candidate_require_proxy=True
+candidate_min_view_count=5
+candidate_water_quantile=0.995
+candidate_proxy_quantile=0.95
+candidate_object_ratio_max=0.10
+candidate_boundary_ratio_max=0.10
+```
+
+Candidate outputs:
+
+```text
+renders/turnover_diagnostics/detresume_20260728/n1_step10000_candidates.pt
+renders/turnover_diagnostics/detresume_20260728/r0_step14999_candidates.pt
+renders/turnover_diagnostics/detresume_20260728/c45_step14999_candidates.pt
+```
+
+Candidate counts:
+
+| checkpoint | active Gaussians | candidates | selected water score | selected proxy score |
+| --- | ---: | ---: | ---: | ---: |
+| N1 step10000 | 837,109 | 28 | 0.2560 | 0.0237 |
+| R0 step14999 | 799,298 | 38 | 0.3174 | 0.0919 |
+| C4.5 step14999 | 799,157 | 35 | 0.2238 | 0.0685 |
+
+Turnover summary:
+
+| pair | candidate Jaccard | prev candidate survival | water top50 Jaccard | water top50 new-lineage share | proxy BG top50 Jaccard | proxy BG top50 new-lineage share |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| N1 10000 -> R0 14999 | 0.179 | 35.7% | 0.299 | 43.2% | 0.316 | 15.0% |
+| N1 10000 -> C4.5 14999 | 0.145 | 28.6% | 0.266 | 33.2% | 0.316 | 16.3% |
+
+Interpretation:
+
+- Fixed candidate masks remain structurally weak: fewer than 36% of initial
+  candidate lineages remain selected at final, and C4.5 drops to 28.6%.
+- Top water contributors are also not stable; roughly one third to two fifths
+  of final top-50 water score is carried by new lineages.
+- Proxy blue/green contributors are more stable than raw water accumulation,
+  but still show nontrivial turnover.
+- This supports moving from one-shot fixed candidate opacity surgery to either
+  online candidate reselection or an image/objective-side proxy chroma route
+  with explicit object/boundary protection.
+
+Additional lightweight C4.5 turnover checkpoints were generated without eval:
+
+```text
+outputs/bg_attr_c45_turnover_10500_iui3/.../step-000010500.ckpt
+outputs/bg_attr_c45_turnover_11000_iui3/.../step-000011000.ckpt
+outputs/bg_attr_c45_turnover_12000_iui3/.../step-000012000.ckpt
+outputs/bg_attr_c45_turnover_13000_iui3/.../step-000013000.ckpt
+```
+
+Full C4.5 lineage sequence:
+
+```text
+renders/turnover_diagnostics/detresume_20260728/turnover_c45_sequence_10000_14999.json
+```
+
+| pair | candidate Jaccard | prev candidate survival | water top50 Jaccard | water top50 new share | proxy BG top50 Jaccard | proxy BG top50 new share |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10000 -> 10500 | 0.526 | 71.4% | 0.613 | 9.1% | 0.639 | 8.1% |
+| 10500 -> 11000 | 0.600 | 80.0% | 0.754 | 4.7% | 0.754 | 3.7% |
+| 11000 -> 12000 | 0.500 | 67.6% | 0.754 | 4.8% | 0.639 | 4.1% |
+| 12000 -> 13000 | 0.732 | 85.7% | 0.695 | 6.0% | 0.818 | 1.4% |
+| 13000 -> 14999 | 0.690 | 80.6% | 0.754 | 2.7% | 0.754 | 2.5% |
+
+Score totals across the same sequence:
+
+| step | candidates | water score total | proxy BG score total |
+| ---: | ---: | ---: | ---: |
+| 10000 | 28 | 0.5473 | 0.0570 |
+| 10500 | 30 | 0.4931 | 0.0648 |
+| 11000 | 34 | 0.4554 | 0.0838 |
+| 12000 | 35 | 0.3246 | 0.1034 |
+| 13000 | 36 | 0.3031 | 0.1198 |
+| 14999 | 35 | 0.2841 | 0.1310 |
+
+Refined interpretation:
+
+- Turnover is gradual and strongest in the first 2k steps after resume, not a
+  single end-of-run swap.
+- Water-accumulation sensitivity decreases steadily under C4.5, but proxy
+  blue/green sensitivity becomes increasingly concentrated in the remaining
+  contributors.
+- A future online intervention should reselect no less often than every
+  `1000` steps from 10000 to 12000, then can relax after 13000 if the candidate
+  set has stabilized.
+- The next experiment should avoid stronger global chroma pressure; it should
+  combine C4/C4.5-level chroma with online candidate selection and explicit
+  object/boundary retention checks.

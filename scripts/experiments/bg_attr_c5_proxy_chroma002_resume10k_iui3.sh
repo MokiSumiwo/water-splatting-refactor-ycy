@@ -3,7 +3,12 @@ set -euo pipefail
 
 REPO_DIR="/mnt/new/home_old/ycy/water-splatting-refactor"
 BRANCH_DIR="${BRANCH_DIR:-${REPO_DIR}/outputs/bg_attr_n1_precise_raw_binf_iui3_10000_branch/water-splatting/bg_attr_n1_precise_raw_binf_iui3_10000_branch_20260727_n1_10k_branch/nerfstudio_models}"
+BRANCH_CKPT="${BRANCH_CKPT:-}"
 MASK_DIR="${MASK_DIR:-${REPO_DIR}/common_masks/high_precision_water_m1_core_y025_nsorder_iui3_redsea_20260726}"
+DEFAULT_LOAD_DIR="${BRANCH_DIR}"
+if [[ -n "${BRANCH_CKPT}" ]]; then
+  DEFAULT_LOAD_DIR=""
+fi
 
 exec env \
   GPU="${GPU:-9}" \
@@ -18,7 +23,8 @@ exec env \
   MODEL_NUM_STEPS="${MODEL_NUM_STEPS:-15000}" \
   STEPS_PER_SAVE="${STEPS_PER_SAVE:-5001}" \
   SAVE_ONLY_LATEST_CHECKPOINT="${SAVE_ONLY_LATEST_CHECKPOINT:-True}" \
-  LOAD_DIR="${LOAD_DIR:-${BRANCH_DIR}}" \
+  LOAD_DIR="${LOAD_DIR:-${DEFAULT_LOAD_DIR}}" \
+  LOAD_CHECKPOINT="${LOAD_CHECKPOINT:-${BRANCH_CKPT}}" \
   SEED="${SEED:-42}" \
   MEDIUM_CONTEXT_MODE="dir_xy_camera" \
   BINF_MODE="tied" \

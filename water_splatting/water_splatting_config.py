@@ -1,11 +1,11 @@
 from nerfstudio.engine.trainer import TrainerConfig
 from nerfstudio.plugins.types import MethodSpecification
 from nerfstudio.pipelines.base_pipeline import VanillaPipelineConfig
-from nerfstudio.data.datamanagers.full_images_datamanager import FullImageDatamanagerConfig
 from nerfstudio.data.dataparsers.nerfstudio_dataparser import NerfstudioDataParserConfig
 from nerfstudio.engine.schedulers import ExponentialDecaySchedulerConfig
 from nerfstudio.engine.optimizers import AdamOptimizerConfig
 from nerfstudio.configs.base_config import ViewerConfig
+from water_splatting.data import CheckpointableFullImageDatamanagerConfig
 from water_splatting.water_splatting import WaterSplattingModelConfig
 
 NUM_STEPS = 15000
@@ -20,7 +20,7 @@ water_splatting_method = MethodSpecification(
         max_num_iterations=NUM_STEPS,
         mixed_precision=False,
         pipeline=VanillaPipelineConfig(
-            datamanager=FullImageDatamanagerConfig(
+            datamanager=CheckpointableFullImageDatamanagerConfig(
                 dataparser=NerfstudioDataParserConfig(load_3D_points=True),
             ),
             model=WaterSplattingModelConfig(
@@ -105,7 +105,7 @@ water_splatting_method_big = MethodSpecification(
         max_num_iterations=NUM_STEPS,
         mixed_precision=False,
         pipeline=VanillaPipelineConfig(
-            datamanager=FullImageDatamanagerConfig(
+            datamanager=CheckpointableFullImageDatamanagerConfig(
                 dataparser=NerfstudioDataParserConfig(load_3D_points=True),
             ),
             model=WaterSplattingModelConfig(
