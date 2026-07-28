@@ -301,3 +301,55 @@ Decision rule:
 - If E5/E6 recover object retention but lose all Far BG benefit, this branch is likely not sufficient.
 - If E6 keeps Far BG residual below E4 while improving object retention, use E6 as the next visual candidate.
 - If neither beats C2-B02 on both Far BG connected residual and retention, revert to full-proxy C2-B02 as the main branch and investigate a geometry-aware but object-safe proxy path instead of halo capacity.
+
+## E5 / E6 Results
+
+| Metric | C2-B02 | E4 late 0.00002 | E5 late 0.000005 | E6 late 0.000010 |
+| --- | ---: | ---: | ---: | ---: |
+| PSNR | 31.1139 | 31.2759 | 31.0885 | 31.0538 |
+| SSIM | 0.914619 | 0.914072 | 0.912115 | 0.912571 |
+| LPIPS | 0.176461 | 0.175213 | 0.176589 | 0.175359 |
+| Far Accum | 0.237373 | 0.216155 | 0.260991 | 0.238101 |
+| Far Clear | 0.059453 | 0.064486 | 0.072936 | 0.062776 |
+| Far BG Residual Fraction | 0.119437 | 0.101745 | 0.108145 | 0.103803 |
+| Far BG LCC Max | 0.111967 | 0.108419 | 0.099375 | 0.107851 |
+| Water Accum | 0.006800 | 0.004964 | 0.003751 | 0.002883 |
+| Water J | 0.000762 | 0.000337 | 0.000622 | 0.000408 |
+| Object Acc Ret | 0.931326 | 0.910958 | 0.939203 | 0.924344 |
+| Object J Ret | 0.975337 | 0.970405 | 1.001191 | 0.943421 |
+| Boundary Ret | 0.956130 | 0.951009 | 1.013304 | 0.946277 |
+
+Support diagnostics:
+
+```text
+E5 final support:
+S_halo mean              0.01498
+water S_halo mean        0.00397
+object S_halo mean       0.01822
+boundary S_halo mean     0.01376
+
+E6 final support:
+S_halo mean              0.01365
+water S_halo mean        0.00402
+object S_halo mean       0.01832
+boundary S_halo mean     0.00898
+```
+
+Interpretation:
+
+- E5 improves largest connected residual versus C2-B02, but worsens Far Accum/Far Clear and still misses object accumulation retention.
+- E6 improves Water Accum but misses PSNR, Object J Ret, Boundary Ret, and Far Clear.
+- Appearance-only proxy plus halo is not a clean replacement for C2-B02.
+
+## E7 Plan
+
+Run one C2-adjacent test:
+
+| ID | Core capacity | Halo capacity | Halo start | Proxy |
+| --- | ---: | ---: | ---: | --- |
+| E7 | 0.0002 | 0.000005 | 10000 | full proxy chroma 0.0015 |
+
+Purpose:
+
+- Test whether tiny late-halo pressure can reduce far-BG connected residual on top of the original C2-B02 full proxy path.
+- If E7 worsens object retention or Far Clear, stop the halo-capacity branch and keep C2-B02 / E4 only as references.
