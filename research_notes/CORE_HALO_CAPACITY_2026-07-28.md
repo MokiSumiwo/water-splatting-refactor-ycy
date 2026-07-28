@@ -255,3 +255,49 @@ boundary / far-BG        0.11
 ```
 
 This suggests the residual-gated halo signal is meaningful late in training, but using it from step 4000 changes the training trajectory too early. E4 therefore delays halo capacity until step 10000 and keeps the same low halo weight.
+
+## E4 Result
+
+E4 uses the same halo weight as E2 (`lambda_halo_capacity=0.00002`) but delays halo capacity to step 10000.
+
+| Metric | C2-B02 | E4 late halo 0.00002 |
+| --- | ---: | ---: |
+| PSNR | 31.1139 | 31.2759 |
+| SSIM | 0.914619 | 0.914072 |
+| LPIPS | 0.176461 | 0.175213 |
+| Far Accum | 0.237373 | 0.216155 |
+| Far Clear | 0.059453 | 0.064486 |
+| Far BG Residual Fraction | 0.119437 | 0.101745 |
+| Far BG LCC Sum | 0.072294 | 0.064241 |
+| Far BG LCC Max | 0.111967 | 0.108419 |
+| Water Accum | 0.006800 | 0.004964 |
+| Water J | 0.000762 | 0.000337 |
+| Object Acc Ret | 0.931326 | 0.910958 |
+| Object J Ret | 0.975337 | 0.970405 |
+| Boundary Ret | 0.956130 | 0.951009 |
+
+Interpretation:
+
+- Delaying halo pressure fixes the worst E2 behavior and improves Far Accum, Water Accum, Water J, and Far BG residual fraction versus C2-B02.
+- The improvement is not enough for the residual-area target, and object retention is still too low.
+- The next test should not increase halo weight. It should reduce late-halo weight to find whether the far-BG improvement can be retained while recovering object retention.
+
+## E5 / E6 Plan
+
+| ID | Core capacity | Halo capacity | Halo start | Proxy |
+| --- | ---: | ---: | ---: | --- |
+| E5 | 0.0002 | 0.000005 | 10000 | appearance-only chroma 0.0015 |
+| E6 | 0.0002 | 0.000010 | 10000 | appearance-only chroma 0.0015 |
+
+Commands:
+
+```bash
+GPU=6 bash scripts/experiments/medium_attr_e5_b02_halo0005_late_app_proxy_iui3.sh
+GPU=7 bash scripts/experiments/medium_attr_e6_b02_halo001_late_app_proxy_iui3.sh
+```
+
+Decision rule:
+
+- If E5/E6 recover object retention but lose all Far BG benefit, this branch is likely not sufficient.
+- If E6 keeps Far BG residual below E4 while improving object retention, use E6 as the next visual candidate.
+- If neither beats C2-B02 on both Far BG connected residual and retention, revert to full-proxy C2-B02 as the main branch and investigate a geometry-aware but object-safe proxy path instead of halo capacity.
