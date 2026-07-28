@@ -149,8 +149,10 @@ E0 is the prior `C2-B02`.
 | E1 | 0.0002 | off | appearance-only chroma 0.0015 |
 | E2 | 0.0002 | 0.00002 | appearance-only chroma 0.0015 |
 | E3 | 0.0002 | 0.00004 | appearance-only chroma 0.0015 |
+| E4 | 0.0002 | 0.00002, start 10000 | appearance-only chroma 0.0015 |
 
 E1 tests whether object accumulation loss in C2-B02 mainly came from full proxy geometry/opacity gradients. E2 tests light halo pressure. E3 is only useful if E2 improves directionally but leaves visible halo residual.
+E4 was added after E2 failed directionally; it keeps the halo pressure but delays it until the 10k residual-refinement stage.
 
 ## Commands
 
@@ -158,6 +160,7 @@ E1 tests whether object accumulation loss in C2-B02 mainly came from full proxy 
 GPU=6 bash scripts/experiments/medium_attr_e1_b02_app_proxy_chroma015_iui3.sh
 GPU=7 bash scripts/experiments/medium_attr_e2_b02_halo002_app_proxy_iui3.sh
 GPU=8 bash scripts/experiments/medium_attr_e3_b02_halo004_app_proxy_iui3.sh
+GPU=8 bash scripts/experiments/medium_attr_e4_b02_halo002_late_app_proxy_iui3.sh
 ```
 
 Smoke-test form:
@@ -200,3 +203,55 @@ Do not re-enable:
 - fixed Gaussian candidate surgery as the primary mechanism.
 
 Do not increase global/core capacity above `lambda_budgeted_capacity=0.0002` in this phase.
+
+## E1 / E2 Results
+
+| Metric | C2-B02 | E1 app-only | E2 halo 0.00002 |
+| --- | ---: | ---: | ---: |
+| PSNR | 31.1139 | 31.0844 | 30.8886 |
+| SSIM | 0.914619 | 0.913836 | 0.911628 |
+| LPIPS | 0.176461 | 0.175482 | 0.175025 |
+| Far Accum | 0.237373 | 0.316544 | 0.300064 |
+| Far Clear | 0.059453 | 0.068810 | 0.079266 |
+| Far BG Residual Fraction | 0.119437 | 0.188311 | 0.196444 |
+| Far BG Largest Component Max | 0.111967 | 0.118322 | 0.246124 |
+| Water Accum | 0.006800 | 0.023967 | 0.011167 |
+| Water J | 0.000762 | 0.000300 | 0.001668 |
+| Object Acc Ret | 0.931326 | 0.973084 | 0.941777 |
+| Object J Ret | 0.975337 | 1.004191 | 0.994637 |
+| Boundary Ret | 0.956130 | 0.961212 | 0.992662 |
+
+Immediate interpretation:
+
+- E1 confirms full proxy gradients were contributing to occupancy cleanup; making proxy appearance-only recovers object accumulation retention but loses far accumulation and far-clear cleanup.
+- E2 fails directionally. It does not reduce the continuous far blue-green residual; it increases far residual fraction and largest connected component while dropping PSNR and object accumulation retention.
+- E3 should not be run under the original schedule because stronger early halo pressure is likely to amplify the same failure.
+
+Support diagnostics:
+
+```text
+E1 final support:
+S_halo mean              0.01848
+water S_halo mean        0.00407
+object S_halo mean       0.02294
+boundary S_halo mean     0.02144
+
+E2 final support:
+S_halo mean              0.01790
+water S_halo mean        0.03364
+object S_halo mean       0.02198
+boundary S_halo mean     0.01771
+```
+
+C2-B02 post-hoc threshold sweep shows the default halo support does respond to the newly defined far-BG residual mask:
+
+```text
+default gate on C2:
+far-BG S_halo mean       0.10685
+object S_halo mean       0.01925
+boundary S_halo mean     0.01197
+object / far-BG          0.18
+boundary / far-BG        0.11
+```
+
+This suggests the residual-gated halo signal is meaningful late in training, but using it from step 4000 changes the training trajectory too early. E4 therefore delays halo capacity until step 10000 and keeps the same low halo weight.
