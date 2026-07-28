@@ -29,6 +29,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from water_splatting.attribution import (
+    budgeted_capacity_loss,
+    build_route_capacity_support,
+    build_training_routed_prediction,
+    clear_proxy_chroma_loss,
+    clear_proxy_luma_budget_loss,
+    support_coverage_stats,
+    weighted_rgb_l1,
+)
 from water_splatting.cleanup import build_cleanup_candidate_mask, format_cleanup_stats, sample_pixel_map_at_gaussians
 from water_splatting.fields import (
     DirectionConditionedMediumField,
@@ -315,6 +324,64 @@ class WaterSplattingModelConfig(ModelConfig):
     """Allowed clear-proxy chroma projection margin before penalty."""
     background_clear_chroma_medium_detach: bool = True
     """Detach medium chroma direction in proxy clear-chroma loss."""
+    background_clear_chroma_use_medium_support: bool = False
+    """Use medium-explainable capacity support instead of region masks for proxy chroma."""
+    medium_explainability_enabled: bool = False
+    """Enable training-only medium-explainable support and auxiliary losses."""
+    medium_explainability_start_step: int = 2000
+    """First step where medium explainability bootstrap loss may ramp."""
+    medium_explainability_ramp_steps: int = 2000
+    """Ramp length for medium explainability bootstrap loss."""
+    lambda_medium_explainability: float = 0.0
+    """Weight for medium color explainability supervision."""
+    training_gradient_routing_enabled: bool = False
+    """Use medium support to route reconstruction gradients during training only."""
+    gradient_routing_start_step: int = 4000
+    """First step where training-only gradient routing may ramp."""
+    gradient_routing_ramp_steps: int = 1000
+    """Ramp length for training-only gradient routing."""
+    gradient_routing_min_scene_weight: float = 0.30
+    """Minimum physical-renderer reconstruction weight in supported water pixels."""
+    budgeted_capacity_enabled: bool = False
+    """Enable dense support-weighted Gaussian accumulation budget loss."""
+    budgeted_capacity_start_step: int = 4000
+    """First step where budgeted capacity loss may ramp."""
+    budgeted_capacity_ramp_steps: int = 1000
+    """Ramp length for budgeted capacity loss."""
+    budgeted_capacity_value: float = 0.05
+    """Allowed Gaussian accumulation budget on medium-explainable support."""
+    budgeted_capacity_temperature: float = 0.02
+    """Softplus temperature for accumulation budget loss."""
+    lambda_budgeted_capacity: float = 0.0
+    """Weight for budgeted Gaussian capacity suppression."""
+    budgeted_capacity_post_scale: float = 0.5
+    """Capacity weight multiplier after proxy refinement begins."""
+    medium_support_gradient_tau: float = 0.05
+    """Image-gradient temperature for flat-water support."""
+    medium_support_variance_tau: float = 0.02
+    """Local-variance temperature for flat-water support."""
+    medium_support_color_tau: float = 0.08
+    """Medium explainability color/luma error temperature."""
+    medium_support_luma_weight: float = 0.25
+    """Relative luma weight in medium explainability error."""
+    medium_support_far_floor: float = 0.50
+    """Minimum weak far-depth multiplier for capacity support."""
+    medium_support_depth_mid: float = 0.75
+    """Normalized detached-depth midpoint for weak far support."""
+    medium_support_depth_temperature: float = 0.15
+    """Detached-depth sigmoid temperature for weak far support."""
+    medium_support_use_flatness: bool = True
+    """Use image flatness in medium-explainable support."""
+    medium_support_use_medium: bool = True
+    """Use detached medium color explainability in support."""
+    medium_support_use_far: bool = True
+    """Use weak detached far-depth modulation in capacity support."""
+    lambda_proxy_clear_luma: float = 0.0
+    """Optional support-weighted clear-proxy luma budget loss."""
+    proxy_clear_luma_budget: float = 0.03
+    """Clear-proxy luma budget for optional luma refinement."""
+    proxy_clear_luma_temperature: float = 0.01
+    """Softplus temperature for optional clear-proxy luma budget."""
     background_densification_enabled: bool = False
     """Enable background region weighting for densification gradient accumulation."""
     background_densification_weight: float = 1.0
@@ -2606,6 +2673,7 @@ class WaterSplattingModel(Model):
         """
         gt_img = self.composite_with_background(self.get_gt_img(batch["image"]), outputs["background"])
         pred_img = outputs["pred_image"]
+        image_mask = None
 
         # Set masked part of both ground-truth and rendered image to black.
         # This is a little bit sketchy for the SSIM loss.
@@ -2616,17 +2684,136 @@ class WaterSplattingModel(Model):
             assert mask.shape[:2] == gt_img.shape[:2] == pred_img.shape[:2]
             gt_img = gt_img * mask
             pred_img = pred_img * mask
+            image_mask = mask.to(device=self.device, dtype=gt_img.dtype).clamp(0.0, 1.0)
+
+        medium_supports = None
+        support_route = None
+        support_capacity = None
+        support_bootstrap = None
+        needs_medium_support = any(
+            [
+                bool(getattr(self.config, "medium_explainability_enabled", False)),
+                bool(getattr(self.config, "training_gradient_routing_enabled", False)),
+                bool(getattr(self.config, "budgeted_capacity_enabled", False)),
+                bool(getattr(self.config, "background_clear_chroma_use_medium_support", False)),
+                float(getattr(self.config, "lambda_proxy_clear_luma", 0.0)) > 0.0,
+            ]
+        )
+        if needs_medium_support:
+            medium_explainer = outputs.get("b_inf", outputs["medium_rgb"])
+            medium_supports = build_route_capacity_support(
+                gt_img=gt_img,
+                medium_rgb=medium_explainer,
+                depth=outputs["depth"],
+                gradient_tau=float(getattr(self.config, "medium_support_gradient_tau", 0.05)),
+                variance_tau=float(getattr(self.config, "medium_support_variance_tau", 0.02)),
+                color_tau=float(getattr(self.config, "medium_support_color_tau", 0.08)),
+                luma_weight=float(getattr(self.config, "medium_support_luma_weight", 0.25)),
+                far_floor=float(getattr(self.config, "medium_support_far_floor", 0.50)),
+                depth_mid=float(getattr(self.config, "medium_support_depth_mid", 0.75)),
+                depth_temperature=float(getattr(self.config, "medium_support_depth_temperature", 0.15)),
+                use_flatness=bool(getattr(self.config, "medium_support_use_flatness", True)),
+                use_medium=bool(getattr(self.config, "medium_support_use_medium", True)),
+                use_far=bool(getattr(self.config, "medium_support_use_far", True)),
+            )
+            support_route = medium_supports.route
+            support_capacity = medium_supports.capacity
+            support_bootstrap = medium_supports.bootstrap
+            if image_mask is not None:
+                support_route = support_route * image_mask
+                support_capacity = support_capacity * image_mask
+                support_bootstrap = support_bootstrap * image_mask
+            outputs["medium_support_flat"] = medium_supports.flat
+            outputs["medium_support_med"] = medium_supports.medium
+            outputs["medium_support_far"] = medium_supports.far
+            outputs["medium_support_route"] = support_route
+            outputs["medium_support_capacity"] = support_capacity
+            outputs["medium_support_bootstrap"] = support_bootstrap
+            outputs["medium_support_error"] = medium_supports.medium_error
+            if metrics_dict is not None:
+                for stat_name, stat_value in support_coverage_stats(medium_supports).items():
+                    metrics_dict[f"medium_support_{stat_name}"] = stat_value
+
+        pred_img_for_loss = pred_img
+        route_progress = self._ramped_weight(
+            1.0,
+            int(getattr(self.config, "gradient_routing_start_step", 4000)),
+            int(getattr(self.config, "gradient_routing_ramp_steps", 1000)),
+        )
+        if (
+            bool(getattr(self.config, "training_gradient_routing_enabled", False))
+            and support_route is not None
+            and route_progress > 0.0
+        ):
+            target_min_scene = float(getattr(self.config, "gradient_routing_min_scene_weight", 0.30))
+            effective_min_scene = 1.0 + (target_min_scene - 1.0) * route_progress
+            pred_img_for_loss = build_training_routed_prediction(
+                pred_img=pred_img,
+                medium_rgb=outputs.get("b_inf", outputs["medium_rgb"]),
+                route_support=support_route,
+                min_scene_weight=effective_min_scene,
+            )
+            outputs["medium_training_routed_rgb"] = pred_img_for_loss
+            if metrics_dict is not None:
+                metrics_dict["medium_gradient_routing_progress"] = torch.tensor(route_progress, device=self.device)
+                metrics_dict["medium_gradient_routing_min_scene_weight"] = torch.tensor(
+                    effective_min_scene,
+                    device=self.device,
+                )
 
         loss_dict = {
             "main_loss": reconstruction_loss(
                 gt_img=gt_img,
-                pred_img=pred_img,
+                pred_img=pred_img_for_loss,
                 main_loss=self.config.main_loss,
                 ssim_loss=self.config.ssim_loss,
                 ssim_lambda=self.config.ssim_lambda,
                 ssim_metric=self.ssim,
             ),
         }
+
+        medium_weight = self._ramped_weight(
+            float(getattr(self.config, "lambda_medium_explainability", 0.0)),
+            int(getattr(self.config, "medium_explainability_start_step", 2000)),
+            int(getattr(self.config, "medium_explainability_ramp_steps", 2000)),
+        )
+        if (
+            bool(getattr(self.config, "medium_explainability_enabled", False))
+            and medium_weight > 0.0
+            and support_bootstrap is not None
+            and support_route is not None
+        ):
+            route_blend = self._ramped_weight(
+                1.0,
+                int(getattr(self.config, "gradient_routing_start_step", 4000)),
+                int(getattr(self.config, "gradient_routing_ramp_steps", 1000)),
+            )
+            medium_supervision_support = ((1.0 - route_blend) * support_bootstrap + route_blend * support_route).detach()
+            loss_dict["medium_explainability_loss"] = medium_weight * weighted_rgb_l1(
+                outputs.get("b_inf", outputs["medium_rgb"]),
+                gt_img,
+                medium_supervision_support,
+            )
+
+        cap_weight = self._ramped_weight(
+            float(getattr(self.config, "lambda_budgeted_capacity", 0.0)),
+            int(getattr(self.config, "budgeted_capacity_start_step", 4000)),
+            int(getattr(self.config, "budgeted_capacity_ramp_steps", 1000)),
+        )
+        if (
+            bool(getattr(self.config, "budgeted_capacity_enabled", False))
+            and cap_weight > 0.0
+            and support_capacity is not None
+        ):
+            post_start = int(getattr(self.config, "background_clear_chroma_start_step", 10000))
+            if self.step >= post_start:
+                cap_weight *= float(getattr(self.config, "budgeted_capacity_post_scale", 0.5))
+            loss_dict["budgeted_capacity_loss"] = cap_weight * budgeted_capacity_loss(
+                accumulation=outputs["accumulation"],
+                support=support_capacity,
+                budget=float(getattr(self.config, "budgeted_capacity_value", 0.05)),
+                temperature=float(getattr(self.config, "budgeted_capacity_temperature", 0.02)),
+            )
 
         bg_weight = self._backscatter_ramp_weight(getattr(self.config, "lambda_background_water_color", 0.0))
         if bg_weight > 0.0 and "b_inf" in outputs:
@@ -2708,30 +2895,56 @@ class WaterSplattingModel(Model):
             int(getattr(self.config, "background_clear_chroma_ramp_steps", 1000)),
         )
         if bg_chroma_weight > 0.0 and "J_proxy_raw" in outputs:
-            bg_mask = self._load_backscatter_region_mask(
-                outputs=outputs,
-                key=getattr(self.config, "background_water_mask_key", "water"),
-                target=gt_img,
+            if (
+                bool(getattr(self.config, "background_clear_chroma_use_medium_support", False))
+                and support_capacity is not None
+                and support_capacity.sum() > 0
+            ):
+                loss_dict["background_clear_chroma_loss"] = bg_chroma_weight * clear_proxy_chroma_loss(
+                    j_proxy=outputs["J_proxy_raw"],
+                    medium_rgb=outputs.get("b_inf", outputs["medium_rgb"]),
+                    support=support_capacity,
+                    margin=float(getattr(self.config, "background_clear_chroma_margin", 0.02)),
+                    detach_medium=bool(getattr(self.config, "background_clear_chroma_medium_detach", True)),
+                )
+            else:
+                bg_mask = self._load_backscatter_region_mask(
+                    outputs=outputs,
+                    key=getattr(self.config, "background_water_mask_key", "water"),
+                    target=gt_img,
+                )
+                if bg_mask is not None and bg_mask.sum() > 0:
+                    acc_max = float(getattr(self.config, "background_clear_chroma_accumulation_max", 0.65))
+                    acc_temp = max(float(getattr(self.config, "background_clear_chroma_accumulation_temperature", 0.05)), 1e-6)
+                    margin = float(getattr(self.config, "background_clear_chroma_margin", 0.02))
+                    acc_gate = torch.sigmoid((acc_max - outputs["accumulation"].detach()) / acc_temp).clamp(0.0, 1.0)
+                    j_proxy = outputs["J_proxy_raw"]
+                    medium_chroma_source = outputs["medium_rgb"]
+                    if getattr(self.config, "background_clear_chroma_medium_detach", True):
+                        medium_chroma_source = medium_chroma_source.detach()
+                    j_chroma = j_proxy - j_proxy.mean(dim=-1, keepdim=True)
+                    medium_chroma = medium_chroma_source - medium_chroma_source.mean(dim=-1, keepdim=True)
+                    medium_dir = medium_chroma / medium_chroma.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+                    projection = (j_chroma * medium_dir).sum(dim=-1, keepdim=True)
+                    penalty = F.relu(projection - margin)
+                    bg_chroma_mask = bg_mask * acc_gate
+                    if bg_chroma_mask.sum() > 0:
+                        loss_dict["background_clear_chroma_loss"] = bg_chroma_weight * (
+                            bg_chroma_mask * penalty
+                        ).sum() / bg_chroma_mask.sum().clamp_min(1e-6)
+
+        proxy_luma_weight = self._ramped_weight(
+            float(getattr(self.config, "lambda_proxy_clear_luma", 0.0)),
+            int(getattr(self.config, "background_clear_chroma_start_step", 10000)),
+            int(getattr(self.config, "background_clear_chroma_ramp_steps", 1000)),
+        )
+        if proxy_luma_weight > 0.0 and "J_proxy_raw" in outputs and support_capacity is not None:
+            loss_dict["proxy_clear_luma_budget_loss"] = proxy_luma_weight * clear_proxy_luma_budget_loss(
+                j_proxy=outputs["J_proxy_raw"],
+                support=support_capacity,
+                budget=float(getattr(self.config, "proxy_clear_luma_budget", 0.03)),
+                temperature=float(getattr(self.config, "proxy_clear_luma_temperature", 0.01)),
             )
-            if bg_mask is not None and bg_mask.sum() > 0:
-                acc_max = float(getattr(self.config, "background_clear_chroma_accumulation_max", 0.65))
-                acc_temp = max(float(getattr(self.config, "background_clear_chroma_accumulation_temperature", 0.05)), 1e-6)
-                margin = float(getattr(self.config, "background_clear_chroma_margin", 0.02))
-                acc_gate = torch.sigmoid((acc_max - outputs["accumulation"].detach()) / acc_temp).clamp(0.0, 1.0)
-                j_proxy = outputs["J_proxy_raw"]
-                medium_chroma_source = outputs["medium_rgb"]
-                if getattr(self.config, "background_clear_chroma_medium_detach", True):
-                    medium_chroma_source = medium_chroma_source.detach()
-                j_chroma = j_proxy - j_proxy.mean(dim=-1, keepdim=True)
-                medium_chroma = medium_chroma_source - medium_chroma_source.mean(dim=-1, keepdim=True)
-                medium_dir = medium_chroma / medium_chroma.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-                projection = (j_chroma * medium_dir).sum(dim=-1, keepdim=True)
-                penalty = F.relu(projection - margin)
-                bg_chroma_mask = bg_mask * acc_gate
-                if bg_chroma_mask.sum() > 0:
-                    loss_dict["background_clear_chroma_loss"] = bg_chroma_weight * (
-                        bg_chroma_mask * penalty
-                    ).sum() / bg_chroma_mask.sum().clamp_min(1e-6)
 
         fg_weight = self._backscatter_ramp_weight(
             getattr(self.config, "lambda_foreground_transmission_reconstruction", 0.0)
