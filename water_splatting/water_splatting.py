@@ -425,6 +425,12 @@ class WaterSplattingModelConfig(ModelConfig):
     """Enable an auxiliary zero-medium black-background clear proxy render."""
     clear_proxy_appearance_only: bool = False
     """Detach clear-proxy geometry and opacity so chroma loss updates only Gaussian appearance."""
+    clear_proxy_geometry_gradient_scale: float = 1.0
+    """Scale clear-proxy gradients to screen-space geometry/depth/conic tensors; 1 keeps historical behavior."""
+    clear_proxy_opacity_gradient_scale: float = 1.0
+    """Scale clear-proxy gradients to Gaussian opacity; 1 keeps historical behavior."""
+    clear_proxy_color_gradient_scale: float = 1.0
+    """Scale clear-proxy gradients to Gaussian SH color; 1 keeps historical behavior."""
     background_gradient_surgery_enabled: bool = False
     """Enable candidate-mask opacity-gradient modulation for open-water contributors."""
     background_candidate_mask_path: Optional[str] = None
@@ -2357,17 +2363,40 @@ class WaterSplattingModel(Model):
         )
         if clear_proxy_required:
             self.xys_grad_abs_proxy = torch.zeros_like(self.xys)
+
+            def _scale_proxy_grad(value: torch.Tensor, scale: float) -> torch.Tensor:
+                scale = max(float(scale), 0.0)
+                if scale <= 0.0:
+                    return value.detach()
+                if (not value.is_floating_point()) or (not value.requires_grad):
+                    return value
+                if abs(scale - 1.0) < 1e-8:
+                    return value
+                return value.detach() + scale * (value - value.detach())
+
             proxy_xys = self.xys
             proxy_depths = depths
             proxy_radii = self.radii
             proxy_conics = conics
+            proxy_colors = rgbs
             proxy_opacities = opacities
             if bool(getattr(self.config, "clear_proxy_appearance_only", False)):
-                proxy_xys = proxy_xys.detach()
-                proxy_depths = proxy_depths.detach()
-                proxy_radii = proxy_radii.detach()
-                proxy_conics = proxy_conics.detach()
-                proxy_opacities = proxy_opacities.detach()
+                proxy_geometry_grad_scale = 0.0
+                proxy_opacity_grad_scale = 0.0
+            else:
+                proxy_geometry_grad_scale = float(
+                    getattr(self.config, "clear_proxy_geometry_gradient_scale", 1.0)
+                )
+                proxy_opacity_grad_scale = float(
+                    getattr(self.config, "clear_proxy_opacity_gradient_scale", 1.0)
+                )
+            proxy_color_grad_scale = float(getattr(self.config, "clear_proxy_color_gradient_scale", 1.0))
+            proxy_xys = _scale_proxy_grad(proxy_xys, proxy_geometry_grad_scale)
+            proxy_depths = _scale_proxy_grad(proxy_depths, proxy_geometry_grad_scale)
+            proxy_radii = _scale_proxy_grad(proxy_radii, proxy_geometry_grad_scale)
+            proxy_conics = _scale_proxy_grad(proxy_conics, proxy_geometry_grad_scale)
+            proxy_opacities = _scale_proxy_grad(proxy_opacities, proxy_opacity_grad_scale)
+            proxy_colors = _scale_proxy_grad(proxy_colors, proxy_color_grad_scale)
             clear_proxy_render = self.underwater_rasterizer.rasterize_clear_proxy(  # type: ignore
                 xys=proxy_xys,
                 xys_grad_abs=self.xys_grad_abs_proxy,
@@ -2375,7 +2404,7 @@ class WaterSplattingModel(Model):
                 radii=proxy_radii,
                 conics=proxy_conics,
                 num_tiles_hit=num_tiles_hit,
-                colors=rgbs,
+                colors=proxy_colors,
                 opacities=proxy_opacities,
                 height=H,
                 width=W,

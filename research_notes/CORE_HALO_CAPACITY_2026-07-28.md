@@ -353,3 +353,31 @@ Purpose:
 
 - Test whether tiny late-halo pressure can reduce far-BG connected residual on top of the original C2-B02 full proxy path.
 - If E7 worsens object retention or Far Clear, stop the halo-capacity branch and keep C2-B02 / E4 only as references.
+
+## C2 Current-Code Repro and E7 Result
+
+After adding residual-gated halo support, C2-B02 was rerun under the current code path without halo capacity to ensure the comparison branch was still valid.
+
+| Metric | C2-B02 original | C2 current-code repro | E7 full proxy + late halo 0.000005 |
+| --- | ---: | ---: | ---: |
+| PSNR | 31.1139 | 31.0738 | 31.0257 |
+| SSIM | 0.914619 | 0.911893 | 0.913635 |
+| LPIPS | 0.176461 | 0.175782 | 0.175513 |
+| Far Accum | 0.237373 | 0.291455 | 0.375108 |
+| Far Clear | 0.059453 | 0.077338 | 0.073777 |
+| Far BG Residual Fraction | 0.119437 | 0.230165 | 0.256408 |
+| Far BG LCC Max | 0.111967 | 0.118401 | 0.251502 |
+| Water Accum | 0.006800 | 0.006519 | 0.051502 |
+| Water J | 0.000762 | 0.000761 | 0.001151 |
+| Object Acc Ret | 0.931326 | 0.947713 | 0.970341 |
+| Object J Ret | 0.975337 | 0.992589 | 0.978957 |
+| Boundary Ret | 0.956130 | 0.963250 | 0.963547 |
+
+E7 fails the intended direction. Adding even tiny late halo pressure on top of full-proxy C2 increases Far Accum, Far BG residual fraction, connected residual size, and Water Accum. Although object retention recovers versus old C2, the visible far-water cleanup regresses.
+
+Conclusion:
+
+- Stop the current residual-gated halo-capacity branch.
+- Do not continue tuning `lambda_halo_capacity` without a redesigned object/boundary exclusion signal.
+- Keep C2-B02/full-proxy and E1/appearance-only as the two endpoints for the next experiment family.
+- Next direction: object-safe proxy geometry/opacity gradients, using scaled clear-proxy backward strength instead of adding more pixel-space halo capacity.
