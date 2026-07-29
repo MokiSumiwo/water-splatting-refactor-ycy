@@ -403,3 +403,41 @@ After P19/P20, stop the P-series regardless of outcome and choose between:
 P3 as current deployable candidate,
 or a new non-P-series mechanism if P19/P20 fail to dominate P3.
 ```
+
+## P19-P20 Results
+
+| Run | PSNR | SSIM | LPIPS | Far Accum | Far Clear | Far BG Frac | Far BG LCC Max | Water Accum | Water J | Obj Acc Ret | Obj J Ret | Boundary Ret |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| P3 | 31.2235 | 0.913678 | 0.174772 | 0.294079 | 0.061725 | 0.145686 | 0.097096 | 0.021233 | 0.000502 | 0.975145 | 0.970946 | 0.994212 |
+| P9 | 31.1912 | 0.913403 | 0.178260 | 0.227394 | 0.064931 | 0.096367 | 0.113812 | 0.014574 | 0.000670 | 0.920260 | 0.977208 | 0.967358 |
+| P19 chroma object exclusion | 31.0452 | 0.914226 | 0.174969 | 0.240997 | 0.073691 | 0.115768 | 0.117818 | 0.001060 | 0.000541 | 0.927450 | 0.989286 | 0.962149 |
+| P20 chroma object/boundary exclusion | 30.8838 | 0.911076 | 0.176840 | 0.243624 | 0.066284 | 0.128473 | 0.118275 | 0.013037 | 0.000570 | 0.923100 | 0.978845 | 0.973693 |
+
+Interpretation:
+
+- P19/P20 recover Object J Ret relative to P3, but both fail Object Acc Ret badly.
+- P19 has strong Water Accum cleanup, but PSNR falls below the 31.08 gate and Far Clear / Far BG LCC regress versus P3.
+- P20 is worse than P19 on PSNR, Object Acc Ret, Far BG fraction, and connected residual. Boundary exclusion in chroma support does not solve the tradeoff.
+- Chroma-only region exclusion therefore does not dominate P3. It confirms that object appearance retention can be recovered by excluding object-like pixels from proxy chroma, but the same change shifts the optimization toward object capacity loss and poorer far residual structure.
+
+Final P-series decision:
+
+```text
+Stop P-series at P20.
+Keep P3 as the current reconstruction-safe candidate:
+    geometry grad = 0.0
+    opacity grad = 0.5
+    color grad = 1.0
+    chroma weight = 0.0015
+    chroma margin = 0.02
+
+Keep P9 only as a far-cleanup reference, not a deployable candidate.
+Do not continue proxy gradient-scale, support-threshold, or region-exclusion sweeps.
+```
+
+Best current interpretation:
+
+- Geometry proxy gradients are the largest object-risk source and should remain off.
+- P3's remaining weakness is not fixed by global color-gradient attenuation or object/boundary support exclusion.
+- The far-cleanup / object-capacity tradeoff appears to arise from the shared pixel support driving both real water residuals and object-adjacent medium-like regions.
+- The next non-P-series direction should redesign support evidence or add a more direct object-capacity preservation term, rather than adding more proxy-gradient variants.
