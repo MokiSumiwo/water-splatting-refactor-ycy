@@ -267,3 +267,66 @@ GPU=6 bash scripts/experiments/medium_attr_p13_b02_proxy_geom000_opacity050_marg
 GPU=7 bash scripts/experiments/medium_attr_p14_b02_proxy_geom000_opacity050_margin003_objboundaryexclude_iui3.sh
 GPU=8 bash scripts/experiments/medium_attr_p15_b02_proxy_geom000_opacity050_objexclude_iui3.sh
 ```
+
+## P13-P15 Results
+
+| Run | PSNR | SSIM | LPIPS | Far Accum | Far Clear | Far BG Frac | Far BG LCC Max | Water Accum | Water J | Obj Acc Ret | Obj J Ret | Boundary Ret |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| P3 | 31.2235 | 0.913678 | 0.174772 | 0.294079 | 0.061725 | 0.145686 | 0.097096 | 0.021233 | 0.000502 | 0.975145 | 0.970946 | 0.994212 |
+| P9 | 31.1912 | 0.913403 | 0.178260 | 0.227394 | 0.064931 | 0.096367 | 0.113812 | 0.014574 | 0.000670 | 0.920260 | 0.977208 | 0.967358 |
+| P13 P9 + object exclusion | 30.8152 | 0.912219 | 0.177382 | 0.251163 | 0.059865 | 0.114446 | 0.113347 | 0.002355 | 0.000324 | 0.928868 | 0.962857 | 0.931654 |
+| P14 P9 + object/boundary exclusion | 30.9605 | 0.913017 | 0.176379 | 0.269359 | 0.078275 | 0.143614 | 0.121697 | 0.019762 | 0.000614 | 0.945412 | 0.989299 | 0.976391 |
+| P15 P3 + object exclusion | 30.9950 | 0.913747 | 0.176903 | 0.302436 | 0.073055 | 0.158050 | 0.110500 | 0.008588 | 0.000562 | 0.974804 | 0.996373 | 0.996302 |
+
+Interpretation:
+
+- Region exclusion is not a viable next lever in its current form.
+- P13 keeps low Water Accum / Water J and decent far cleanup, but PSNR, Object J Ret, and Boundary Ret fail.
+- P14 recovers Object J Ret and Boundary Ret, but Far Clear and far connected residual regress toward C2 current-code.
+- P15 is object-safe on P3, but loses P3's reconstruction and Far Clear advantage. It also does not improve connected far residual enough to justify the mask dependency.
+- The failure mode is no longer just object-mask leakage in `S_cap`. Cutting region support changes the optimization trajectory and does not preserve the useful opacity-only proxy behavior.
+
+Current decision:
+
+```text
+Do not continue support-threshold or region-exclusion sweeps without redesign.
+Keep P3 as the best reconstruction-safe branch.
+Keep P9 as the strongest far-cleanup reference, but not as a deployable candidate because Object Acc Ret fails.
+```
+
+## P16-P18 Plan
+
+P3 passes reconstruction and Object Acc Ret, but misses the stricter Object J Ret target by a small margin. Since geometry gradients are already off and opacity gradients are moderate, the next hypothesis is that the remaining Object J loss comes from proxy color / SH appearance gradients rather than opacity pressure.
+
+All P16-P18 keep:
+
+```text
+clear_proxy_geometry_gradient_scale = 0.0
+clear_proxy_opacity_gradient_scale = 0.5
+lambda_background_clear_chroma = 0.0015
+background_clear_chroma_margin = 0.02
+lambda_budgeted_capacity = 0.0002
+halo_capacity_enabled = False
+region_exclusion_enabled = False
+```
+
+Only color-gradient scale changes:
+
+| ID | Color Grad | Purpose |
+| --- | ---: | --- |
+| P16 | 0.75 | Mildly reduce proxy appearance updates while preserving most chroma cleanup |
+| P17 | 0.50 | Balanced appearance attenuation |
+| P18 | 0.00 | Pure opacity response from proxy chroma; no proxy feature/DC/SH update |
+
+Decision rule:
+
+```text
+Prefer a run with PSNR >= 31.08,
+Obj Acc Ret >= 0.97,
+Obj J Ret >= 0.975,
+Boundary Ret >= 0.95,
+Far Clear <= P3,
+Far BG LCC Max <= 0.10.
+```
+
+If color attenuation recovers Object J Ret without losing P3's far metrics, the next branch should tune between the best P16-P18 color scale and P3. If all color attenuation loses far cleanup, P3 remains the current best candidate and the next mechanism should target capacity/appearance separation with a new support design rather than more proxy-gradient scaling.
