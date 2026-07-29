@@ -357,6 +357,16 @@ class WaterSplattingModelConfig(ModelConfig):
     """Weight for budgeted Gaussian capacity suppression."""
     budgeted_capacity_post_scale: float = 0.5
     """Capacity weight multiplier after proxy refinement begins."""
+    capacity_control_enabled: bool = False
+    """Use an auxiliary accumulation render with controlled capacity gradients."""
+    capacity_control_geometry_gradient_scale: float = 1.0
+    """Scale budgeted-capacity gradients to projected geometry/depth/conics."""
+    capacity_control_opacity_gradient_scale: float = 1.0
+    """Scale budgeted-capacity gradients to Gaussian opacity."""
+    capacity_conflict_gate_enabled: bool = False
+    """Attenuate capacity opacity gradients when reconstruction wants opacity increased."""
+    capacity_conflict_rho: float = 1.0
+    """Residual capacity opacity-gradient multiplier on reconstruction-conflicting Gaussians."""
     halo_capacity_enabled: bool = False
     """Enable residual-gated halo capacity pressure around medium-explainable core water."""
     lambda_halo_capacity: float = 0.0
@@ -859,7 +869,13 @@ class WaterSplattingModel(Model):
             visible_mask = (self.radii > 0).flatten()
             if self.config.abs_grad_densification:
                 assert self.xys_grad_abs is not None
-                grads = self.xys_grad_abs.detach().norm(dim=-1)
+                xys_grad_abs_for_stats = self.xys_grad_abs.detach()
+                prepass_grad_abs = getattr(self, "_capacity_conflict_xys_grad_abs_prepass", None)
+                if prepass_grad_abs is not None:
+                    if tuple(prepass_grad_abs.shape) == tuple(xys_grad_abs_for_stats.shape):
+                        xys_grad_abs_for_stats = (xys_grad_abs_for_stats - prepass_grad_abs).clamp_min(0.0)
+                    self._capacity_conflict_xys_grad_abs_prepass = None
+                grads = xys_grad_abs_for_stats.norm(dim=-1)
             else:
                 assert self.xys.grad is not None
                 grads = self.xys.grad.detach().norm(dim=-1)
@@ -875,7 +891,17 @@ class WaterSplattingModel(Model):
                     dtype=grads.dtype,
                 )
             # print(f"grad norm min {grads.min().item()} max {grads.max().item()} mean {grads.mean().item()} size {grads.shape}")
-            if self.xys_grad_norm is None:
+            stats_shape_mismatch = (
+                self.xys_grad_norm is not None
+                and (
+                    self.xys_grad_norm.shape[0] != weighted_grads.shape[0]
+                    or self.vis_counts is None
+                    or self.vis_counts.shape[0] != weighted_grads.shape[0]
+                    or self.depths_accum is None
+                    or self.depths_accum.shape[0] != weighted_grads.shape[0]
+                )
+            )
+            if self.xys_grad_norm is None or stats_shape_mismatch:
                 self.xys_grad_norm = weighted_grads
                 self.depths_accum = self.depths
                 self.vis_counts = torch.ones_like(self.xys_grad_norm)
@@ -891,7 +917,7 @@ class WaterSplattingModel(Model):
             )
 
             # update the max screen size, as a ratio of number of pixels
-            if self.max_2Dsize is None:
+            if self.max_2Dsize is None or self.max_2Dsize.shape[0] != self.radii.shape[0]:
                 self.max_2Dsize = torch.zeros_like(self.radii, dtype=torch.float32)
             newradii = self.radii.detach()[visible_mask]
             self.max_2Dsize[visible_mask] = torch.maximum(
@@ -2161,19 +2187,55 @@ class WaterSplattingModel(Model):
         medium_bs = medium.bs
         medium_attn = medium.attn
 
+        def _empty_gaussian_outputs(rgb: torch.Tensor, depth_value: float = 10.0) -> Dict[str, torch.Tensor]:
+            depth = rgb.new_ones(*rgb.shape[:2], 1) * float(depth_value)
+            accumulation = rgb.new_zeros(*rgb.shape[:2], 1)
+            j_empty = torch.zeros_like(rgb)
+            final_transmittance = rgb.new_ones(*rgb.shape[:2], 1)
+            out = {
+                "rgb": rgb,
+                "depth": depth,
+                "depth_second_moment": depth.square(),
+                "depth_variance": accumulation,
+                "depth_std_relative": rgb.new_ones(*rgb.shape[:2], 1),
+                "first_depth": depth,
+                "last_depth": depth,
+                "final_transmittance": final_transmittance,
+                "hit_q_alpha": accumulation,
+                "hit_q_conc": accumulation,
+                "hit_confidence": accumulation,
+                "accumulation": accumulation,
+                "background": medium_rgb,
+                "rgb_object": torch.zeros_like(rgb),
+                "J": j_empty,
+                "J_raw": j_empty,
+                "J_gaussian": j_empty,
+                "J_gaussian_raw": j_empty,
+                "J_object": j_empty,
+                "J_object_raw": j_empty,
+                "rgb_clear": j_empty,
+                "rgb_clear_clamp": j_empty,
+                "rgb_medium": rgb,
+                "rgb_medium_finite": rgb,
+                "rgb_medium_total": rgb,
+                "tail_weight_last": accumulation,
+                "tail_medium_original": j_empty,
+                "rgb_tail": j_empty,
+                "rgb_implicit_tail": rgb,
+                "pred_image": rgb,
+                "medium_rgb": medium_rgb,
+                "medium_bs": medium_bs,
+                "medium_attn": medium_attn,
+            }
+            if medium.b_inf is not None:
+                out["b_inf"] = medium.b_inf
+                out["b_inf_minus_A_abs"] = torch.abs(medium.b_inf - medium_rgb)
+            return out
+
         if self.crop_box is not None and not self.training:
             crop_ids = self.crop_box.within(self.means).squeeze()
             if crop_ids.sum() == 0:
-                rgb = medium_rgb
-                depth = medium_rgb.new_ones(*rgb.shape[:2], 1) * 10
-                accumulation = medium_rgb.new_zeros(*rgb.shape[:2], 1)
-                j_empty = torch.zeros_like(rgb)
-                return {"rgb": rgb, "depth": depth, "accumulation": accumulation, "background": medium_rgb, 
-                        "rgb_object": torch.zeros_like(rgb), "J": j_empty, "J_raw": j_empty,
-                        "J_gaussian": j_empty, "J_gaussian_raw": j_empty,
-                        "J_object": j_empty, "J_object_raw": j_empty,
-                        "rgb_clear": j_empty, "rgb_clear_clamp": j_empty, "rgb_medium": medium_rgb, "pred_image": rgb,
-                        "medium_rgb": medium_rgb, "medium_bs": medium_bs, "medium_attn": medium_attn}
+                return _empty_gaussian_outputs(medium_rgb)
         else:
             crop_ids = None
 
@@ -2212,16 +2274,7 @@ class WaterSplattingModel(Model):
         camera.rescale_output_resolution(camera_downscale)
 
         if (self.radii).sum() == 0:
-            rgb = medium_rgb
-            depth = medium_rgb.new_ones(*rgb.shape[:2], 1) * 10
-            accumulation = medium_rgb.new_zeros(*rgb.shape[:2], 1)
-            j_empty = torch.zeros_like(rgb)
-            return {"rgb": rgb, "depth": depth, "accumulation": accumulation, "background": medium_rgb, 
-                    "rgb_object": torch.zeros_like(rgb), "J": j_empty, "J_raw": j_empty,
-                    "J_gaussian": j_empty, "J_gaussian_raw": j_empty,
-                    "J_object": j_empty, "J_object_raw": j_empty,
-                    "rgb_clear": j_empty, "rgb_clear_clamp": j_empty, "rgb_medium": medium_rgb, "pred_image": rgb,
-                    "medium_rgb": medium_rgb, "medium_bs": medium_bs, "medium_attn": medium_attn}
+            return _empty_gaussian_outputs(medium_rgb)
 
         if self.training and self.xys.requires_grad:
             self.xys.retain_grad()
@@ -2275,6 +2328,7 @@ class WaterSplattingModel(Model):
         
         self.xys_grad_abs = torch.zeros_like(self.xys)
         self.xys_grad_abs_proxy = None
+        self.xys_grad_abs_capacity = None
 
         if self._uses_medium_depth_context():
             depth_seed_render = self.underwater_rasterizer.rasterize(  # type: ignore
@@ -2358,11 +2412,29 @@ class WaterSplattingModel(Model):
             j_gaussian = dual_render.j_gaussian
             j_object_raw = dual_render.j_raw
             j_object = dual_render.j_gaussian
+
+        def _scale_aux_grad(value: torch.Tensor, scale: float) -> torch.Tensor:
+            scale = max(float(scale), 0.0)
+            if scale <= 0.0:
+                return value.detach()
+            if (not value.is_floating_point()) or (not value.requires_grad):
+                return value
+            if abs(scale - 1.0) < 1e-8:
+                return value
+            return value.detach() + scale * (value - value.detach())
+
         clear_proxy_render = None
+        capacity_control_render = None
         chroma_weight_config = float(getattr(self.config, "lambda_background_clear_chroma", 0.0))
         chroma_active_by_step = (
             chroma_weight_config > 0.0
             and (not self.training or self.step >= int(getattr(self.config, "background_clear_chroma_start_step", 10000)))
+        )
+        capacity_weight_config = float(getattr(self.config, "lambda_budgeted_capacity", 0.0))
+        capacity_active_by_step = (
+            bool(getattr(self.config, "budgeted_capacity_enabled", False))
+            and capacity_weight_config > 0.0
+            and (not self.training or self.step >= int(getattr(self.config, "budgeted_capacity_start_step", 4000)))
         )
         halo_weight_config = float(getattr(self.config, "lambda_halo_capacity", 0.0))
         halo_active_by_step = (
@@ -2375,18 +2447,36 @@ class WaterSplattingModel(Model):
             or chroma_active_by_step
             or halo_active_by_step
         )
+        capacity_control_required = bool(
+            getattr(self.config, "capacity_control_enabled", False)
+            and (capacity_active_by_step or halo_active_by_step)
+        )
+        if capacity_control_required:
+            self.xys_grad_abs_capacity = torch.zeros_like(self.xys)
+            capacity_geometry_grad_scale = float(
+                getattr(self.config, "capacity_control_geometry_gradient_scale", 1.0)
+            )
+            capacity_opacity_grad_scale = float(
+                getattr(self.config, "capacity_control_opacity_gradient_scale", 1.0)
+            )
+            capacity_control_opacities = _scale_aux_grad(opacities, capacity_opacity_grad_scale)
+            capacity_control_render = self.underwater_rasterizer.rasterize_clear_proxy(  # type: ignore
+                xys=_scale_aux_grad(self.xys, capacity_geometry_grad_scale),
+                xys_grad_abs=self.xys_grad_abs_capacity,
+                depths=_scale_aux_grad(depths, capacity_geometry_grad_scale),
+                radii=_scale_aux_grad(self.radii, capacity_geometry_grad_scale),
+                conics=_scale_aux_grad(conics, capacity_geometry_grad_scale),
+                num_tiles_hit=num_tiles_hit,
+                colors=rgbs.detach(),
+                opacities=capacity_control_opacities,
+                height=H,
+                width=W,
+                step=self.step,
+            )
+            if capacity_control_opacities.requires_grad:
+                capacity_control_opacities.retain_grad()
         if clear_proxy_required:
             self.xys_grad_abs_proxy = torch.zeros_like(self.xys)
-
-            def _scale_proxy_grad(value: torch.Tensor, scale: float) -> torch.Tensor:
-                scale = max(float(scale), 0.0)
-                if scale <= 0.0:
-                    return value.detach()
-                if (not value.is_floating_point()) or (not value.requires_grad):
-                    return value
-                if abs(scale - 1.0) < 1e-8:
-                    return value
-                return value.detach() + scale * (value - value.detach())
 
             proxy_xys = self.xys
             proxy_depths = depths
@@ -2405,12 +2495,12 @@ class WaterSplattingModel(Model):
                     getattr(self.config, "clear_proxy_opacity_gradient_scale", 1.0)
                 )
             proxy_color_grad_scale = float(getattr(self.config, "clear_proxy_color_gradient_scale", 1.0))
-            proxy_xys = _scale_proxy_grad(proxy_xys, proxy_geometry_grad_scale)
-            proxy_depths = _scale_proxy_grad(proxy_depths, proxy_geometry_grad_scale)
-            proxy_radii = _scale_proxy_grad(proxy_radii, proxy_geometry_grad_scale)
-            proxy_conics = _scale_proxy_grad(proxy_conics, proxy_geometry_grad_scale)
-            proxy_opacities = _scale_proxy_grad(proxy_opacities, proxy_opacity_grad_scale)
-            proxy_colors = _scale_proxy_grad(proxy_colors, proxy_color_grad_scale)
+            proxy_xys = _scale_aux_grad(proxy_xys, proxy_geometry_grad_scale)
+            proxy_depths = _scale_aux_grad(proxy_depths, proxy_geometry_grad_scale)
+            proxy_radii = _scale_aux_grad(proxy_radii, proxy_geometry_grad_scale)
+            proxy_conics = _scale_aux_grad(proxy_conics, proxy_geometry_grad_scale)
+            proxy_opacities = _scale_aux_grad(proxy_opacities, proxy_opacity_grad_scale)
+            proxy_colors = _scale_aux_grad(proxy_colors, proxy_color_grad_scale)
             clear_proxy_render = self.underwater_rasterizer.rasterize_clear_proxy(  # type: ignore
                 xys=proxy_xys,
                 xys_grad_abs=self.xys_grad_abs_proxy,
@@ -2571,6 +2661,9 @@ class WaterSplattingModel(Model):
             )
             outputs["J_proxy_rgb_object"] = clear_proxy_render.rgb_object
             outputs["J_proxy_accumulation"] = clear_proxy_render.accumulation
+        if capacity_control_render is not None:
+            outputs["capacity_control_accumulation"] = capacity_control_render.accumulation
+            outputs["capacity_control_opacities"] = capacity_control_opacities
         if camera_index is not None:
             outputs["camera_index"] = torch.tensor(float(camera_index), device=self.device)
         if b_inf is not None:
@@ -2934,8 +3027,49 @@ class WaterSplattingModel(Model):
             post_start = int(getattr(self.config, "background_clear_chroma_start_step", 10000))
             if self.step >= post_start:
                 cap_weight *= float(getattr(self.config, "budgeted_capacity_post_scale", 0.5))
+            capacity_accumulation = outputs.get("capacity_control_accumulation", outputs["accumulation"])
+            capacity_opacities = outputs.get("capacity_control_opacities")
+            if (
+                bool(getattr(self.config, "capacity_conflict_gate_enabled", False))
+                and capacity_opacities is not None
+                and getattr(capacity_opacities, "requires_grad", False)
+                and loss_dict["main_loss"].requires_grad
+            ):
+                # The gsplat backward writes screen-space absolute gradients as
+                # a side effect. This extra diagnostic grad is only used to
+                # choose the opacity gate, so record the prepass contribution
+                # and subtract it later from densification statistics.
+                xys_grad_abs_before = (
+                    self.xys_grad_abs.detach().clone()
+                    if self.xys_grad_abs is not None
+                    else None
+                )
+                rec_opacity_grad = torch.autograd.grad(
+                    loss_dict["main_loss"],
+                    self.opacities,
+                    retain_graph=True,
+                    create_graph=False,
+                    allow_unused=True,
+                )[0]
+                if xys_grad_abs_before is not None and self.xys_grad_abs is not None:
+                    self._capacity_conflict_xys_grad_abs_prepass = (
+                        self.xys_grad_abs.detach() - xys_grad_abs_before
+                    ).clamp_min(0.0)
+                if rec_opacity_grad is not None and tuple(rec_opacity_grad.shape) == tuple(capacity_opacities.shape):
+                    rho = min(max(float(getattr(self.config, "capacity_conflict_rho", 1.0)), 0.0), 1.0)
+                    conflict = (rec_opacity_grad.detach() < 0.0).to(dtype=capacity_opacities.dtype)
+                    gate = (1.0 - conflict) + rho * conflict
+
+                    def _capacity_conflict_hook(grad: torch.Tensor, gate: torch.Tensor = gate) -> torch.Tensor:
+                        return grad * gate.to(device=grad.device, dtype=grad.dtype)
+
+                    capacity_opacities.register_hook(_capacity_conflict_hook)
+                    outputs["capacity_conflict_gate"] = gate.detach()
+                    if metrics_dict is not None:
+                        metrics_dict["capacity_conflict_fraction"] = conflict.mean()
+                        metrics_dict["capacity_conflict_gate_mean"] = gate.mean()
             loss_dict["budgeted_capacity_loss"] = cap_weight * budgeted_capacity_loss(
-                accumulation=outputs["accumulation"],
+                accumulation=capacity_accumulation,
                 support=support_capacity,
                 budget=float(getattr(self.config, "budgeted_capacity_value", 0.05)),
                 temperature=float(getattr(self.config, "budgeted_capacity_temperature", 0.02)),
@@ -2969,8 +3103,9 @@ class WaterSplattingModel(Model):
             if self.step >= post_start:
                 halo_weight *= float(getattr(self.config, "halo_capacity_post_scale", 0.5))
             outputs["medium_support_halo"] = halo_support
+            capacity_accumulation = outputs.get("capacity_control_accumulation", outputs["accumulation"])
             loss_dict["halo_capacity_loss"] = halo_weight * budgeted_capacity_loss(
-                accumulation=outputs["accumulation"],
+                accumulation=capacity_accumulation,
                 support=halo_support,
                 budget=float(getattr(self.config, "halo_capacity_value", 0.03)),
                 temperature=float(getattr(self.config, "halo_capacity_temperature", 0.02)),
