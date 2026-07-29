@@ -404,11 +404,15 @@ class WaterSplattingModelConfig(ModelConfig):
     medium_support_capacity_power: float = 1.0
     """Optional exponent applied to thresholded medium capacity support before capacity/proxy losses."""
     medium_support_region_exclusion_enabled: bool = False
-    """Use training-only object/boundary region masks to exclude support-capacity loss pixels."""
+    """Use training-only object/boundary region masks to exclude selected support-loss pixels."""
     medium_support_exclude_object: bool = True
-    """Exclude object-mask pixels from medium capacity/proxy support when region exclusion is enabled."""
+    """Exclude object-mask pixels from selected medium supports when region exclusion is enabled."""
     medium_support_exclude_boundary: bool = False
-    """Exclude boundary-mask pixels from medium capacity/proxy support when region exclusion is enabled."""
+    """Exclude boundary-mask pixels from selected medium supports when region exclusion is enabled."""
+    medium_support_region_exclusion_apply_capacity: bool = True
+    """Apply region exclusion to budgeted/halo capacity support."""
+    medium_support_region_exclusion_apply_chroma: bool = True
+    """Apply region exclusion to clear-proxy chroma support."""
     lambda_proxy_clear_luma: float = 0.0
     """Optional support-weighted clear-proxy luma budget loss."""
     proxy_clear_luma_budget: float = 0.03
@@ -2772,6 +2776,7 @@ class WaterSplattingModel(Model):
         support_route = None
         support_broad = None
         support_capacity = None
+        support_chroma = None
         support_halo_base = None
         support_bootstrap = None
         needs_medium_support = any(
@@ -2813,12 +2818,14 @@ class WaterSplattingModel(Model):
             if abs(capacity_power - 1.0) > 1e-8:
                 support_capacity = support_capacity.clamp_min(0.0).pow(max(capacity_power, 1e-6))
             support_capacity = support_capacity.detach()
+            support_chroma = support_capacity
             support_halo_base = medium_supports.halo_base
             support_bootstrap = medium_supports.bootstrap
             if image_mask is not None:
                 support_route = support_route * image_mask
                 support_broad = support_broad * image_mask
                 support_capacity = support_capacity * image_mask
+                support_chroma = support_chroma * image_mask
                 support_halo_base = support_halo_base * image_mask
                 support_bootstrap = support_bootstrap * image_mask
             if bool(getattr(self.config, "medium_support_region_exclusion_enabled", False)):
@@ -2831,7 +2838,11 @@ class WaterSplattingModel(Model):
                     boundary_mask = self._load_backscatter_region_mask(outputs=outputs, key="boundary", target=gt_img)
                     if boundary_mask is not None:
                         exclusion = torch.maximum(exclusion, boundary_mask.to(support_capacity).clamp(0.0, 1.0))
-                support_capacity = support_capacity * (1.0 - exclusion).clamp(0.0, 1.0)
+                keep = (1.0 - exclusion).clamp(0.0, 1.0)
+                if bool(getattr(self.config, "medium_support_region_exclusion_apply_capacity", True)):
+                    support_capacity = support_capacity * keep
+                if bool(getattr(self.config, "medium_support_region_exclusion_apply_chroma", True)):
+                    support_chroma = support_chroma * keep
                 outputs["medium_support_region_exclusion"] = exclusion.detach()
             outputs["medium_support_flat"] = medium_supports.flat
             outputs["medium_support_med"] = medium_supports.medium
@@ -2841,6 +2852,7 @@ class WaterSplattingModel(Model):
             outputs["medium_support_core_raw"] = support_capacity_raw
             outputs["medium_support_core"] = support_capacity
             outputs["medium_support_capacity"] = support_capacity
+            outputs["medium_support_chroma"] = support_chroma
             outputs["medium_support_halo_base"] = support_halo_base
             outputs["medium_support_bootstrap"] = support_bootstrap
             outputs["medium_support_error"] = medium_supports.medium_error
@@ -3049,13 +3061,13 @@ class WaterSplattingModel(Model):
         if bg_chroma_weight > 0.0 and "J_proxy_raw" in outputs:
             if (
                 bool(getattr(self.config, "background_clear_chroma_use_medium_support", False))
-                and support_capacity is not None
-                and support_capacity.sum() > 0
+                and support_chroma is not None
+                and support_chroma.sum() > 0
             ):
                 loss_dict["background_clear_chroma_loss"] = bg_chroma_weight * clear_proxy_chroma_loss(
                     j_proxy=outputs["J_proxy_raw"],
                     medium_rgb=outputs.get("b_inf", outputs["medium_rgb"]),
-                    support=support_capacity,
+                    support=support_chroma,
                     margin=float(getattr(self.config, "background_clear_chroma_margin", 0.02)),
                     detach_medium=bool(getattr(self.config, "background_clear_chroma_medium_detach", True)),
                 )

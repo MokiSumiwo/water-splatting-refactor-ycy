@@ -330,3 +330,76 @@ Far BG LCC Max <= 0.10.
 ```
 
 If color attenuation recovers Object J Ret without losing P3's far metrics, the next branch should tune between the best P16-P18 color scale and P3. If all color attenuation loses far cleanup, P3 remains the current best candidate and the next mechanism should target capacity/appearance separation with a new support design rather than more proxy-gradient scaling.
+
+## P16-P18 Results
+
+| Run | Color Grad | PSNR | SSIM | LPIPS | Far Accum | Far Clear | Far BG Frac | Far BG LCC Max | Water Accum | Water J | Obj Acc Ret | Obj J Ret | Boundary Ret |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| P3 | 1.00 | 31.2235 | 0.913678 | 0.174772 | 0.294079 | 0.061725 | 0.145686 | 0.097096 | 0.021233 | 0.000502 | 0.975145 | 0.970946 | 0.994212 |
+| P16 | 0.75 | 31.1443 | 0.912508 | 0.176294 | 0.235914 | 0.071976 | 0.108557 | 0.102095 | 0.006103 | 0.000942 | 0.922027 | 0.989670 | 0.963080 |
+| P17 | 0.50 | 31.0439 | 0.912444 | 0.175298 | 0.248868 | 0.068360 | 0.127235 | 0.115862 | 0.013154 | 0.000591 | 0.940047 | 0.996568 | 0.979161 |
+| P18 | 0.00 | 30.9193 | 0.911876 | 0.177548 | 0.234460 | 0.070354 | 0.120091 | 0.109901 | 0.002378 | 0.000614 | 0.915445 | 0.985072 | 0.970271 |
+
+Interpretation:
+
+- Color-gradient attenuation does not solve the object-capacity problem.
+- P16/P17/P18 improve some far occupancy metrics versus P3, but all three fail Object Acc Ret and none preserve P3's reconstruction quality.
+- The Object J Ret recovery in P16/P17 is therefore not sufficient; the runs are trading object capacity for appearance retention.
+- Continue to treat P3 as the reconstruction-safe candidate and P9 as a non-deployable far-cleanup reference.
+
+## P19-P20 Final Plan
+
+P15 showed that excluding object regions from both capacity and chroma supports recovers Object J Ret, but damages reconstruction and loses P3's Far Clear advantage. P16-P18 showed that globally weakening proxy color gradients is not enough.
+
+The final P-series test separates the loss supports:
+
+```text
+medium_support_capacity = P3 support
+medium_support_chroma   = P3 support with train-time object/boundary exclusion
+```
+
+New default-compatible flags:
+
+```text
+medium_support_region_exclusion_apply_capacity: bool = True
+medium_support_region_exclusion_apply_chroma: bool = True
+```
+
+Defaults preserve P13-P15 behavior. P19/P20 set:
+
+```text
+medium_support_region_exclusion_apply_capacity = False
+medium_support_region_exclusion_apply_chroma = True
+```
+
+Experiment matrix:
+
+| ID | Base | Chroma Exclude Object | Chroma Exclude Boundary | Capacity Exclusion | Purpose |
+| --- | --- | ---: | ---: | ---: | --- |
+| P19 | P3 | yes | no | no | Test whether object-only chroma exclusion fixes P3 Object J Ret while preserving capacity cleanup |
+| P20 | P3 | yes | yes | no | Test whether adding boundary chroma exclusion improves retention without losing P3 far metrics |
+
+Commands:
+
+```bash
+GPU=6 bash scripts/experiments/medium_attr_p19_b02_proxy_geom000_opacity050_chroma_objexclude_iui3.sh
+GPU=7 bash scripts/experiments/medium_attr_p20_b02_proxy_geom000_opacity050_chroma_objboundaryexclude_iui3.sh
+```
+
+Decision rule:
+
+```text
+P19/P20 must beat P3 on Object J Ret while staying close to P3 on:
+PSNR >= 31.08
+Obj Acc Ret >= 0.97
+Boundary Ret >= 0.95
+Far Clear <= 0.065
+Far BG LCC Max <= 0.10
+```
+
+After P19/P20, stop the P-series regardless of outcome and choose between:
+
+```text
+P3 as current deployable candidate,
+or a new non-P-series mechanism if P19/P20 fail to dominate P3.
+```
