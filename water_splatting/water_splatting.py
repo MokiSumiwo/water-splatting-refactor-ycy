@@ -369,6 +369,12 @@ class WaterSplattingModelConfig(ModelConfig):
     """Override capacity radii/conics gradient scale; negative values inherit geometry scale."""
     capacity_control_opacity_gradient_scale: float = 1.0
     """Scale budgeted-capacity gradients to Gaussian opacity."""
+    capacity_control_scale_shrink_only: bool = False
+    """Only keep budgeted-capacity log-scale gradients that shrink Gaussian footprints."""
+    capacity_control_scale_shrink_clip_quantile: float = -1.0
+    """Optional positive shrink-gradient quantile clamp; <=0 disables clipping."""
+    capacity_control_scale_shrink_clip_value: float = 0.0
+    """Optional absolute positive shrink-gradient clamp; <=0 disables this clamp."""
     capacity_conflict_gate_enabled: bool = False
     """Attenuate capacity opacity gradients when reconstruction wants opacity increased."""
     capacity_conflict_rho: float = 1.0
@@ -2490,20 +2496,92 @@ class WaterSplattingModel(Model):
             capacity_opacity_grad_scale = float(
                 getattr(self.config, "capacity_control_opacity_gradient_scale", 1.0)
             )
-            capacity_control_opacities = _branch_scaled_grad(opacities, capacity_opacity_grad_scale)
-            capacity_control_render = self.underwater_rasterizer.rasterize_clear_proxy(  # type: ignore
-                xys=_branch_scaled_grad(self.xys, capacity_position_grad_scale),
-                xys_grad_abs=self.xys_grad_abs_capacity,
-                depths=_branch_scaled_grad(depths, capacity_depth_grad_scale),
-                radii=_branch_scaled_grad(self.radii, capacity_footprint_grad_scale),
-                conics=_branch_scaled_grad(conics, capacity_footprint_grad_scale),
-                num_tiles_hit=num_tiles_hit,
-                colors=rgbs.detach(),
-                opacities=capacity_control_opacities,
-                height=H,
-                width=W,
-                step=self.step,
+            capacity_scale_shrink_only = bool(
+                getattr(self.config, "capacity_control_scale_shrink_only", False)
             )
+            capacity_scale_clip_quantile = float(
+                getattr(self.config, "capacity_control_scale_shrink_clip_quantile", -1.0)
+            )
+            capacity_scale_clip_value = float(
+                getattr(self.config, "capacity_control_scale_shrink_clip_value", 0.0)
+            )
+            capacity_scale_control_required = (
+                capacity_scale_shrink_only
+                or 0.0 < capacity_scale_clip_quantile <= 1.0
+                or capacity_scale_clip_value > 0.0
+            )
+            capacity_control_opacities = _branch_scaled_grad(opacities, capacity_opacity_grad_scale)
+            capacity_control_scales = None
+            if capacity_scale_control_required:
+                capacity_control_scales = _branch_scaled_grad(scales_crop, capacity_footprint_grad_scale)
+                if capacity_control_scales.requires_grad:
+
+                    def _capacity_scale_shrink_hook(
+                        grad: torch.Tensor,
+                        shrink_only: bool = capacity_scale_shrink_only,
+                        clip_quantile: float = capacity_scale_clip_quantile,
+                        clip_value: float = capacity_scale_clip_value,
+                    ) -> torch.Tensor:
+                        controlled = grad
+                        if shrink_only:
+                            # scales are log-scales, so positive gradients shrink the footprint
+                            # under gradient descent; negative gradients grow it.
+                            controlled = controlled.clamp_min(0.0)
+                        if clip_value > 0.0:
+                            controlled = controlled.clamp_max(float(clip_value))
+                        if 0.0 < clip_quantile <= 1.0:
+                            positive = controlled.detach()[torch.isfinite(controlled.detach()) & (controlled.detach() > 0.0)]
+                            if positive.numel() > 0:
+                                threshold = torch.quantile(positive.float(), float(clip_quantile)).to(
+                                    device=controlled.device,
+                                    dtype=controlled.dtype,
+                                )
+                                controlled = torch.minimum(controlled, threshold)
+                        return controlled
+
+                    capacity_control_scales.register_hook(_capacity_scale_shrink_hook)
+                capacity_xys, capacity_depths, capacity_radii, capacity_conics, _, capacity_num_tiles_hit, _ = (
+                    self.underwater_rasterizer.project(  # type: ignore
+                        means=_branch_scaled_grad(means_crop, capacity_position_grad_scale),
+                        scales=capacity_control_scales,
+                        quats=quats_crop.detach(),
+                        viewmat=viewmat,
+                        fx=camera.fx.item(),
+                        fy=camera.fy.item(),
+                        cx=cx,
+                        cy=cy,
+                        height=H,
+                        width=W,
+                        clip_thresh=self.config.clip_thresh,
+                    )
+                )
+                capacity_control_render = self.underwater_rasterizer.rasterize_clear_proxy(  # type: ignore
+                    xys=capacity_xys,
+                    xys_grad_abs=self.xys_grad_abs_capacity,
+                    depths=_branch_scaled_grad(capacity_depths, capacity_depth_grad_scale),
+                    radii=capacity_radii,
+                    conics=capacity_conics,
+                    num_tiles_hit=capacity_num_tiles_hit,
+                    colors=rgbs.detach(),
+                    opacities=capacity_control_opacities,
+                    height=H,
+                    width=W,
+                    step=self.step,
+                )
+            else:
+                capacity_control_render = self.underwater_rasterizer.rasterize_clear_proxy(  # type: ignore
+                    xys=_branch_scaled_grad(self.xys, capacity_position_grad_scale),
+                    xys_grad_abs=self.xys_grad_abs_capacity,
+                    depths=_branch_scaled_grad(depths, capacity_depth_grad_scale),
+                    radii=_branch_scaled_grad(self.radii, capacity_footprint_grad_scale),
+                    conics=_branch_scaled_grad(conics, capacity_footprint_grad_scale),
+                    num_tiles_hit=num_tiles_hit,
+                    colors=rgbs.detach(),
+                    opacities=capacity_control_opacities,
+                    height=H,
+                    width=W,
+                    step=self.step,
+                )
             if capacity_control_opacities.requires_grad:
                 capacity_control_opacities.retain_grad()
         if clear_proxy_required:
@@ -2696,6 +2774,8 @@ class WaterSplattingModel(Model):
             outputs["capacity_control_accumulation"] = capacity_control_render.accumulation
             outputs["capacity_control_opacities"] = capacity_control_opacities
             outputs["main_render_opacities"] = opacities
+            if capacity_control_scales is not None:
+                outputs["capacity_control_scales"] = capacity_control_scales
         if camera_index is not None:
             outputs["camera_index"] = torch.tensor(float(camera_index), device=self.device)
         if b_inf is not None:
