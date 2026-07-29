@@ -84,4 +84,33 @@ Interpretation:
 
 ## Results
 
-Pending.
+| Run | Geometry Grad | Opacity Grad | PSNR | SSIM | LPIPS | Far Accum | Far Clear | Far BG Frac | Far BG LCC Max | Water Accum | Water J | Obj Acc Ret | Obj J Ret | Boundary Ret |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| C2 current-code | 1.00 | 1.00 | 31.0738 | 0.911893 | 0.175782 | 0.291455 | 0.077338 | 0.230165 | 0.118401 | 0.006519 | 0.000761 | 0.947713 | 0.992589 | 0.963250 |
+| E1 app-only | 0.00 | 0.00 | 31.0844 | 0.913836 | 0.175482 | 0.316544 | 0.068810 | 0.188311 | 0.118322 | 0.023967 | 0.000300 | 0.973084 | 1.004191 | 0.961212 |
+| P1 | 0.25 | 0.25 | 31.0099 | 0.910496 | 0.175409 | 0.237284 | 0.076160 | 0.107448 | 0.108096 | 0.002519 | 0.000733 | 0.933842 | 0.998412 | 1.015901 |
+| P2 | 0.50 | 0.50 | 30.9625 | 0.912780 | 0.177377 | 0.274733 | 0.068266 | 0.177518 | 0.113812 | 0.011727 | 0.000740 | 0.948894 | 0.989123 | 0.995391 |
+| P3 | 0.00 | 0.50 | 31.2235 | 0.913678 | 0.174772 | 0.294079 | 0.061725 | 0.145686 | 0.097096 | 0.021233 | 0.000502 | 0.975145 | 0.970946 | 0.994212 |
+
+## Interpretation After P1-P3
+
+- P1 gives the best Water Accum and Far BG fraction, but PSNR and Object Acc Ret fail. Even 0.25 geometry gradient appears too risky.
+- P2 is dominated by P1/P3 and should not be continued.
+- P3 is the most promising new branch: it improves PSNR, LPIPS, Object Acc Ret, Far Clear, Far BG fraction, and connected residual versus C2 current-code repro, while keeping Boundary Ret strong. Its weakness is higher Water Accum than C2 and Object J Ret below the 0.975 target.
+- The next sweep should keep geometry gradient disabled and vary opacity gradient only.
+
+## P4-P6 Plan
+
+| ID | Geometry Grad | Opacity Grad | Color Grad | Purpose |
+| --- | ---: | ---: | ---: | --- |
+| P4 | 0.00 | 0.25 | 1.00 | Test whether lighter opacity pressure recovers Object J Ret |
+| P5 | 0.00 | 0.75 | 1.00 | Test whether stronger opacity pressure reduces Water Accum/Far BG further |
+| P6 | 0.00 | 1.00 | 1.00 | Test opacity-only upper bound without footprint gradients |
+
+Commands:
+
+```bash
+GPU=6 bash scripts/experiments/medium_attr_p4_b02_proxy_geom000_opacity025_iui3.sh
+GPU=7 bash scripts/experiments/medium_attr_p5_b02_proxy_geom000_opacity075_iui3.sh
+GPU=8 bash scripts/experiments/medium_attr_p6_b02_proxy_geom000_opacity100_iui3.sh
+```
