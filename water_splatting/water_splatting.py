@@ -399,6 +399,10 @@ class WaterSplattingModelConfig(ModelConfig):
     """Use detached medium color explainability in support."""
     medium_support_use_far: bool = True
     """Use weak detached far-depth modulation in capacity support."""
+    medium_support_capacity_threshold: float = 0.0
+    """Optional lower threshold applied to medium capacity support before capacity/proxy losses."""
+    medium_support_capacity_power: float = 1.0
+    """Optional exponent applied to thresholded medium capacity support before capacity/proxy losses."""
     lambda_proxy_clear_luma: float = 0.0
     """Optional support-weighted clear-proxy luma budget loss."""
     proxy_clear_luma_budget: float = 0.03
@@ -2793,7 +2797,16 @@ class WaterSplattingModel(Model):
             )
             support_route = medium_supports.route
             support_broad = medium_supports.broad
-            support_capacity = medium_supports.core
+            support_capacity_raw = medium_supports.core
+            support_capacity = support_capacity_raw
+            capacity_threshold = float(getattr(self.config, "medium_support_capacity_threshold", 0.0))
+            if capacity_threshold > 0.0:
+                threshold = min(max(capacity_threshold, 0.0), 0.999999)
+                support_capacity = ((support_capacity - threshold) / (1.0 - threshold)).clamp(0.0, 1.0)
+            capacity_power = float(getattr(self.config, "medium_support_capacity_power", 1.0))
+            if abs(capacity_power - 1.0) > 1e-8:
+                support_capacity = support_capacity.clamp_min(0.0).pow(max(capacity_power, 1e-6))
+            support_capacity = support_capacity.detach()
             support_halo_base = medium_supports.halo_base
             support_bootstrap = medium_supports.bootstrap
             if image_mask is not None:
@@ -2807,6 +2820,7 @@ class WaterSplattingModel(Model):
             outputs["medium_support_far"] = medium_supports.far
             outputs["medium_support_route"] = support_route
             outputs["medium_support_broad"] = support_broad
+            outputs["medium_support_core_raw"] = support_capacity_raw
             outputs["medium_support_core"] = support_capacity
             outputs["medium_support_capacity"] = support_capacity
             outputs["medium_support_halo_base"] = support_halo_base

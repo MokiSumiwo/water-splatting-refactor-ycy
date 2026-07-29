@@ -159,3 +159,60 @@ Decision rule:
 
 - Prefer the first run that keeps `Obj Acc Ret >= 0.97`, `Obj J Ret >= 0.975`, `Boundary Ret >= 0.95`, `PSNR >= 31.08`, and `Far BG LCC Max <= 0.10`.
 - If all P7-P9 lose far cleanup, retain P3 as the best mechanism candidate and investigate stronger object/boundary exclusion in support construction rather than further proxy-weight tuning.
+
+## P7-P9 Results
+
+| Run | PSNR | SSIM | LPIPS | Far Accum | Far Clear | Far BG Frac | Far BG LCC Max | Water Accum | Water J | Obj Acc Ret | Obj J Ret | Boundary Ret |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| C2 current-code | 31.0738 | 0.911893 | 0.175782 | 0.291455 | 0.077338 | 0.230165 | 0.118401 | 0.006519 | 0.000761 | 0.947713 | 0.992589 | 0.963250 |
+| E1 app-only | 31.0844 | 0.913836 | 0.175482 | 0.316544 | 0.068810 | 0.188311 | 0.118322 | 0.023967 | 0.000300 | 0.973084 | 1.004191 | 0.961212 |
+| P3 opacity 0.50 / chroma 0.0015 | 31.2235 | 0.913678 | 0.174772 | 0.294079 | 0.061725 | 0.145686 | 0.097096 | 0.021233 | 0.000502 | 0.975145 | 0.970946 | 0.994212 |
+| P7 opacity 0.50 / chroma 0.0010 | 31.1065 | 0.913121 | 0.175454 | 0.282326 | 0.071197 | 0.156516 | 0.117581 | 0.014844 | 0.000467 | 0.953923 | 0.977999 | 1.018762 |
+| P8 opacity 0.50 / chroma 0.00125 | 30.9175 | 0.912783 | 0.176663 | 0.296909 | 0.075979 | 0.243607 | 0.202386 | 0.012316 | 0.001743 | 0.956427 | 1.005013 | 0.971542 |
+| P9 opacity 0.50 / margin 0.030 | 31.1912 | 0.913403 | 0.178260 | 0.227394 | 0.064931 | 0.096367 | 0.113812 | 0.014574 | 0.000670 | 0.920260 | 0.977208 | 0.967358 |
+
+Support diagnostic on P3/P4/P9:
+
+| Run | S_cap Mean | Water S_cap | Object S_cap | Boundary S_cap | Object / Water | Boundary / Water | Corr(S_cap, Accum) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| P3 | 0.03100 | 0.08929 | 0.01284 | 0.02451 | 0.1430 | 0.2698 | -0.6761 |
+| P4 | 0.03026 | 0.09964 | 0.01091 | 0.02080 | 0.1119 | 0.2068 | -0.7344 |
+| P9 | 0.03053 | 0.09190 | 0.01320 | 0.02393 | 0.1420 | 0.2553 | -0.7398 |
+
+Interpretation:
+
+- P7 fixes Object J Ret but loses Object Acc Ret and connected residual improvement, so lowering chroma weight alone is not enough.
+- P8 is dominated and should be dropped.
+- P9 gives the strongest Far Accum / Far BG fraction but damages Object Acc Ret, indicating that good far cleanup is still entangled with object-capacity loss.
+- Mean support ratios are not extreme, but boundary/object tails remain nonzero. Since `S_cap` is directly reused for both budgeted capacity and proxy chroma, the next test should remove low-confidence support tails before losses rather than increasing or decreasing global loss weights.
+
+## P10-P12 Plan
+
+New default-off flags:
+
+```text
+medium_support_capacity_threshold: float = 0.0
+medium_support_capacity_power: float = 1.0
+```
+
+The thresholded support is:
+
+```text
+S_cap' = clamp((S_cap - threshold) / (1 - threshold), 0, 1) ** power
+```
+
+Experiment matrix:
+
+| ID | Base | Chroma Margin | Support Threshold | Purpose |
+| --- | --- | ---: | ---: | --- |
+| P10 | P9 | 0.030 | 0.02 | Try to recover object capacity while keeping P9 far cleanup |
+| P11 | P9 | 0.030 | 0.04 | Stronger support-tail removal |
+| P12 | P3 | 0.020 | 0.02 | Test whether P3's Object J miss improves with the same support cut |
+
+Commands:
+
+```bash
+GPU=6 bash scripts/experiments/medium_attr_p10_b02_proxy_geom000_opacity050_margin003_capthr002_iui3.sh
+GPU=7 bash scripts/experiments/medium_attr_p11_b02_proxy_geom000_opacity050_margin003_capthr004_iui3.sh
+GPU=8 bash scripts/experiments/medium_attr_p12_b02_proxy_geom000_opacity050_capthr002_iui3.sh
+```
