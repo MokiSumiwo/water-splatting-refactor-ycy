@@ -216,3 +216,54 @@ GPU=6 bash scripts/experiments/medium_attr_p10_b02_proxy_geom000_opacity050_marg
 GPU=7 bash scripts/experiments/medium_attr_p11_b02_proxy_geom000_opacity050_margin003_capthr004_iui3.sh
 GPU=8 bash scripts/experiments/medium_attr_p12_b02_proxy_geom000_opacity050_capthr002_iui3.sh
 ```
+
+## P10-P12 Results
+
+| Run | PSNR | SSIM | LPIPS | Far Accum | Far Clear | Far BG Frac | Far BG LCC Max | Water Accum | Water J | Obj Acc Ret | Obj J Ret | Boundary Ret |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| C2 current-code | 31.0738 | 0.911893 | 0.175782 | 0.291455 | 0.077338 | 0.230165 | 0.118401 | 0.006519 | 0.000761 | 0.947713 | 0.992589 | 0.963250 |
+| P3 | 31.2235 | 0.913678 | 0.174772 | 0.294079 | 0.061725 | 0.145686 | 0.097096 | 0.021233 | 0.000502 | 0.975145 | 0.970946 | 0.994212 |
+| P9 | 31.1912 | 0.913403 | 0.178260 | 0.227394 | 0.064931 | 0.096367 | 0.113812 | 0.014574 | 0.000670 | 0.920260 | 0.977208 | 0.967358 |
+| P10 P9 + threshold 0.02 | 31.0864 | 0.914303 | 0.176892 | 0.264315 | 0.074018 | 0.163288 | 0.106589 | 0.006921 | 0.000919 | 0.949545 | 0.975125 | 0.924177 |
+| P11 P9 + threshold 0.04 | 31.1917 | 0.913542 | 0.177140 | 0.302929 | 0.081297 | 0.212510 | 0.115429 | 0.008820 | 0.000701 | 0.970120 | 0.988361 | 0.963415 |
+| P12 P3 + threshold 0.02 | 30.9602 | 0.913443 | 0.177699 | 0.239073 | 0.067689 | 0.137320 | 0.118535 | 0.003547 | 0.001001 | 0.921146 | 0.957111 | 0.962421 |
+
+Interpretation:
+
+- Thresholding support can recover Object Acc Ret only at the cost of losing far-water cleanup. P11 is object-safe but Far Accum/Far Clear/Far BG revert close to or worse than C2 current-code.
+- P10 and P12 are not viable: both miss retention or reconstruction while failing to keep P9-level far cleanup.
+- Pure support threshold is therefore not the right object-protection mechanism.
+
+## P13-P15 Plan
+
+New default-off flags:
+
+```text
+medium_support_region_exclusion_enabled: bool = False
+medium_support_exclude_object: bool = True
+medium_support_exclude_boundary: bool = False
+```
+
+These flags use train-time high-precision region masks only to zero the support that enters capacity/proxy losses. They do not change inference composition, do not use q_hit, and do not use RGB mix.
+
+Mask source:
+
+```text
+common_masks/high_precision_water_m1_core_y025_nsorder_iui3_redsea_20260726
+```
+
+Experiment matrix:
+
+| ID | Base | Exclude Object | Exclude Boundary | Purpose |
+| --- | --- | ---: | ---: | --- |
+| P13 | P9 | yes | no | Recover object capacity while preserving boundary/halo cleanup |
+| P14 | P9 | yes | yes | Stronger object/boundary protection |
+| P15 | P3 | yes | no | Test whether P3 object-J issue is helped by object support exclusion |
+
+Commands:
+
+```bash
+GPU=6 bash scripts/experiments/medium_attr_p13_b02_proxy_geom000_opacity050_margin003_objexclude_iui3.sh
+GPU=7 bash scripts/experiments/medium_attr_p14_b02_proxy_geom000_opacity050_margin003_objboundaryexclude_iui3.sh
+GPU=8 bash scripts/experiments/medium_attr_p15_b02_proxy_geom000_opacity050_objexclude_iui3.sh
+```

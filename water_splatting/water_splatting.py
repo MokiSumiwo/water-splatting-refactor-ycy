@@ -403,6 +403,12 @@ class WaterSplattingModelConfig(ModelConfig):
     """Optional lower threshold applied to medium capacity support before capacity/proxy losses."""
     medium_support_capacity_power: float = 1.0
     """Optional exponent applied to thresholded medium capacity support before capacity/proxy losses."""
+    medium_support_region_exclusion_enabled: bool = False
+    """Use training-only object/boundary region masks to exclude support-capacity loss pixels."""
+    medium_support_exclude_object: bool = True
+    """Exclude object-mask pixels from medium capacity/proxy support when region exclusion is enabled."""
+    medium_support_exclude_boundary: bool = False
+    """Exclude boundary-mask pixels from medium capacity/proxy support when region exclusion is enabled."""
     lambda_proxy_clear_luma: float = 0.0
     """Optional support-weighted clear-proxy luma budget loss."""
     proxy_clear_luma_budget: float = 0.03
@@ -2815,6 +2821,18 @@ class WaterSplattingModel(Model):
                 support_capacity = support_capacity * image_mask
                 support_halo_base = support_halo_base * image_mask
                 support_bootstrap = support_bootstrap * image_mask
+            if bool(getattr(self.config, "medium_support_region_exclusion_enabled", False)):
+                exclusion = torch.zeros_like(support_capacity)
+                if bool(getattr(self.config, "medium_support_exclude_object", True)):
+                    object_mask = self._load_backscatter_region_mask(outputs=outputs, key="object", target=gt_img)
+                    if object_mask is not None:
+                        exclusion = torch.maximum(exclusion, object_mask.to(support_capacity).clamp(0.0, 1.0))
+                if bool(getattr(self.config, "medium_support_exclude_boundary", False)):
+                    boundary_mask = self._load_backscatter_region_mask(outputs=outputs, key="boundary", target=gt_img)
+                    if boundary_mask is not None:
+                        exclusion = torch.maximum(exclusion, boundary_mask.to(support_capacity).clamp(0.0, 1.0))
+                support_capacity = support_capacity * (1.0 - exclusion).clamp(0.0, 1.0)
+                outputs["medium_support_region_exclusion"] = exclusion.detach()
             outputs["medium_support_flat"] = medium_supports.flat
             outputs["medium_support_med"] = medium_supports.medium
             outputs["medium_support_far"] = medium_supports.far
