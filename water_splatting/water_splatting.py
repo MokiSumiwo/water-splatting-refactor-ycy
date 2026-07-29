@@ -361,12 +361,20 @@ class WaterSplattingModelConfig(ModelConfig):
     """Use an auxiliary accumulation render with controlled capacity gradients."""
     capacity_control_geometry_gradient_scale: float = 1.0
     """Scale budgeted-capacity gradients to projected geometry/depth/conics."""
+    capacity_control_position_gradient_scale: float = -1.0
+    """Override capacity xys gradient scale; negative values inherit geometry scale."""
+    capacity_control_depth_gradient_scale: float = -1.0
+    """Override capacity depth gradient scale; negative values inherit geometry scale."""
+    capacity_control_footprint_gradient_scale: float = -1.0
+    """Override capacity radii/conics gradient scale; negative values inherit geometry scale."""
     capacity_control_opacity_gradient_scale: float = 1.0
     """Scale budgeted-capacity gradients to Gaussian opacity."""
     capacity_conflict_gate_enabled: bool = False
     """Attenuate capacity opacity gradients when reconstruction wants opacity increased."""
     capacity_conflict_rho: float = 1.0
     """Residual capacity opacity-gradient multiplier on reconstruction-conflicting Gaussians."""
+    capacity_conflict_rec_grad_threshold: float = 1e-10
+    """Negative reconstruction opacity-gradient threshold used by capacity conflict gating."""
     halo_capacity_enabled: bool = False
     """Enable residual-gated halo capacity pressure around medium-explainable core water."""
     lambda_halo_capacity: float = 0.0
@@ -2423,6 +2431,17 @@ class WaterSplattingModel(Model):
                 return value
             return value.detach() + scale * (value - value.detach())
 
+        def _branch_scaled_grad(value: torch.Tensor, scale: float) -> torch.Tensor:
+            scale = max(float(scale), 0.0)
+            if (not value.is_floating_point()) or (not value.requires_grad):
+                return value
+            detached = value.detach()
+            return detached + scale * (value - detached)
+
+        def _capacity_grad_scale(name: str, geometry_scale: float) -> float:
+            value = float(getattr(self.config, name, -1.0))
+            return geometry_scale if value < 0.0 else value
+
         clear_proxy_render = None
         capacity_control_render = None
         chroma_weight_config = float(getattr(self.config, "lambda_background_clear_chroma", 0.0))
@@ -2456,16 +2475,28 @@ class WaterSplattingModel(Model):
             capacity_geometry_grad_scale = float(
                 getattr(self.config, "capacity_control_geometry_gradient_scale", 1.0)
             )
+            capacity_position_grad_scale = _capacity_grad_scale(
+                "capacity_control_position_gradient_scale",
+                capacity_geometry_grad_scale,
+            )
+            capacity_depth_grad_scale = _capacity_grad_scale(
+                "capacity_control_depth_gradient_scale",
+                capacity_geometry_grad_scale,
+            )
+            capacity_footprint_grad_scale = _capacity_grad_scale(
+                "capacity_control_footprint_gradient_scale",
+                capacity_geometry_grad_scale,
+            )
             capacity_opacity_grad_scale = float(
                 getattr(self.config, "capacity_control_opacity_gradient_scale", 1.0)
             )
-            capacity_control_opacities = _scale_aux_grad(opacities, capacity_opacity_grad_scale)
+            capacity_control_opacities = _branch_scaled_grad(opacities, capacity_opacity_grad_scale)
             capacity_control_render = self.underwater_rasterizer.rasterize_clear_proxy(  # type: ignore
-                xys=_scale_aux_grad(self.xys, capacity_geometry_grad_scale),
+                xys=_branch_scaled_grad(self.xys, capacity_position_grad_scale),
                 xys_grad_abs=self.xys_grad_abs_capacity,
-                depths=_scale_aux_grad(depths, capacity_geometry_grad_scale),
-                radii=_scale_aux_grad(self.radii, capacity_geometry_grad_scale),
-                conics=_scale_aux_grad(conics, capacity_geometry_grad_scale),
+                depths=_branch_scaled_grad(depths, capacity_depth_grad_scale),
+                radii=_branch_scaled_grad(self.radii, capacity_footprint_grad_scale),
+                conics=_branch_scaled_grad(conics, capacity_footprint_grad_scale),
                 num_tiles_hit=num_tiles_hit,
                 colors=rgbs.detach(),
                 opacities=capacity_control_opacities,
@@ -2664,6 +2695,7 @@ class WaterSplattingModel(Model):
         if capacity_control_render is not None:
             outputs["capacity_control_accumulation"] = capacity_control_render.accumulation
             outputs["capacity_control_opacities"] = capacity_control_opacities
+            outputs["main_render_opacities"] = opacities
         if camera_index is not None:
             outputs["camera_index"] = torch.tensor(float(camera_index), device=self.device)
         if b_inf is not None:
@@ -3057,17 +3089,22 @@ class WaterSplattingModel(Model):
                     ).clamp_min(0.0)
                 if rec_opacity_grad is not None and tuple(rec_opacity_grad.shape) == tuple(capacity_opacities.shape):
                     rho = min(max(float(getattr(self.config, "capacity_conflict_rho", 1.0)), 0.0), 1.0)
-                    conflict = (rec_opacity_grad.detach() < 0.0).to(dtype=capacity_opacities.dtype)
-                    gate = (1.0 - conflict) + rho * conflict
+                    rec_threshold = max(float(getattr(self.config, "capacity_conflict_rec_grad_threshold", 1e-10)), 0.0)
+                    rec_conflict = (rec_opacity_grad.detach() < -rec_threshold)
 
-                    def _capacity_conflict_hook(grad: torch.Tensor, gate: torch.Tensor = gate) -> torch.Tensor:
-                        return grad * gate.to(device=grad.device, dtype=grad.dtype)
+                    def _capacity_conflict_hook(
+                        grad: torch.Tensor,
+                        rec_conflict: torch.Tensor = rec_conflict,
+                        rho: float = rho,
+                    ) -> torch.Tensor:
+                        conflict = (grad > 0.0) & rec_conflict.to(device=grad.device)
+                        return torch.where(conflict, rho * grad, grad)
 
                     capacity_opacities.register_hook(_capacity_conflict_hook)
-                    outputs["capacity_conflict_gate"] = gate.detach()
+                    outputs["capacity_conflict_rec_mask"] = rec_conflict.detach().to(dtype=capacity_opacities.dtype)
                     if metrics_dict is not None:
-                        metrics_dict["capacity_conflict_fraction"] = conflict.mean()
-                        metrics_dict["capacity_conflict_gate_mean"] = gate.mean()
+                        metrics_dict["capacity_conflict_rec_fraction"] = rec_conflict.float().mean()
+                        metrics_dict["capacity_conflict_rho"] = torch.tensor(rho, device=self.device)
             loss_dict["budgeted_capacity_loss"] = cap_weight * budgeted_capacity_loss(
                 accumulation=capacity_accumulation,
                 support=support_capacity,

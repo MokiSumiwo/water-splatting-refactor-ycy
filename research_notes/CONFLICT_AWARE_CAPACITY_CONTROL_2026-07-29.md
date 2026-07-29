@@ -185,3 +185,144 @@ Recommended next experiment:
   - no conflict gate
 - compare to Q1 and P3 to see whether a small amount of footprint pressure recovers far cleanup without P9-level object damage.
 
+## Correction: Branch-Local Capacity Isolation
+
+After reviewing commit `7f367e4`, Q2/Q3 could not be treated as reliable
+evidence that sign-based conflict gating itself failed.
+The invalid Q2/Q3 output, render, and log directories were deleted after this
+correction; their metrics remain above only to document the implementation
+artifact.
+
+Issue found:
+
+- `capacity_control_opacities = _scale_aux_grad(opacities, 1.0)` returned the
+  original `opacities` tensor when scale was exactly `1.0`.
+- The conflict hook was therefore registered on a tensor shared with the main
+  render path.
+- In Q2/Q3, that hook could scale main reconstruction opacity gradients, not
+  only capacity gradients.
+
+Fix:
+
+- Capacity-control tensors now use a branch-local helper even when scale is
+  exactly `1.0`:
+
+```python
+detached = value.detach()
+branch_value = detached + scale * (value - detached)
+```
+
+- The capacity conflict hook now checks the incoming capacity gradient:
+
+```python
+conflict = (cap_grad > 0.0) & (rec_grad < -rec_threshold)
+```
+
+- Added split controls:
+  - `capacity_control_position_gradient_scale`
+  - `capacity_control_depth_gradient_scale`
+  - `capacity_control_footprint_gradient_scale`
+  - `capacity_conflict_rec_grad_threshold`
+
+## Gradient-Isolation Verification
+
+Diagnostic:
+
+```bash
+CUDA_VISIBLE_DEVICES=6 /opt/anaconda3/envs/water_splatting/bin/python \
+  scripts/diagnostics/verify_capacity_gradient_isolation.py \
+  --load-config outputs/medium_attr_p3_b02_proxy_geom000_opacity050_iui3_15000/water-splatting/medium_attr_p3_b02_proxy_geom000_opacity050_iui3_15000_20260729_p3_b02_proxy_geom000_opacity050/config.yml \
+  --load-step 14999 \
+  --force-step 14999 \
+  --image-index 1 \
+  --rho 0.25 \
+  --geometry-scale 0.0 \
+  --opacity-scale 1.0 \
+  --output-json logs/verify_capacity_gradient_isolation_p3_step14999_img1.json
+```
+
+Result:
+
+```text
+capacity_control_opacities is main_render_opacities: False
+capacity_control_opacities data_ptr equals main: False
+capacity_control_opacities grad_fn: AddBackward0
+main_render_opacities grad_fn: SigmoidBackward0
+
+main_only_before_vs_after_hook:
+    max_abs       = 2.91e-11
+    relative_norm = 5.42e-07
+
+gated_total_vs_expected:
+    max_abs       = 1.58e-11
+    relative_norm = 5.22e-07
+```
+
+This passes the intended isolation gate. The hook no longer changes main-only
+opacity gradients.
+
+## R-Series Experiments
+
+Scripts:
+
+- `scripts/experiments/medium_attr_r1_capacity_conflict025_isolated_iui3.sh`
+- `scripts/experiments/medium_attr_r2_capacity_conflict000_isolated_iui3.sh`
+- `scripts/experiments/medium_attr_r3_capacity_footprint010_iui3.sh`
+- `scripts/experiments/medium_attr_r4_capacity_footprint025_iui3.sh`
+- `scripts/experiments/medium_attr_r5_capacity_position005_footprint010_iui3.sh`
+
+Commands:
+
+```bash
+GPU=7 bash scripts/experiments/medium_attr_r1_capacity_conflict025_isolated_iui3.sh
+GPU=8 bash scripts/experiments/medium_attr_r2_capacity_conflict000_isolated_iui3.sh
+GPU=9 bash scripts/experiments/medium_attr_r3_capacity_footprint010_iui3.sh
+GPU=7 bash scripts/experiments/medium_attr_r4_capacity_footprint025_iui3.sh
+GPU=8 bash scripts/experiments/medium_attr_r5_capacity_position005_footprint010_iui3.sh
+```
+
+| Run | PSNR | SSIM | LPIPS | FarAccum | FarClear | FarBGFrac | FarBGLCCmax | WaterAccum | WaterJ | ObjAccRet | ObjJRet | BoundaryRet |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| P3 | 31.2235 | 0.913678 | 0.174772 | 0.294079 | 0.061725 | 0.145686 | 0.097096 | 0.021233 | 0.000502 | 0.975145 | 0.970946 | 0.994212 |
+| Q1 | 30.9785 | 0.913084 | 0.175349 | 0.397450 | 0.076567 | 0.169030 | 0.112062 | 0.019425 | 0.000732 | 0.975205 | 1.012164 | 0.974045 |
+| R1 | 30.9975 | 0.913815 | 0.175137 | 0.400138 | 0.079664 | 0.258594 | 0.159238 | 0.085502 | 0.001365 | 0.984699 | 0.976120 | 0.960178 |
+| R2 | 30.7300 | 0.910564 | 0.175192 | 0.275255 | 0.068640 | 0.162580 | 0.105825 | 0.009350 | 0.000692 | 0.947264 | 0.980547 | 0.992124 |
+| R3 | 30.8260 | 0.911688 | 0.178227 | 0.388411 | 0.068179 | 0.150741 | 0.106739 | 0.038065 | 0.000240 | 0.973791 | 0.977543 | 0.963894 |
+| R4 | 30.9914 | 0.912165 | 0.175812 | 0.298163 | 0.063580 | 0.116519 | 0.103924 | 0.015636 | 0.000480 | 0.950579 | 0.976050 | 0.957869 |
+| R5 | 31.0063 | 0.913000 | 0.174983 | 0.321917 | 0.073812 | 0.185691 | 0.109199 | 0.018447 | 0.000841 | 0.961491 | 0.969699 | 0.959937 |
+
+## Updated Interpretation
+
+R1/R2 no longer collapse globally after branch-local isolation. Therefore, the
+old Q2/Q3 result should be marked as an implementation artifact rather than
+a valid rejection of sign-based conflict gating.
+
+However, the corrected R-series still does not produce a better candidate than
+P3:
+
+- R1 (`rho=0.25`) is object-safe but makes far residual much worse.
+- R2 (`rho=0.0`) improves FarAccum versus P3 but fails PSNR and Object Acc Ret.
+- R3 footprint-only `0.10` improves WaterJ but not far cleanup or reconstruction.
+- R4 footprint-only `0.25` improves FarBGFrac but damages Object Acc Ret and still
+  misses P3 reconstruction.
+- R5 small position/depth plus footprint does not recover far cleanup and fails
+  Object Acc Ret.
+
+Current decision:
+
+- P3 remains the best current candidate.
+- Q1 remains useful evidence that opacity-only capacity is object-safe but
+  insufficient for far cleanup.
+- Corrected conflict gating is not rejected as a principle, but the simple
+  opacity sign gate does not dominate P3.
+- Small footprint/position scaling, as tested in R3-R5, does not solve the
+  remaining far-water residual without object/reconstruction damage.
+
+Recommended next direction:
+
+- Do not continue scalar footprint/position sweeps.
+- Investigate where P3's successful footprint/geometry gradient acts spatially,
+  preferably with a region-aware gradient audit over support core, halo, object,
+  and boundary.
+- If continuing capacity control, gate footprint gradients with pixel/region
+  support rather than a global scalar.
