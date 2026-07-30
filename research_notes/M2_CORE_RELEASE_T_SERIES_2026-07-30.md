@@ -129,3 +129,90 @@ Primary metrics:
   or mainly weakens reconstruction.
 - Whether object-radiance budget can remove visible thin layers without
   damaging object retention.
+
+## Formal T1/T2/T3 Results
+
+Commit: `ceb8a2f9e9848f89969c202505ded261e730f2e8`
+
+Formal runs completed:
+
+```text
+scripts/experiments/medium_attr_t1_early_budget_iui3.sh
+scripts/experiments/medium_attr_t2_corezero_halo_iui3.sh
+scripts/experiments/medium_attr_t3_corezero_halo_route_iui3.sh
+```
+
+Primary comparison:
+
+| Exp | PSNR | SSIM | LPIPS | J Blue | Far Accum | Far Clear | Far BG Frac | Far BG LCC | Water Accum | Water J | Obj Acc Ret | Obj J Ret | Boundary Ret |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| P3 | 31.2235 | 0.9137 | 0.1748 | 0.0727 | 0.2941 | 0.0617 | 0.1457 | 0.0971 | 0.0212 | 0.000502 | 0.9751 | 0.9709 | 0.9942 |
+| T1 | 30.9697 | 0.9132 | 0.1764 | 0.0535 | 0.2431 | 0.0702 | 0.1083 | 0.1078 | 0.0019 | 0.000548 | 0.9143 | 0.9782 | 0.9864 |
+| T2 | 31.1774 | 0.9134 | 0.1735 | 0.1245 | 0.3428 | 0.0766 | 0.2502 | 0.2071 | 0.0377 | 0.001003 | 0.9736 | 0.9814 | 0.9726 |
+| T3 | 31.0052 | 0.9124 | 0.1757 | 0.0751 | 0.2726 | 0.0724 | 0.2339 | 0.2345 | 0.0146 | 0.001255 | 0.9409 | 1.0025 | 1.0083 |
+
+Artifacts:
+
+```text
+renders/medium_attr_t1_early_budget_iui3_15000_20260730_t1_early_budget/output.json
+renders/medium_attr_t1_early_budget_iui3_15000_20260730_t1_early_budget/diagnostics/far_water/far_water_residual_diagnostic.json
+renders/medium_attr_t1_early_budget_iui3_15000_20260730_t1_early_budget/diagnostics/eval_regions/eval_region_diagnostic.json
+
+renders/medium_attr_t2_corezero_halo_iui3_15000_20260730_t2_corezero_halo/output.json
+renders/medium_attr_t2_corezero_halo_iui3_15000_20260730_t2_corezero_halo/diagnostics/far_water/far_water_residual_diagnostic.json
+renders/medium_attr_t2_corezero_halo_iui3_15000_20260730_t2_corezero_halo/diagnostics/eval_regions/eval_region_diagnostic.json
+
+renders/medium_attr_t3_corezero_halo_route_iui3_15000_20260730_t3_corezero_halo_route/output.json
+renders/medium_attr_t3_corezero_halo_route_iui3_15000_20260730_t3_corezero_halo_route/diagnostics/far_water/far_water_residual_diagnostic.json
+renders/medium_attr_t3_corezero_halo_route_iui3_15000_20260730_t3_corezero_halo_route/diagnostics/eval_regions/eval_region_diagnostic.json
+```
+
+Checkpoints:
+
+```text
+outputs/medium_attr_t1_early_budget_iui3_15000/water-splatting/medium_attr_t1_early_budget_iui3_15000_20260730_t1_early_budget/nerfstudio_models/step-000014999.ckpt
+outputs/medium_attr_t2_corezero_halo_iui3_15000/water-splatting/medium_attr_t2_corezero_halo_iui3_15000_20260730_t2_corezero_halo/nerfstudio_models/step-000014999.ckpt
+outputs/medium_attr_t3_corezero_halo_route_iui3_15000/water-splatting/medium_attr_t3_corezero_halo_route_iui3_15000_20260730_t3_corezero_halo_route/nerfstudio_models/step-000014999.ckpt
+```
+
+## Formal Interpretation
+
+T1 confirms that moving the P3 budgeted capacity earlier is powerful but not
+safe. It reduces J Blue, Far Accum, Far BG Frac, and Water Accum, but it drops
+PSNR by 0.2538 dB versus P3 and collapses object accumulation retention to
+0.9143. Far Clear and Far BG largest component also worsen, so early dense
+pressure is deleting or distorting useful scene capacity without removing the
+dominant visible residual component.
+
+T2 shows that the current boundary-connected, medium-independent core-zero
+support is too broad or misaligned. It keeps PSNR relatively high, but it
+worsens J Blue, Far Accum, Far Clear, Far BG Frac/LCC, Water Accum, and Water J
+relative to P3. Core-zero plus halo budget did not recreate original M2 cleanup.
+
+T3 shows that training-only responsibility release is not safe with this
+support. It lowers Far Accum relative to P3, but PSNR falls to 31.0052, object
+accumulation retention falls to 0.9409, and Far Clear / Far BG Frac / Far BG LCC
+all worsen. The routing appears to weaken scene reconstruction without producing
+the desired clear residual reduction.
+
+Decision: do not run T4/T5 from this branch. The planned gate required T3 to be
+stable before adding object-radiance budget or clearance amplifier; T3 fails
+PSNR, object retention, Far Clear, Water J, and Far BG connected residual goals.
+
+## Next Direction
+
+The useful signal in T1 is that early dense pressure can strongly reduce core
+water accumulation. The failure mode is support safety and object capacity
+damage, not lack of capacity strength. The next experiment should not add more
+loss terms on top of T3. Instead:
+
+1. build an offline visualization/contact sheet of `medium_support_connected`,
+   `medium_support_core`, and `medium_support_halo` for T2/T3 views;
+2. tune support precision before changing weights:
+   - raise `medium_support_connected_threshold`;
+   - reintroduce medium/color evidence carefully, or add GT chroma color seed;
+   - add side/top connected area constraints;
+   - consider object/boundary exclusion only for support diagnostics first;
+3. rerun a lighter T2 variant only after support coverage is visibly correct;
+4. keep P3 as the current best formal candidate until a precision-safe early
+   support is demonstrated.
