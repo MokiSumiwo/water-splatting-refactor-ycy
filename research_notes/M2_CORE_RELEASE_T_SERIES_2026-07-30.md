@@ -216,3 +216,74 @@ loss terms on top of T3. Instead:
 3. rerun a lighter T2 variant only after support coverage is visibly correct;
 4. keep P3 as the current best formal candidate until a precision-safe early
    support is demonstrated.
+
+## Support Diagnostic Follow-Up
+
+The support diagnostic was updated to expose the T-series connected-support
+arguments and save `S_connected`:
+
+```text
+scripts/diagnostics/diagnose_medium_explainability_support.py
+```
+
+Commands run:
+
+```text
+CUDA_VISIBLE_DEVICES=6 /opt/anaconda3/envs/water_splatting/bin/python \
+  scripts/diagnostics/diagnose_medium_explainability_support.py \
+  --load-config outputs/medium_attr_t2_corezero_halo_iui3_15000/water-splatting/medium_attr_t2_corezero_halo_iui3_15000_20260730_t2_corezero_halo/config.yml \
+  --split eval --max-images 4 \
+  --mask-dir common_masks/m1_auto_eval_regions_iui3_redsea_20260724 \
+  --output-dir renders/medium_attr_t2_corezero_halo_iui3_15000_20260730_t2_corezero_halo/diagnostics/medium_support_eval \
+  --output-json renders/medium_attr_t2_corezero_halo_iui3_15000_20260730_t2_corezero_halo/diagnostics/medium_support_eval/medium_support_diagnostic.json \
+  --enable-clear-proxy --disable-medium --enable-connected
+
+CUDA_VISIBLE_DEVICES=7 /opt/anaconda3/envs/water_splatting/bin/python \
+  scripts/diagnostics/diagnose_medium_explainability_support.py \
+  --load-config outputs/medium_attr_t3_corezero_halo_route_iui3_15000/water-splatting/medium_attr_t3_corezero_halo_route_iui3_15000_20260730_t3_corezero_halo_route/config.yml \
+  --split eval --max-images 4 \
+  --mask-dir common_masks/m1_auto_eval_regions_iui3_redsea_20260724 \
+  --output-dir renders/medium_attr_t3_corezero_halo_route_iui3_15000_20260730_t3_corezero_halo_route/diagnostics/medium_support_eval \
+  --output-json renders/medium_attr_t3_corezero_halo_route_iui3_15000_20260730_t3_corezero_halo_route/diagnostics/medium_support_eval/medium_support_diagnostic.json \
+  --enable-clear-proxy --disable-medium --enable-connected
+```
+
+Support contact sheets:
+
+```text
+renders/medium_attr_t2_corezero_halo_iui3_15000_20260730_t2_corezero_halo/diagnostics/medium_support_eval/t2_medium_support_contact_sheet.png
+renders/medium_attr_t3_corezero_halo_route_iui3_15000_20260730_t3_corezero_halo_route/diagnostics/medium_support_eval/t3_medium_support_contact_sheet.png
+```
+
+Aggregate support stats:
+
+| Exp | Connected Mean | Core Mean | Halo Mean | Water Core | Object / Water | Boundary / Water | Support / Accum Corr |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| T2 | 0.1246 | 0.0184 | 0.0064 | 0.0732 | 0.0469 | 0.1024 | -0.3292 |
+| T3 | 0.1165 | 0.0177 | 0.0056 | 0.0745 | 0.0453 | 0.0693 | -0.3462 |
+
+Per-view support issue:
+
+| Exp | View | Connected Mean | Core Mean | Water Core | Object / Water | Boundary / Water |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| T2 | 0 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| T2 | 1 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| T2 | 2 | 0.2177 | 0.0316 | 0.1564 | 0.1057 | 0.1895 |
+| T2 | 3 | 0.2805 | 0.0422 | 0.1366 | 0.0819 | 0.2199 |
+| T3 | 0 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| T3 | 1 | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| T3 | 2 | 0.2050 | 0.0305 | 0.1640 | 0.0913 | 0.1543 |
+| T3 | 3 | 0.2611 | 0.0404 | 0.1339 | 0.0898 | 0.1228 |
+
+Interpretation:
+
+- The top-connected support is brittle: two eval views receive zero support,
+  while two views receive relatively large connected support.
+- The support is not simply an object-mask leak by aggregate object/water ratio,
+  but it has nontrivial boundary overlap on supported views.
+- The support/capacity correlation with accumulation is negative. It is not
+  chasing the residual high-accumulation halo, so stronger core pressure can
+  remove easy water-core capacity while leaving or worsening the connected
+  far-bg component.
+- Next implementation should focus on support construction before any further
+  capacity or routing experiments.

@@ -135,6 +135,10 @@ def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
             use_flatness=not args.disable_flatness,
             use_medium=not args.disable_medium,
             use_far=not args.disable_far,
+            use_connected=args.enable_connected,
+            connected_threshold=args.connected_threshold,
+            connected_top_only=args.connected_top_only,
+            connected_border=args.connected_border,
         )
 
         h, w = gt.shape[:2]
@@ -165,6 +169,7 @@ def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
         _save_png(prefix.with_name(prefix.name + "_S_flat.png"), support.flat)
         _save_png(prefix.with_name(prefix.name + "_S_med.png"), support.medium)
         _save_png(prefix.with_name(prefix.name + "_S_far.png"), support.far)
+        _save_png(prefix.with_name(prefix.name + "_S_connected.png"), support.connected)
         _save_png(prefix.with_name(prefix.name + "_S_route.png"), support.route)
         _save_png(prefix.with_name(prefix.name + "_S_broad.png"), support.broad)
         _save_png(prefix.with_name(prefix.name + "_S_core.png"), support.core)
@@ -178,6 +183,7 @@ def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
             "support_broad_mean": float(support.broad.mean().item()),
             "support_core_mean": float(support.core.mean().item()),
             "support_capacity_mean": float(support.capacity.mean().item()),
+            "support_connected_mean": float(support.connected.mean().item()),
             "support_halo_base_mean": float(support.halo_base.mean().item()),
             "support_halo_mean": float(halo_support.mean().item()),
             "support_capacity_gt_0p25_fraction": float((support.capacity > 0.25).float().mean().item()),
@@ -243,7 +249,12 @@ def main() -> None:
     parser.add_argument("--disable-flatness", action="store_true")
     parser.add_argument("--disable-medium", action="store_true")
     parser.add_argument("--disable-far", action="store_true")
+    parser.add_argument("--enable-connected", action="store_true")
+    parser.add_argument("--connected-threshold", type=float, default=0.25)
+    parser.add_argument("--connected-all-boundaries", action="store_true")
+    parser.add_argument("--connected-border", type=int, default=2)
     args = parser.parse_args()
+    args.connected_top_only = not args.connected_all_boundaries
 
     result = diagnose(args)
     print(json.dumps({"step": result["step"], "aggregate": result["aggregate"]}, indent=2))
