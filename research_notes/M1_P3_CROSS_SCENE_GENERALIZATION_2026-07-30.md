@@ -203,6 +203,7 @@ The launcher runs:
 Outputs:
 
 ```text
+outputs/cross_scene_<scene>_baseline_seed42_15000/
 outputs/cross_scene_<scene>_m1_seed42_15000/
 outputs/cross_scene_<scene>_p3_seed42_15000/
 ```
@@ -210,6 +211,7 @@ outputs/cross_scene_<scene>_p3_seed42_15000/
 Renders and diagnostics:
 
 ```text
+renders/cross_scene_<scene>_baseline_seed42_15000_20260730_cross_scene_baseline/
 renders/cross_scene_<scene>_m1_seed42_15000_20260730_cross_scene/
 renders/cross_scene_<scene>_p3_seed42_15000_20260730_cross_scene/
 ```
@@ -224,19 +226,24 @@ common_masks/cross_scene_<scene>_m1_eval_regions_seed42_20260730_cross_scene/
 Logs:
 
 ```text
+logs/cross_scene_<scene>_baseline_seed42_15000_20260730_cross_scene_baseline/
 logs/cross_scene_<scene>_m1_seed42_15000_20260730_cross_scene/
 logs/cross_scene_<scene>_p3_seed42_15000_20260730_cross_scene/
 logs/cross_scene_launcher_20260730_cross_scene/
+logs/cross_scene_baseline_launcher_20260730_cross_scene_baseline/
 ```
 
 ## Result Table
 
 | Scene | Method | PSNR | SSIM | LPIPS | J Blue | Far Accum | Far Clear | Water Accum | Water J | Object Acc Ret | Object J Ret | Boundary Ret |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Curasao | Baseline | 32.0756 | 0.9555 | 0.1167 | 0.1407 | 0.7183 | 0.5198 | 0.5692 | 0.5868 | 1.0020 | 1.3426 | 1.3543 |
 | Curasao | M1 | 32.1652 | 0.9560 | 0.1081 | 0.0263 | 0.4429 | 0.2140 | 0.0499 | 0.0284 | 1.0000 | 1.0000 | 1.0000 |
 | Curasao | P3 | 32.1584 | 0.9560 | 0.1086 | 0.0154 | 0.3138 | 0.1415 | 0.0151 | 0.0076 | 0.9815 | 0.9724 | 0.9642 |
+| JapaneseGradens-RedSea | Baseline | 24.9098 | 0.9001 | 0.1171 | 0.2043 | 0.6343 | 0.2359 | 0.3904 | 0.2257 | 0.9980 | 0.9990 | 1.1899 |
 | JapaneseGradens-RedSea | M1 | 24.7565 | 0.8995 | 0.1204 | 0.1395 | 0.4412 | 0.0542 | 0.0762 | 0.0159 | 1.0000 | 1.0000 | 1.0000 |
 | JapaneseGradens-RedSea | P3 | 24.6643 | 0.8965 | 0.1206 | 0.1602 | 0.2759 | 0.0502 | 0.0692 | 0.0129 | 0.9736 | 1.0031 | 1.0960 |
+| Panama | Baseline | 31.9546 | 0.9473 | 0.0753 | 0.2043 | 0.9274 | 0.3367 | 0.9996 | 0.4873 | 1.0054 | 0.8149 | 0.6773 |
 | Panama | M1 | 32.3089 | 0.9495 | 0.0740 | 0.2448 | 0.9184 | 0.4406 | 0.1361 | 0.0608 | 1.0000 | 1.0000 | 1.0000 |
 | Panama | P3 | 32.3073 | 0.9491 | 0.0736 | 0.2022 | 0.8523 | 0.4212 | 0.9990 | 0.7515 | 0.9818 | 0.9801 | 0.8815 |
 
@@ -244,10 +251,13 @@ Additional far connected residual:
 
 | Scene | Method | Far BG Fraction | Far BG LCC Sum |
 |---|---|---:|---:|
+| Curasao | Baseline | 0.8686 | 0.7125 |
 | Curasao | M1 | 0.5780 | 0.5636 |
 | Curasao | P3 | 0.2979 | 0.2741 |
+| JapaneseGradens-RedSea | Baseline | 0.8677 | 0.6504 |
 | JapaneseGradens-RedSea | M1 | 0.4742 | 0.2861 |
 | JapaneseGradens-RedSea | P3 | 0.3576 | 0.2662 |
+| Panama | Baseline | 0.9631 | 0.6299 |
 | Panama | M1 | 0.9900 | 0.6549 |
 | Panama | P3 | 0.9898 | 0.6568 |
 
@@ -263,8 +273,20 @@ Macro averages over the three new scenes:
 
 | Method | PSNR | SSIM | LPIPS | J Blue |
 |---|---:|---:|---:|---:|
+| Baseline | 29.6467 | 0.9343 | 0.1031 | 0.1831 |
 | M1 | 29.7435 | 0.9350 | 0.1008 | 0.1368 |
 | P3 | 29.7100 | 0.9339 | 0.1009 | 0.1259 |
+
+M1/P3 vs original baseline:
+
+| Scene | Method | dPSNR | dSSIM | dLPIPS | J Blue | Far Accum | Far Clear | Far BG Frac |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| Curasao | M1 | +0.0896 | +0.0005 | -0.0086 | -81.3% | -38.3% | -58.8% | -33.5% |
+| Curasao | P3 | +0.0829 | +0.0005 | -0.0081 | -89.0% | -56.3% | -72.8% | -65.7% |
+| JapaneseGradens-RedSea | M1 | -0.1533 | -0.0006 | +0.0032 | -31.7% | -30.4% | -77.0% | -45.3% |
+| JapaneseGradens-RedSea | P3 | -0.2455 | -0.0036 | +0.0035 | -21.6% | -56.5% | -78.7% | -58.8% |
+| Panama | M1 | +0.3543 | +0.0022 | -0.0013 | +19.8% | -1.0% | +30.9% | +2.8% |
+| Panama | P3 | +0.3527 | +0.0018 | -0.0018 | -1.0% | -8.1% | +25.1% | +2.8% |
 
 ## Notes on Mask Reliability
 
@@ -299,17 +321,25 @@ If P3 fails this on most new scenes, M1 remains the cross-scene reconstruction c
 
 P3 is not a clean cross-scene replacement for M1 under the frozen RedSea configuration.
 
+- Against the original baseline, M1 improves the three-scene macro average:
+  - PSNR: `29.6467 -> 29.7435`
+  - SSIM: `0.9343 -> 0.9350`
+  - LPIPS: `0.1031 -> 0.1008`
+  - J Blue: `0.1831 -> 0.1368`
+- P3 has the lowest macro J Blue (`0.1259`) but gives back some underwater reconstruction quality relative to M1.
 - Curasao is the strongest positive case: underwater quality is essentially preserved, while J Blue, Far Accum, Far Clear, Far BG Fraction, Water Accum, and Water J all drop materially.
-- JapaneseGradens-RedSea is a negative reconstruction/generalization case: PSNR drops by 0.092 dB, SSIM drops by 0.0030, and J Blue increases despite lower Far Accum/Far Clear.
-- Panama is mixed: underwater metrics are preserved and J Blue/Far Accum/Far Clear improve modestly, but far BG connected residual is unchanged and the eval-region water mask is too sparse to support water-region claims.
+- JapaneseGradens-RedSea is the main negative generalization case: the original baseline has the best underwater PSNR/SSIM/LPIPS, while M1/P3 reduce far residuals at a reconstruction cost. P3 also increases J Blue relative to M1.
+- Panama is mixed: M1/P3 improve underwater metrics versus baseline, but M1 increases J Blue/Far Clear/Far BG Fraction versus baseline. P3 brings J Blue close to baseline and lowers Far Accum, but far BG connected residual is still worse than baseline and the eval-region water mask is too sparse to support water-region claims.
 
 Provisional decision:
 
 ```text
-M1 remains the safer cross-scene underwater reconstruction candidate.
+M1 remains the safest cross-scene underwater reconstruction candidate on macro average.
 P3 should be described as a scene-medium residual cleanup module that can work strongly
 on some scenes, but its frozen RedSea weights are not yet robust enough to be the
 default cross-scene method.
+JapaneseGradens should be highlighted as evidence that M1/P3 are not uniformly
+better than original WaterSplatting on every scene without scene-level tuning.
 ```
 
 Recommended next step:
