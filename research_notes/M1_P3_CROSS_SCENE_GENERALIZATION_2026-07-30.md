@@ -48,6 +48,21 @@ clear proxy chroma = off
 gradient routing = off
 ```
 
+## Frozen Original Baseline Config
+
+```text
+medium_context_mode = dir_only
+b_inf_mode = implicit
+infinite_water_enabled = False
+foreground transmission loss = off
+medium explainability = off
+budgeted capacity = off
+clear proxy chroma = off
+gradient routing = off
+```
+
+This matches the historical original WaterSplatting definition used for IUI3-RedSea.
+
 ## Frozen P3 Config
 
 ```text
@@ -109,6 +124,15 @@ scripts/experiments/cross_scene_japanesegradens_p3_seed42_15000.sh
 scripts/experiments/cross_scene_panama_p3_seed42_15000.sh
 ```
 
+Scene-specific original baseline scripts:
+
+```text
+scripts/experiments/cross_scene_curasao_baseline_seed42_15000.sh
+scripts/experiments/cross_scene_japanesegradens_baseline_seed42_15000.sh
+scripts/experiments/cross_scene_panama_baseline_seed42_15000.sh
+scripts/experiments/run_cross_scene_remaining_baseline.sh
+```
+
 ## Execution Plan
 
 Run short smoke first:
@@ -134,6 +158,12 @@ Smoke status:
   Panama M1/P3 20-step smoke: passed
   P3 manifest check: medium explainability on, budgeted capacity on, routing/halo off,
     clear proxy geometry grad 0.0, opacity grad 0.50, chroma weight 0.0015
+  Smoke outputs/renders/logs removed after verification.
+
+2026-07-30 baseline smoke:
+  Curasao / JapaneseGradens-RedSea / Panama original baseline 20-step smoke: passed
+  Manifest check: medium_context_mode=dir_only, b_inf_mode=implicit,
+    medium explainability off, budgeted capacity off, routing off, clear chroma off.
   Smoke outputs/renders/logs removed after verification.
 ```
 
