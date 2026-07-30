@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
@@ -25,10 +26,13 @@ def _stats(values: torch.Tensor) -> Dict[str, float]:
     values = values.detach().float().reshape(-1).cpu()
     if values.numel() == 0:
         return {"mean": 0.0, "max": 0.0, "p95": 0.0}
+    # torch.quantile can fail on very large flattened eval images. kthvalue
+    # gives the same nearest-rank p95 statistic without that tensor-size limit.
+    p95_rank = max(1, math.ceil(0.95 * values.numel()))
     return {
         "mean": float(values.mean().item()),
         "max": float(values.max().item()),
-        "p95": float(torch.quantile(values, 0.95).item()),
+        "p95": float(values.kthvalue(p95_rank).values.item()),
     }
 
 

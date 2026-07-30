@@ -137,6 +137,24 @@ Smoke status:
   Smoke outputs/renders/logs removed after verification.
 ```
 
+M1 execution status:
+
+```text
+2026-07-30:
+  Curasao M1 training and ns-eval completed.
+  JapaneseGradens-RedSea M1 training, ns-eval, M1 masks, and diagnostics completed.
+  Panama M1 training and ns-eval completed.
+
+  Curasao/Panama closure diagnostic initially failed in post-training diagnostics:
+    file: scripts/diagnostics/diagnose_backscatter_closure.py
+    function: _stats
+    error: RuntimeError: quantile() input tensor is too large
+    fix: replace torch.quantile p95 with nearest-rank kthvalue p95.
+
+  After the fix, Curasao/Panama closure, M1-derived far masks, eval-region masks,
+  far-water diagnostics, and eval-region diagnostics completed without retraining.
+```
+
 Full run:
 
 ```bash
