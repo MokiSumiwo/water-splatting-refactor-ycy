@@ -203,12 +203,46 @@ logs/cross_scene_launcher_20260730_cross_scene/
 
 | Scene | Method | PSNR | SSIM | LPIPS | J Blue | Far Accum | Far Clear | Water Accum | Water J | Object Acc Ret | Object J Ret | Boundary Ret |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Curasao | M1 | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending |
-| Curasao | P3 | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending |
-| JapaneseGradens-RedSea | M1 | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending |
-| JapaneseGradens-RedSea | P3 | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending |
-| Panama | M1 | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending |
-| Panama | P3 | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending |
+| Curasao | M1 | 32.1652 | 0.9560 | 0.1081 | 0.0263 | 0.4429 | 0.2140 | 0.0499 | 0.0284 | 1.0000 | 1.0000 | 1.0000 |
+| Curasao | P3 | 32.1584 | 0.9560 | 0.1086 | 0.0154 | 0.3138 | 0.1415 | 0.0151 | 0.0076 | 0.9815 | 0.9724 | 0.9642 |
+| JapaneseGradens-RedSea | M1 | 24.7565 | 0.8995 | 0.1204 | 0.1395 | 0.4412 | 0.0542 | 0.0762 | 0.0159 | 1.0000 | 1.0000 | 1.0000 |
+| JapaneseGradens-RedSea | P3 | 24.6643 | 0.8965 | 0.1206 | 0.1602 | 0.2759 | 0.0502 | 0.0692 | 0.0129 | 0.9736 | 1.0031 | 1.0960 |
+| Panama | M1 | 32.3089 | 0.9495 | 0.0740 | 0.2448 | 0.9184 | 0.4406 | 0.1361 | 0.0608 | 1.0000 | 1.0000 | 1.0000 |
+| Panama | P3 | 32.3073 | 0.9491 | 0.0736 | 0.2022 | 0.8523 | 0.4212 | 0.9990 | 0.7515 | 0.9818 | 0.9801 | 0.8815 |
+
+Additional far connected residual:
+
+| Scene | Method | Far BG Fraction | Far BG LCC Sum |
+|---|---|---:|---:|
+| Curasao | M1 | 0.5780 | 0.5636 |
+| Curasao | P3 | 0.2979 | 0.2741 |
+| JapaneseGradens-RedSea | M1 | 0.4742 | 0.2861 |
+| JapaneseGradens-RedSea | P3 | 0.3576 | 0.2662 |
+| Panama | M1 | 0.9900 | 0.6549 |
+| Panama | P3 | 0.9898 | 0.6568 |
+
+P3 vs M1 deltas:
+
+| Scene | dPSNR | dSSIM | dLPIPS | J Blue | Far Accum | Far Clear | Far BG Frac | Water Accum | Water J | Obj Acc Ret | Obj J Ret | Boundary Ret |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Curasao | -0.0067 | +0.0000 | +0.0005 | -41.2% | -29.2% | -33.8% | -48.5% | -69.8% | -73.2% | 0.9815 | 0.9724 | 0.9642 |
+| JapaneseGradens-RedSea | -0.0921 | -0.0030 | +0.0003 | +14.8% | -37.5% | -7.3% | -24.6% | -9.2% | -18.9% | 0.9736 | 1.0031 | 1.0960 |
+| Panama | -0.0016 | -0.0004 | -0.0004 | -17.4% | -7.2% | -4.4% | -0.0% | +634.0% | +1136.2% | 0.9818 | 0.9801 | 0.8815 |
+
+Macro averages over the three new scenes:
+
+| Method | PSNR | SSIM | LPIPS | J Blue |
+|---|---:|---:|---:|---:|
+| M1 | 29.7435 | 0.9350 | 0.1008 | 0.1368 |
+| P3 | 29.7100 | 0.9339 | 0.1009 | 0.1259 |
+
+## Notes on Mask Reliability
+
+Panama's M1-derived eval-region water mask produced only one water pixel across the evaluated images. Therefore:
+
+- Panama `Water Accum` and `Water J` are not reliable scene-level water-region diagnostics.
+- Panama far-mask diagnostics remain usable because they are depth-quantile based and contain 639,741 far pixels.
+- Panama object/boundary retention should still be treated cautiously because the water/object split is highly imbalanced.
 
 ## Decision Criteria
 
@@ -230,3 +264,31 @@ or J Blue / Far Clear / Water J improves materially
 ```
 
 If P3 fails this on most new scenes, M1 remains the cross-scene reconstruction candidate and P3 should be positioned as a residual-cleanup module with scene dependence.
+
+## Current Interpretation
+
+P3 is not a clean cross-scene replacement for M1 under the frozen RedSea configuration.
+
+- Curasao is the strongest positive case: underwater quality is essentially preserved, while J Blue, Far Accum, Far Clear, Far BG Fraction, Water Accum, and Water J all drop materially.
+- JapaneseGradens-RedSea is a negative reconstruction/generalization case: PSNR drops by 0.092 dB, SSIM drops by 0.0030, and J Blue increases despite lower Far Accum/Far Clear.
+- Panama is mixed: underwater metrics are preserved and J Blue/Far Accum/Far Clear improve modestly, but far BG connected residual is unchanged and the eval-region water mask is too sparse to support water-region claims.
+
+Provisional decision:
+
+```text
+M1 remains the safer cross-scene underwater reconstruction candidate.
+P3 should be described as a scene-medium residual cleanup module that can work strongly
+on some scenes, but its frozen RedSea weights are not yet robust enough to be the
+default cross-scene method.
+```
+
+Recommended next step:
+
+```text
+Do not tune per scene. First inspect P3 support coverage and medium explainability
+maps on JapaneseGradens and Panama to determine whether the failure is caused by:
+  1. over-broad capacity support near textured reef / seafloor,
+  2. weak medium explainability in non-RedSea water color,
+  3. proxy chroma pushing color in the wrong direction,
+  4. unreliable auto eval-region masks on Panama.
+```
