@@ -73,9 +73,7 @@ for aggregate_path in sorted(root.glob("*/*/aggregate.json")):
     method = aggregate_path.parent.name
     variants = data["aggregate"]["variants"]
     forward = data["aggregate"]["forward_recomposition"]
-    for key in ["D0_model", "D1_pixel", "D2_A_mean", "D3_bs_mean", "D4_attn_mean", "D5_all_mean", "D7_open_mean", "D9_smooth31", "D10_smooth61"]:
-        if key not in variants:
-            continue
+    for key in variants:
         item = variants[key]
         rows.append({
             "scene": scene,
@@ -84,7 +82,12 @@ for aggregate_path in sorted(root.glob("*/*/aggregate.json")):
             "far_bg_score": item["far_bg_score"],
             "near_bg_score": item["near_bg_score"],
             "far_near_bg_gap": item["far_near_bg_gap"],
+            "abs_far_near_bg_gap": item.get("abs_far_near_bg_gap", abs(item["far_near_bg_gap"])),
             "near_rgb_mae_vs_d0": item["near_rgb_mae_vs_d0"],
+            "near_chroma_shift_vs_d0": item.get("near_chroma_shift_vs_d0", 0.0),
+            "near_ssim_vs_d0": item.get("near_ssim_vs_d0", 0.0),
+            "raw_negative_rate": item.get("raw_negative_rate", 0.0),
+            "raw_over_one_rate": item.get("raw_over_one_rate", 0.0),
             "raw_clip_rate": item["raw_clip_rate"],
             "transmission_floor_hit_rate": item["transmission_floor_hit_rate"],
             "forward_psnr": forward["psnr"],

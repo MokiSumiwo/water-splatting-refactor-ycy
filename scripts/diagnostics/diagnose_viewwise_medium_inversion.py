@@ -3,7 +3,7 @@
 
 This script does not train. It loads a trained WaterSplatting checkpoint,
 extracts per-view medium parameters, and evaluates simplified closed-form
-dewatering variants D0-D10.
+dewatering variants D0-D16.
 """
 
 from __future__ import annotations
@@ -35,6 +35,14 @@ VARIANT_LABELS = {
     "D8_logbeta_mean": "D8 Log-Beta",
     "D9_smooth31": "D9 Smooth31",
     "D10_smooth61": "D10 Smooth61",
+    "D11_bs_spectrum_mean": "D11 BS Spectrum",
+    "D12_bs_strength_mean": "D12 BS Strength",
+    "D13_bs_spectrum_shrink025": "D13 BS Spec 0.25",
+    "D14_bs_spectrum_shrink050": "D14 BS Spec 0.50",
+    "D15_bs_spectrum_shrink075": "D15 BS Spec 0.75",
+    "D16_bs_full_shrink025": "D16 BS Full 0.25",
+    "D16_bs_full_shrink050": "D16 BS Full 0.50",
+    "D16_bs_full_shrink075": "D16 BS Full 0.75",
 }
 
 
@@ -240,6 +248,11 @@ def _smooth(image: torch.Tensor, kernel: int) -> torch.Tensor:
     return x.squeeze(0).permute(1, 2, 0)
 
 
+def _channel_normalize(value: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """Normalize an RGB tensor into per-pixel channel proportions."""
+    return value.clamp_min(0.0) / value.clamp_min(0.0).sum(dim=-1, keepdim=True).clamp_min(eps)
+
+
 def _invert(
     rgb: torch.Tensor,
     depth: torch.Tensor,
@@ -389,6 +402,7 @@ def _variant_metrics(
         "far_bg_score": far_bg,
         "near_bg_score": near_bg,
         "far_near_bg_gap": far_bg - near_bg,
+        "abs_far_near_bg_gap": abs(far_bg - near_bg),
         "near_rgb_mae_vs_d0": near_mae,
         "near_chroma_shift_vs_d0": near_chroma_shift,
         "near_ssim_vs_d0": _ssim_np(clamped, d0.clamp(0.0, 1.0), near_mask),
@@ -523,6 +537,39 @@ def _process_view(
         ("D8_logbeta_mean", _expand_param(A_mean, (h, w)), _expand_param(bs_geo, (h, w)), _expand_param(attn_geo, (h, w))),
     ]:
         raw, _tbs, tattn = _invert(rgb, depth, Ap, Bp, Dp, args.transmission_floor)
+        variants[key] = {"raw": raw, "clamped": raw.clamp(0.0, 1.0), "t_attn": tattn}
+
+    bs_strength = beta_bs.mean(dim=-1, keepdim=True)
+    bs_spectrum = _channel_normalize(beta_bs)
+    bs_spectrum_mean = _channel_normalize(_masked_mean(bs_spectrum, valid_mask).view(1, 1, 3)).expand(h, w, 3)
+    bs_strength_mean = _masked_mean(bs_strength, valid_mask).view(1, 1, 1).expand(h, w, 1)
+
+    bs_d11 = (3.0 * bs_strength * bs_spectrum_mean).clamp_min(0.0)
+    raw, _tbs, tattn = _invert(rgb, depth, A, bs_d11, beta_attn, args.transmission_floor)
+    variants["D11_bs_spectrum_mean"] = {"raw": raw, "clamped": raw.clamp(0.0, 1.0), "t_attn": tattn}
+
+    bs_d12 = (3.0 * bs_strength_mean * bs_spectrum).clamp_min(0.0)
+    raw, _tbs, tattn = _invert(rgb, depth, A, bs_d12, beta_attn, args.transmission_floor)
+    variants["D12_bs_strength_mean"] = {"raw": raw, "clamped": raw.clamp(0.0, 1.0), "t_attn": tattn}
+
+    for key, lam in [
+        ("D13_bs_spectrum_shrink025", 0.25),
+        ("D14_bs_spectrum_shrink050", 0.50),
+        ("D15_bs_spectrum_shrink075", 0.75),
+    ]:
+        spectrum = _channel_normalize((1.0 - lam) * bs_spectrum + lam * bs_spectrum_mean)
+        Bp = (3.0 * bs_strength * spectrum).clamp_min(0.0)
+        raw, _tbs, tattn = _invert(rgb, depth, A, Bp, beta_attn, args.transmission_floor)
+        variants[key] = {"raw": raw, "clamped": raw.clamp(0.0, 1.0), "t_attn": tattn}
+
+    bs_mean_image = _expand_param(bs_mean, (h, w))
+    for key, lam in [
+        ("D16_bs_full_shrink025", 0.25),
+        ("D16_bs_full_shrink050", 0.50),
+        ("D16_bs_full_shrink075", 0.75),
+    ]:
+        Bp = ((1.0 - lam) * beta_bs + lam * bs_mean_image).clamp_min(0.0)
+        raw, _tbs, tattn = _invert(rgb, depth, A, Bp, beta_attn, args.transmission_floor)
         variants[key] = {"raw": raw, "clamped": raw.clamp(0.0, 1.0), "t_attn": tattn}
 
     smooth_outputs: Dict[int, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
