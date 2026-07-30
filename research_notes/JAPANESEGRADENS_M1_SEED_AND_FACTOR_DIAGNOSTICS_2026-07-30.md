@@ -137,3 +137,28 @@ The smoke outputs, renders, and logs were removed after validation. Full 15k fac
 ```text
 STAMP=20260730_jgradens_factor_split
 ```
+
+## Factor Split Results
+
+Outputs:
+
+```text
+renders/japanesegradens_j1_context_implicit_seed42_15000_20260730_jgradens_factor_split/output.json
+renders/japanesegradens_j2_dironly_tied_seed42_15000_20260730_jgradens_factor_split/output.json
+```
+
+Seed-42 comparison against the JapaneseGradens baseline:
+
+| ID | Config | PSNR | dPSNR vs J0 | SSIM | dSSIM vs J0 | LPIPS | dLPIPS vs J0 | J Blue | dJ Blue vs J0 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| J0 | `dir_only + implicit` | 24.9098 | +0.0000 | 0.9001 | +0.0000 | 0.1171 | +0.0000 | 0.2043 | +0.0000 |
+| J1 | `dir_xy_camera + implicit` | 24.6052 | -0.3046 | 0.8971 | -0.0029 | 0.1155 | -0.0017 | 0.1758 | -0.0284 |
+| J2 | `dir_only + tied` | 24.9453 | +0.0355 | 0.8983 | -0.0018 | 0.1150 | -0.0021 | 0.2160 | +0.0118 |
+| J3 | `dir_xy_camera + tied` | 24.7565 | -0.1533 | 0.8995 | -0.0006 | 0.1204 | +0.0032 | 0.1395 | -0.0648 |
+
+Interpretation:
+
+- `dir_xy_camera` is the main reconstruction-risk factor on JapaneseGradens. With `b_inf_mode=implicit`, J1 drops PSNR by `0.3046 dB` and SSIM by `0.0029`.
+- `b_inf_mode=tied` alone is not the reconstruction problem on this scene. J2 improves PSNR by `0.0355 dB` and LPIPS by `0.0021` relative to J0, although SSIM decreases and J Blue gets worse.
+- The full M1 combination reduces J Blue strongly, but this residual improvement comes with reconstruction degradation. The interaction is not simply "tied is bad"; the camera/XY context appears to trade reconstruction stability for residual color cleanup.
+- A JapaneseGradens-specific tuning response is still not justified. The next unified candidate, if tested, should focus on reducing or regularizing camera context rather than replacing `tied` with `implicit`.
