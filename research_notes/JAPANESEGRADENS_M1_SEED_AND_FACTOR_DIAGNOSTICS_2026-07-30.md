@@ -77,25 +77,63 @@ Interpretation:
 - At step 14999, all three eval images have lower PSNR under M1 than under baseline.
 - This supports a late-training / model-competition explanation more than an immediate structural mismatch.
 
-## Paired Multi-Seed Plan
+## Paired Multi-Seed Results
 
-Run paired JapaneseGradens experiments:
+Completed paired JapaneseGradens experiments:
 
-| Seed | Baseline | M1 | Purpose |
-|---:|---|---|---|
-| 42 | complete | complete | existing reference |
-| 123 | pending | pending | paired seed check |
-| 3407 | pending | pending | paired seed check |
+| Seed | Baseline PSNR | M1 PSNR | dPSNR | Baseline SSIM | M1 SSIM | dSSIM | Baseline LPIPS | M1 LPIPS | dLPIPS |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 42 | 24.9098 | 24.7565 | -0.1533 | 0.9001 | 0.8995 | -0.0006 | 0.1171 | 0.1204 | +0.0033 |
+| 123 | 24.9055 | 24.5965 | -0.3089 | 0.8989 | 0.8963 | -0.0026 | 0.1195 | 0.1191 | -0.0004 |
+| 3407 | 24.9386 | 24.6383 | -0.3003 | 0.8997 | 0.8954 | -0.0042 | 0.1190 | 0.1175 | -0.0015 |
 
-For speed and to keep the scope aligned with reconstruction stability, seed-123 and seed-3407 runs initially collect `ns-eval` reconstruction metrics only. Far/region diagnostics can be added after the paired deltas are known.
-
-Judgment gate:
+Aggregate paired deltas:
 
 ```text
-If all three seeds show negative M1-vs-baseline PSNR and mean drop >= 0.08 dB
-with mean LPIPS degradation >= 0.001, treat JapaneseGradens M1 degradation as stable.
-Only then run the J1/J2 factor split:
-  J1: dir_xy_camera + implicit
-  J2: dir_only + tied
+dPSNR mean  = -0.2542 dB
+dPSNR std   =  0.0714 dB
+dSSIM mean  = -0.0025
+dSSIM std   =  0.0015
+dLPIPS mean = +0.0005
+dLPIPS std  =  0.0021
 ```
 
+Interpretation:
+
+- M1 is consistently worse than baseline in PSNR and SSIM across seeds 42, 123, and 3407.
+- LPIPS is mixed, so the degradation should not be described as uniformly worse across every metric.
+- The stable PSNR/SSIM degradation is enough to run the planned factor split, because M1 changes both `medium_context_mode` and `b_inf_mode`.
+
+## Factor Split Plan
+
+Existing references:
+
+```text
+J0 Baseline: medium_context_mode=dir_only,      b_inf_mode=implicit
+J3 M1:       medium_context_mode=dir_xy_camera, b_inf_mode=tied
+```
+
+New split experiments:
+
+| ID | Medium context | `b_inf_mode` | Script | Status |
+|---|---|---|---|---|
+| J1 | `dir_xy_camera` | `implicit` | `scripts/experiments/japanesegradens_j1_context_implicit_seed42_15000.sh` | 20-step smoke passed |
+| J2 | `dir_only` | `tied` | `scripts/experiments/japanesegradens_j2_dironly_tied_seed42_15000.sh` | 20-step smoke passed |
+
+Smoke settings:
+
+```text
+STAMP=20260730_jgradens_factor_smoke
+MAX_NUM_ITERATIONS=20
+MODEL_NUM_STEPS=20
+RUN_EVAL=0
+RUN_CLOSURE_DIAG=0
+RUN_FAR_DIAG=0
+RUN_REGION_DIAG=0
+```
+
+The smoke outputs, renders, and logs were removed after validation. Full 15k factor split should use:
+
+```text
+STAMP=20260730_jgradens_factor_split
+```
