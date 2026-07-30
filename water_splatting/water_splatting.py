@@ -30,12 +30,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from water_splatting.attribution import (
+    accumulation_clearance_amplifier,
     budgeted_capacity_loss,
     build_residual_gated_halo_support,
     build_route_capacity_support,
     build_training_routed_prediction,
     clear_proxy_chroma_loss,
     clear_proxy_luma_budget_loss,
+    core_zero_capacity_loss,
+    rgb_luma_budget_loss,
     support_coverage_stats,
     weighted_rgb_l1,
 )
@@ -357,6 +360,24 @@ class WaterSplattingModelConfig(ModelConfig):
     """Weight for budgeted Gaussian capacity suppression."""
     budgeted_capacity_post_scale: float = 0.5
     """Capacity weight multiplier after proxy refinement begins."""
+    core_zero_capacity_enabled: bool = False
+    """Enable zero-target accumulation pressure on high-confidence open-water core."""
+    lambda_core_zero_capacity: float = 0.0
+    """Weight for core zero-target Gaussian capacity release."""
+    core_zero_capacity_start_step: int = 1000
+    """First step where core zero capacity may ramp."""
+    core_zero_capacity_ramp_steps: int = 3000
+    """Ramp length for core zero capacity."""
+    core_zero_capacity_post_scale: float = 1.0
+    """Core zero capacity multiplier after proxy refinement begins."""
+    core_clearance_amplifier_enabled: bool = False
+    """Amplify core-zero capacity as detached accumulation clears, with a nonzero floor."""
+    core_clearance_amplifier_min: float = 0.30
+    """Minimum clearance-amplifier pressure on high-accumulation core pixels."""
+    core_clearance_amplifier_threshold: float = 0.20
+    """Detached accumulation threshold where the clearance amplifier turns on."""
+    core_clearance_amplifier_temperature: float = 0.05
+    """Clearance-amplifier sigmoid temperature."""
     capacity_control_enabled: bool = False
     """Use an auxiliary accumulation render with controlled capacity gradients."""
     capacity_control_geometry_gradient_scale: float = 1.0
@@ -423,6 +444,14 @@ class WaterSplattingModelConfig(ModelConfig):
     """Use detached medium color explainability in support."""
     medium_support_use_far: bool = True
     """Use weak detached far-depth modulation in capacity support."""
+    medium_support_connected_enabled: bool = False
+    """Keep only medium support connected to the image boundary/top edge."""
+    medium_support_connected_threshold: float = 0.25
+    """Binary threshold for boundary-connected support flood fill."""
+    medium_support_connected_top_only: bool = True
+    """If True, seed connected support only from the top image border."""
+    medium_support_connected_border: int = 2
+    """Border width in pixels used to seed connected support."""
     medium_support_capacity_threshold: float = 0.0
     """Optional lower threshold applied to medium capacity support before capacity/proxy losses."""
     medium_support_capacity_power: float = 1.0
@@ -443,6 +472,18 @@ class WaterSplattingModelConfig(ModelConfig):
     """Clear-proxy luma budget for optional luma refinement."""
     proxy_clear_luma_temperature: float = 0.01
     """Softplus temperature for optional clear-proxy luma budget."""
+    object_radiance_budget_enabled: bool = False
+    """Enable support-weighted luma budget on underwater Gaussian rgb_object."""
+    lambda_object_radiance_budget: float = 0.0
+    """Weight for object-radiance budget on supported open-water core."""
+    object_radiance_budget_value: float = 0.015
+    """Allowed rgb_object luma budget on supported open-water core."""
+    object_radiance_budget_temperature: float = 0.01
+    """Softplus temperature for object-radiance luma budget."""
+    object_radiance_budget_start_step: int = 10000
+    """First step where object-radiance budget may ramp."""
+    object_radiance_budget_ramp_steps: int = 1000
+    """Ramp length for object-radiance budget."""
     background_densification_enabled: bool = False
     """Enable background region weighting for densification gradient accumulation."""
     background_densification_weight: float = 1.0
@@ -2467,6 +2508,12 @@ class WaterSplattingModel(Model):
             and halo_weight_config > 0.0
             and (not self.training or self.step >= int(getattr(self.config, "halo_capacity_start_step", 4000)))
         )
+        core_zero_weight_config = float(getattr(self.config, "lambda_core_zero_capacity", 0.0))
+        core_zero_active_by_step = (
+            bool(getattr(self.config, "core_zero_capacity_enabled", False))
+            and core_zero_weight_config > 0.0
+            and (not self.training or self.step >= int(getattr(self.config, "core_zero_capacity_start_step", 1000)))
+        )
         clear_proxy_required = bool(
             getattr(self.config, "clear_proxy_enabled", False)
             or chroma_active_by_step
@@ -2474,7 +2521,7 @@ class WaterSplattingModel(Model):
         )
         capacity_control_required = bool(
             getattr(self.config, "capacity_control_enabled", False)
-            and (capacity_active_by_step or halo_active_by_step)
+            and (capacity_active_by_step or halo_active_by_step or core_zero_active_by_step)
         )
         if capacity_control_required:
             self.xys_grad_abs_capacity = torch.zeros_like(self.xys)
@@ -2989,7 +3036,9 @@ class WaterSplattingModel(Model):
                 bool(getattr(self.config, "medium_explainability_enabled", False)),
                 bool(getattr(self.config, "training_gradient_routing_enabled", False)),
                 bool(getattr(self.config, "budgeted_capacity_enabled", False)),
+                bool(getattr(self.config, "core_zero_capacity_enabled", False)),
                 bool(getattr(self.config, "halo_capacity_enabled", False)),
+                bool(getattr(self.config, "object_radiance_budget_enabled", False)),
                 bool(getattr(self.config, "background_clear_chroma_use_medium_support", False)),
                 float(getattr(self.config, "lambda_proxy_clear_luma", 0.0)) > 0.0,
             ]
@@ -3010,6 +3059,10 @@ class WaterSplattingModel(Model):
                 use_flatness=bool(getattr(self.config, "medium_support_use_flatness", True)),
                 use_medium=bool(getattr(self.config, "medium_support_use_medium", True)),
                 use_far=bool(getattr(self.config, "medium_support_use_far", True)),
+                use_connected=bool(getattr(self.config, "medium_support_connected_enabled", False)),
+                connected_threshold=float(getattr(self.config, "medium_support_connected_threshold", 0.25)),
+                connected_top_only=bool(getattr(self.config, "medium_support_connected_top_only", True)),
+                connected_border=int(getattr(self.config, "medium_support_connected_border", 2)),
             )
             support_route = medium_supports.route
             support_broad = medium_supports.broad
@@ -3052,6 +3105,7 @@ class WaterSplattingModel(Model):
             outputs["medium_support_flat"] = medium_supports.flat
             outputs["medium_support_med"] = medium_supports.medium
             outputs["medium_support_far"] = medium_supports.far
+            outputs["medium_support_connected"] = medium_supports.connected
             outputs["medium_support_route"] = support_route
             outputs["medium_support_broad"] = support_broad
             outputs["medium_support_core_raw"] = support_capacity_raw
@@ -3125,6 +3179,39 @@ class WaterSplattingModel(Model):
                 gt_img,
                 medium_supervision_support,
             )
+
+        core_weight = self._ramped_weight(
+            float(getattr(self.config, "lambda_core_zero_capacity", 0.0)),
+            int(getattr(self.config, "core_zero_capacity_start_step", 1000)),
+            int(getattr(self.config, "core_zero_capacity_ramp_steps", 3000)),
+        )
+        if (
+            bool(getattr(self.config, "core_zero_capacity_enabled", False))
+            and core_weight > 0.0
+            and support_capacity is not None
+        ):
+            post_start = int(getattr(self.config, "background_clear_chroma_start_step", 10000))
+            if self.step >= post_start:
+                core_weight *= float(getattr(self.config, "core_zero_capacity_post_scale", 1.0))
+            capacity_accumulation = outputs.get("capacity_control_accumulation", outputs["accumulation"])
+            clearance_weight = None
+            if bool(getattr(self.config, "core_clearance_amplifier_enabled", False)):
+                clearance_weight = accumulation_clearance_amplifier(
+                    accumulation=capacity_accumulation,
+                    min_weight=float(getattr(self.config, "core_clearance_amplifier_min", 0.30)),
+                    threshold=float(getattr(self.config, "core_clearance_amplifier_threshold", 0.20)),
+                    temperature=float(getattr(self.config, "core_clearance_amplifier_temperature", 0.05)),
+                )
+                outputs["core_clearance_amplifier"] = clearance_weight
+                if metrics_dict is not None:
+                    metrics_dict["core_clearance_amplifier_mean"] = clearance_weight.mean()
+            loss_dict["core_zero_capacity_loss"] = core_weight * core_zero_capacity_loss(
+                accumulation=capacity_accumulation,
+                support=support_capacity,
+                clearance_weight=clearance_weight,
+            )
+            if metrics_dict is not None:
+                metrics_dict["core_zero_capacity_weight"] = torch.tensor(core_weight, device=self.device)
 
         cap_weight = self._ramped_weight(
             float(getattr(self.config, "lambda_budgeted_capacity", 0.0)),
@@ -3361,6 +3448,25 @@ class WaterSplattingModel(Model):
                 budget=float(getattr(self.config, "proxy_clear_luma_budget", 0.03)),
                 temperature=float(getattr(self.config, "proxy_clear_luma_temperature", 0.01)),
             )
+
+        object_radiance_weight = self._ramped_weight(
+            float(getattr(self.config, "lambda_object_radiance_budget", 0.0)),
+            int(getattr(self.config, "object_radiance_budget_start_step", 10000)),
+            int(getattr(self.config, "object_radiance_budget_ramp_steps", 1000)),
+        )
+        if (
+            bool(getattr(self.config, "object_radiance_budget_enabled", False))
+            and object_radiance_weight > 0.0
+            and support_capacity is not None
+        ):
+            loss_dict["object_radiance_budget_loss"] = object_radiance_weight * rgb_luma_budget_loss(
+                rgb=outputs["rgb_object"],
+                support=support_capacity,
+                budget=float(getattr(self.config, "object_radiance_budget_value", 0.015)),
+                temperature=float(getattr(self.config, "object_radiance_budget_temperature", 0.01)),
+            )
+            if metrics_dict is not None:
+                metrics_dict["object_radiance_budget_weight"] = torch.tensor(object_radiance_weight, device=self.device)
 
         fg_weight = self._backscatter_ramp_weight(
             getattr(self.config, "lambda_foreground_transmission_reconstruction", 0.0)

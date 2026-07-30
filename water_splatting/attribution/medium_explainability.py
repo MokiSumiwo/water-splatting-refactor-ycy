@@ -24,6 +24,7 @@ class MediumExplainabilitySupport:
     medium: Tensor
     far: Tensor
     far_effective: Tensor
+    connected: Tensor
     route: Tensor
     broad: Tensor
     core: Tensor
@@ -60,6 +61,63 @@ def _normalize_depth(depth: Tensor) -> Tensor:
         return torch.zeros_like(depth)
     scale = torch.quantile(valid, 0.95).clamp_min(1e-6)
     return (depth / scale).clamp(0.0, 1.0)
+
+
+def _boundary_connected_mask(
+    support: Tensor,
+    *,
+    threshold: float,
+    top_only: bool,
+    border: int,
+) -> Tensor:
+    """Keep only components connected to the top or image boundary."""
+
+    if support.ndim != 3 or support.shape[-1] != 1:
+        raise ValueError(f"Expected support with shape [H, W, 1], got {tuple(support.shape)}")
+
+    candidate = support.detach().float().squeeze(-1).clamp(0.0, 1.0) >= float(threshold)
+    if not bool(candidate.any()):
+        return torch.zeros_like(support).detach()
+
+    b = max(int(border), 1)
+    try:
+        from scipy import ndimage  # type: ignore
+
+        labels, count = ndimage.label(
+            candidate.cpu().numpy(),
+            structure=torch.ones((3, 3), dtype=torch.int32).cpu().numpy(),
+        )
+        if count == 0:
+            return torch.zeros_like(support).detach()
+
+        seed_labels = set(int(v) for v in labels[:b, :].reshape(-1) if int(v) > 0)
+        if not top_only:
+            seed_labels.update(int(v) for v in labels[-b:, :].reshape(-1) if int(v) > 0)
+            seed_labels.update(int(v) for v in labels[:, :b].reshape(-1) if int(v) > 0)
+            seed_labels.update(int(v) for v in labels[:, -b:].reshape(-1) if int(v) > 0)
+        if not seed_labels:
+            return torch.zeros_like(support).detach()
+
+        labels_t = torch.from_numpy(labels)
+        connected_cpu = torch.zeros_like(labels_t, dtype=torch.bool)
+        for label in seed_labels:
+            connected_cpu |= labels_t == label
+        return connected_cpu.to(device=support.device, dtype=support.dtype)[:, :, None].detach()
+    except Exception:
+        seed = torch.zeros_like(candidate)
+        seed[:b, :] = candidate[:b, :]
+        if not top_only:
+            seed[-b:, :] = candidate[-b:, :]
+            seed[:, :b] = candidate[:, :b]
+            seed[:, -b:] = candidate[:, -b:]
+        connected = seed.float()[None, None]
+        constraint = candidate.float()[None, None]
+        for _ in range(int(candidate.shape[0] + candidate.shape[1])):
+            expanded = F.max_pool2d(connected, kernel_size=3, stride=1, padding=1) * constraint
+            if torch.equal(expanded, connected):
+                break
+            connected = expanded
+        return connected[0, 0, :, :, None].to(dtype=support.dtype).detach()
 
 
 def compute_image_structure_support(
@@ -148,6 +206,10 @@ def build_route_capacity_support(
     use_flatness: bool = True,
     use_medium: bool = True,
     use_far: bool = True,
+    use_connected: bool = False,
+    connected_threshold: float = 0.25,
+    connected_top_only: bool = True,
+    connected_border: int = 2,
 ) -> MediumExplainabilitySupport:
     """Build route/capacity supports from detached evidence only."""
 
@@ -186,13 +248,27 @@ def build_route_capacity_support(
     route = (flat * medium).clamp(0.0, 1.0).detach()
     broad = (flat * medium * far_effective).clamp(0.0, 1.0).detach()
     core = (flat.square() * medium.square() * far_effective).clamp(0.0, 1.0).detach()
+    connected = (
+        _boundary_connected_mask(
+            broad,
+            threshold=connected_threshold,
+            top_only=connected_top_only,
+            border=connected_border,
+        )
+        if use_connected
+        else ones
+    )
+    route = (route * connected).clamp(0.0, 1.0).detach()
+    broad = (broad * connected).clamp(0.0, 1.0).detach()
+    core = (core * connected).clamp(0.0, 1.0).detach()
     halo_base = torch.relu(broad - core).clamp(0.0, 1.0).detach()
-    bootstrap = (flat * far_effective).clamp(0.0, 1.0).detach()
+    bootstrap = (flat * far_effective * connected).clamp(0.0, 1.0).detach()
     return MediumExplainabilitySupport(
         flat=flat.detach(),
         medium=medium.detach(),
         far=far.detach(),
         far_effective=far_effective.detach(),
+        connected=connected.detach(),
         route=route,
         broad=broad,
         core=core,
@@ -237,6 +313,54 @@ def budgeted_capacity_loss(
     support = support.detach().to(device=accumulation.device, dtype=accumulation.dtype).clamp(0.0, 1.0)
     temp = max(float(temperature), 1e-6)
     penalty = temp * F.softplus((accumulation - float(budget)) / temp)
+    return (support * penalty).sum() / support.sum().clamp_min(1e-6)
+
+
+def accumulation_clearance_amplifier(
+    *,
+    accumulation: Tensor,
+    min_weight: float,
+    threshold: float,
+    temperature: float,
+) -> Tensor:
+    """Detached self-cleaning weight with a nonzero pressure floor."""
+
+    min_w = min(max(float(min_weight), 0.0), 1.0)
+    temp = max(float(temperature), 1e-6)
+    gate = torch.sigmoid((float(threshold) - accumulation.detach()) / temp).clamp(0.0, 1.0)
+    return (min_w + (1.0 - min_w) * gate).detach()
+
+
+def core_zero_capacity_loss(
+    *,
+    accumulation: Tensor,
+    support: Tensor,
+    clearance_weight: Tensor | None = None,
+) -> Tensor:
+    """Zero-target accumulation pressure on high-confidence water support."""
+
+    support = support.detach().to(device=accumulation.device, dtype=accumulation.dtype).clamp(0.0, 1.0)
+    weighted_support = support
+    if clearance_weight is not None:
+        weighted_support = support * clearance_weight.detach().to(
+            device=accumulation.device,
+            dtype=accumulation.dtype,
+        ).clamp(0.0, 1.0)
+    return (weighted_support * accumulation).sum() / support.sum().clamp_min(1e-6)
+
+
+def rgb_luma_budget_loss(
+    *,
+    rgb: Tensor,
+    support: Tensor,
+    budget: float,
+    temperature: float,
+) -> Tensor:
+    """Soft budget on RGB luma over detached support."""
+
+    support = support.detach().to(device=rgb.device, dtype=rgb.dtype).clamp(0.0, 1.0)
+    temp = max(float(temperature), 1e-6)
+    penalty = temp * F.softplus((_luma(rgb) - float(budget)) / temp)
     return (support * penalty).sum() / support.sum().clamp_min(1e-6)
 
 
@@ -321,6 +445,7 @@ def support_coverage_stats(supports: MediumExplainabilitySupport) -> Dict[str, T
         "flat_mean": supports.flat.mean(),
         "medium_mean": supports.medium.mean(),
         "far_mean": supports.far.mean(),
+        "connected_mean": supports.connected.mean(),
         "route_mean": supports.route.mean(),
         "broad_mean": supports.broad.mean(),
         "core_mean": supports.core.mean(),
