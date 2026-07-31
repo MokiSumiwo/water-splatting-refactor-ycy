@@ -31,15 +31,24 @@ import torch.nn as nn
 import torch.nn.functional as F
 from water_splatting.attribution import (
     accumulation_clearance_amplifier,
+    bs_band_loss,
+    bs_convergence_losses,
+    bs_state_stats,
+    build_bs_state,
+    build_counterfactual_bs,
     budgeted_capacity_loss,
     build_residual_gated_halo_support,
     build_route_capacity_support,
     build_training_routed_prediction,
     clear_proxy_chroma_loss,
     clear_proxy_luma_budget_loss,
+    combine_tail_anchor,
+    compute_tail_evidence,
+    counterfactual_chroma_loss,
     core_zero_capacity_loss,
     rgb_luma_budget_loss,
     support_coverage_stats,
+    tail_anchor_losses,
     weighted_rgb_l1,
 )
 from water_splatting.cleanup import build_cleanup_candidate_mask, format_cleanup_stats, sample_pixel_map_at_gaussians
@@ -484,6 +493,70 @@ class WaterSplattingModelConfig(ModelConfig):
     """First step where object-radiance budget may ramp."""
     object_radiance_budget_ramp_steps: int = 1000
     """Ramp length for object-radiance budget."""
+    tacmd_enabled: bool = False
+    """Enable Tail-Anchored Counterfactual Medium Disentanglement losses."""
+    tacmd_tail_transmission_mid: float = 0.50
+    """Final-transmittance midpoint for detached tail evidence."""
+    tacmd_tail_transmission_temp: float = 0.10
+    """Final-transmittance temperature for detached tail evidence."""
+    tacmd_tail_accumulation_mid: float = 0.20
+    """Low-accumulation midpoint for detached tail evidence."""
+    tacmd_tail_accumulation_temp: float = 0.05
+    """Low-accumulation temperature for detached tail evidence."""
+    tacmd_tail_depth_mid: float = 0.75
+    """Normalized-depth midpoint for detached tail evidence."""
+    tacmd_tail_depth_temp: float = 0.15
+    """Normalized-depth temperature for detached tail evidence."""
+    tacmd_tail_gradient_scale: float = 0.05
+    """Image-gradient scale for low-texture tail evidence."""
+    tacmd_tail_confidence_low: float = 0.01
+    """Tail support coverage where view-level tail confidence starts."""
+    tacmd_tail_confidence_high: float = 0.05
+    """Tail support coverage where view-level tail confidence reaches one."""
+    tacmd_anchor_ema: float = 0.98
+    """EMA momentum for the non-learned scene tail-color anchor."""
+    tacmd_scene_anchor_fallback: float = 0.25
+    """Weak fallback weight from scene anchor when current view has little tail."""
+    tacmd_a_chroma_tolerance: float = 0.08
+    """Allowed per-pixel A/B_inf chroma deviation from the tail anchor."""
+    tacmd_bs_radius_near: float = 0.50
+    """Near-depth BS log-ratio tolerance radius."""
+    tacmd_bs_radius_far: float = 0.15
+    """Far-depth BS log-ratio tolerance radius."""
+    tacmd_bs_depth_mid: float = 0.60
+    """Depth midpoint for BS log-ratio tolerance tightening."""
+    tacmd_bs_depth_temp: float = 0.15
+    """Depth temperature for BS log-ratio tolerance tightening."""
+    tacmd_cf_projection_max: float = 0.25
+    """Maximum partial projection of BS spectrum in the counterfactual branch."""
+    tacmd_cf_render_every: int = 4
+    """Training interval for the expensive TACMD counterfactual render."""
+    tacmd_cf_blur_kernel: int = 31
+    """Low-pass kernel for counterfactual chroma loss."""
+    tacmd_cf_rgb_trust_region: float = 0.02
+    """RGB trust region that downweights unsafe counterfactual renders."""
+    tacmd_calibration_start: int = 1500
+    """First step where TACMD medium calibration losses may ramp."""
+    tacmd_calibration_ramp: int = 2500
+    """Ramp length for TACMD medium calibration losses."""
+    tacmd_counterfactual_start: int = 4000
+    """First step where TACMD counterfactual loss may ramp."""
+    tacmd_counterfactual_ramp: int = 3000
+    """Ramp length for TACMD counterfactual loss."""
+    lambda_tacmd_tail_mean: float = 0.0
+    """Weight for tail-region mean A/B_inf chroma anchoring."""
+    lambda_tacmd_tail_band: float = 0.0
+    """Weight for tail-region local A/B_inf chroma tolerance band."""
+    lambda_tacmd_bs_band: float = 0.0
+    """Weight for depth-adaptive BS log-ratio tolerance band."""
+    lambda_tacmd_bs_monotonic: float = 0.0
+    """Weight for finite BS chroma monotonic convergence toward tail color."""
+    lambda_tacmd_bs_terminal: float = 0.0
+    """Weight for finite BS terminal chroma alignment with tail color."""
+    lambda_tacmd_cf_chroma: float = 0.0
+    """Weight for TACMD counterfactual low-frequency chroma correction."""
+    tacmd_cf_luma_ratio: float = 0.10
+    """Relative luma weight inside the TACMD counterfactual loss."""
     background_densification_enabled: bool = False
     """Enable background region weighting for densification gradient accumulation."""
     background_densification_weight: float = 1.0
@@ -724,6 +797,16 @@ class WaterSplattingModel(Model):
             torch.arange(num_points, dtype=torch.long, device=means.device),
             persistent=True,
         )
+        self.register_buffer(
+            "tacmd_scene_anchor",
+            torch.tensor([1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0], dtype=torch.float32, device=means.device),
+            persistent=True,
+        )
+        self.register_buffer(
+            "tacmd_scene_anchor_weight",
+            torch.tensor(0.0, dtype=torch.float32, device=means.device),
+            persistent=True,
+        )
 
         # metrics
         from torchmetrics.image import PeakSignalNoiseRatio
@@ -746,6 +829,7 @@ class WaterSplattingModel(Model):
         self.current_densification_accumulation_map = None
         self.last_densification_region_stats = None
         self.xys_grad_abs_proxy = None
+        self.xys_grad_abs_tacmd_cf = None
         self._background_candidate_mask = None
         self._background_candidate_path = None
         self._background_candidate_num_points = 0
@@ -824,6 +908,10 @@ class WaterSplattingModel(Model):
         newp = dict["gauss_params.means"].shape[0]
         if "gaussian_lineage_ids" not in dict:
             dict["gaussian_lineage_ids"] = torch.arange(newp, dtype=torch.long)
+        if "tacmd_scene_anchor" not in dict:
+            dict["tacmd_scene_anchor"] = torch.tensor([1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0])
+        if "tacmd_scene_anchor_weight" not in dict:
+            dict["tacmd_scene_anchor_weight"] = torch.tensor(0.0)
         if tuple(self.gaussian_lineage_ids.shape) != (newp,):
             self.gaussian_lineage_ids.data = torch.zeros(newp, device=self.device, dtype=torch.long)
         for name, param in self.gauss_params.items():
@@ -2384,6 +2472,7 @@ class WaterSplattingModel(Model):
         self.xys_grad_abs = torch.zeros_like(self.xys)
         self.xys_grad_abs_proxy = None
         self.xys_grad_abs_capacity = None
+        self.xys_grad_abs_tacmd_cf = None
 
         if self._uses_medium_depth_context():
             depth_seed_render = self.underwater_rasterizer.rasterize(  # type: ignore
@@ -2491,6 +2580,8 @@ class WaterSplattingModel(Model):
 
         clear_proxy_render = None
         capacity_control_render = None
+        tacmd_cf_render = None
+        tacmd_cf_bs = None
         chroma_weight_config = float(getattr(self.config, "lambda_background_clear_chroma", 0.0))
         chroma_active_by_step = (
             chroma_weight_config > 0.0
@@ -2683,6 +2774,48 @@ class WaterSplattingModel(Model):
             if not getattr(self.config, "infinite_water_enabled", False):
                 rgb = render.rgb_object + rgb_medium_finite + rgb_tail
         rgb_medium_total = rgb_medium_finite + rgb_tail
+        tacmd_cf_weight_config = float(getattr(self.config, "lambda_tacmd_cf_chroma", 0.0))
+        tacmd_cf_every = max(int(getattr(self.config, "tacmd_cf_render_every", 4)), 1)
+        tacmd_cf_required = bool(
+            self.training
+            and bool(getattr(self.config, "tacmd_enabled", False))
+            and tacmd_cf_weight_config > 0.0
+            and self.step >= int(getattr(self.config, "tacmd_counterfactual_start", 4000))
+            and (self.step % tacmd_cf_every == 0)
+        )
+        if tacmd_cf_required:
+            self.xys_grad_abs_tacmd_cf = torch.zeros_like(self.xys)
+            tacmd_bs_state = build_bs_state(
+                medium_bs=medium_bs,
+                rgb_medium_total=rgb_medium_total,
+                pred_image=rgb,
+                depth=render.depth,
+                radius_near=float(getattr(self.config, "tacmd_bs_radius_near", 0.50)),
+                radius_far=float(getattr(self.config, "tacmd_bs_radius_far", 0.15)),
+                depth_mid=float(getattr(self.config, "tacmd_bs_depth_mid", 0.60)),
+                depth_temp=float(getattr(self.config, "tacmd_bs_depth_temp", 0.15)),
+            )
+            tacmd_cf_bs = build_counterfactual_bs(
+                bs_state=tacmd_bs_state,
+                projection_max=float(getattr(self.config, "tacmd_cf_projection_max", 0.25)),
+            ).detach()
+            tacmd_cf_render = self.underwater_rasterizer.rasterize(  # type: ignore
+                xys=self.xys.detach(),
+                xys_grad_abs=self.xys_grad_abs_tacmd_cf,
+                depths=depths.detach(),
+                radii=self.radii.detach(),
+                conics=conics.detach(),
+                num_tiles_hit=num_tiles_hit,
+                colors=rgbs,
+                opacities=opacities.detach(),
+                medium_rgb=medium_rgb.detach(),
+                medium_bs=tacmd_cf_bs,
+                medium_attn=medium_attn.detach(),
+                height=H,
+                width=W,
+                background=medium_rgb.detach(),
+                step=self.step,
+            )
         hit_q_alpha = torch.sigmoid(
             (render.accumulation - self.config.infinite_water_hit_alpha_threshold)
             / max(self.config.infinite_water_hit_alpha_temp, 1e-6)
@@ -2823,6 +2956,11 @@ class WaterSplattingModel(Model):
             outputs["main_render_opacities"] = opacities
             if capacity_control_scales is not None:
                 outputs["capacity_control_scales"] = capacity_control_scales
+        if tacmd_cf_render is not None:
+            outputs["tacmd_cf_rgb"] = tacmd_cf_render.rgb
+            outputs["tacmd_cf_rgb_object"] = tacmd_cf_render.rgb_object
+            outputs["tacmd_cf_medium_rgb"] = tacmd_cf_render.rgb_medium
+            outputs["tacmd_cf_bs"] = tacmd_cf_bs
         if camera_index is not None:
             outputs["camera_index"] = torch.tensor(float(camera_index), device=self.device)
         if b_inf is not None:
@@ -3024,6 +3162,67 @@ class WaterSplattingModel(Model):
             pred_img = pred_img * mask
             image_mask = mask.to(device=self.device, dtype=gt_img.dtype).clamp(0.0, 1.0)
 
+        tacmd_tail_evidence = None
+        tacmd_anchor = None
+        tacmd_anchor_active = None
+        if bool(getattr(self.config, "tacmd_enabled", False)):
+            tacmd_tail_evidence = compute_tail_evidence(
+                gt_img=gt_img,
+                final_transmittance=outputs["final_transmittance"],
+                accumulation=outputs["accumulation"],
+                depth=outputs["depth"],
+                transmission_mid=float(getattr(self.config, "tacmd_tail_transmission_mid", 0.50)),
+                transmission_temp=float(getattr(self.config, "tacmd_tail_transmission_temp", 0.10)),
+                accumulation_mid=float(getattr(self.config, "tacmd_tail_accumulation_mid", 0.20)),
+                accumulation_temp=float(getattr(self.config, "tacmd_tail_accumulation_temp", 0.05)),
+                depth_mid=float(getattr(self.config, "tacmd_tail_depth_mid", 0.75)),
+                depth_temp=float(getattr(self.config, "tacmd_tail_depth_temp", 0.15)),
+                gradient_scale=float(getattr(self.config, "tacmd_tail_gradient_scale", 0.05)),
+                confidence_low=float(getattr(self.config, "tacmd_tail_confidence_low", 0.01)),
+                confidence_high=float(getattr(self.config, "tacmd_tail_confidence_high", 0.05)),
+            )
+            if self.training:
+                with torch.no_grad():
+                    conf = tacmd_tail_evidence.confidence.to(
+                        device=self.tacmd_scene_anchor.device,
+                        dtype=self.tacmd_scene_anchor.dtype,
+                    )
+                    if float(conf.detach().cpu().item()) > 1e-8:
+                        obs = tacmd_tail_evidence.observed_anchor.to(
+                            device=self.tacmd_scene_anchor.device,
+                            dtype=self.tacmd_scene_anchor.dtype,
+                        )
+                        ema = min(max(float(getattr(self.config, "tacmd_anchor_ema", 0.98)), 0.0), 0.999999)
+                        if float(self.tacmd_scene_anchor_weight.detach().cpu().item()) <= 1e-8:
+                            updated = obs
+                        else:
+                            updated = ema * self.tacmd_scene_anchor + (1.0 - ema) * conf * obs
+                        updated = updated.clamp_min(0.0)
+                        updated = updated / updated.sum().clamp_min(1e-8)
+                        self.tacmd_scene_anchor.copy_(updated)
+                        new_weight = (ema * self.tacmd_scene_anchor_weight + (1.0 - ema) * conf).clamp(0.0, 1.0)
+                        self.tacmd_scene_anchor_weight.copy_(new_weight)
+            tacmd_anchor, tacmd_anchor_active = combine_tail_anchor(
+                observed_anchor=tacmd_tail_evidence.observed_anchor,
+                scene_anchor=self.tacmd_scene_anchor.detach().to(gt_img),
+                scene_anchor_weight=self.tacmd_scene_anchor_weight.detach().to(gt_img),
+                confidence=tacmd_tail_evidence.confidence,
+                fallback=float(getattr(self.config, "tacmd_scene_anchor_fallback", 0.25)),
+            )
+            outputs["tacmd_q_infty"] = tacmd_tail_evidence.q_infty
+            outputs["tacmd_tail_observed_anchor"] = tacmd_tail_evidence.observed_anchor.to(gt_img)
+            outputs["tacmd_tail_anchor"] = tacmd_anchor.to(gt_img)
+            outputs["tacmd_tail_confidence"] = tacmd_tail_evidence.confidence.to(gt_img)
+            outputs["tacmd_anchor_active"] = tacmd_anchor_active.to(gt_img)
+            if metrics_dict is not None:
+                metrics_dict["tacmd_tail_support_mean"] = tacmd_tail_evidence.support_mean.to(self.device)
+                metrics_dict["tacmd_tail_confidence"] = tacmd_tail_evidence.confidence.to(self.device)
+                metrics_dict["tacmd_anchor_active"] = tacmd_anchor_active.to(self.device)
+                metrics_dict["tacmd_scene_anchor_weight"] = self.tacmd_scene_anchor_weight.detach()
+                for i in range(3):
+                    metrics_dict[f"tacmd_observed_anchor_{i}"] = tacmd_tail_evidence.observed_anchor[i].to(self.device)
+                    metrics_dict[f"tacmd_scene_anchor_{i}"] = self.tacmd_scene_anchor.detach()[i]
+
         medium_supports = None
         support_route = None
         support_broad = None
@@ -3156,6 +3355,103 @@ class WaterSplattingModel(Model):
                 ssim_metric=self.ssim,
             ),
         }
+
+        if bool(getattr(self.config, "tacmd_enabled", False)) and tacmd_tail_evidence is not None:
+            tacmd_a_source = outputs.get("b_inf", outputs["medium_rgb"])
+            tacmd_cal_start = int(getattr(self.config, "tacmd_calibration_start", 1500))
+            tacmd_cal_ramp = int(getattr(self.config, "tacmd_calibration_ramp", 2500))
+            tacmd_tail_mean_weight = self._ramped_weight(
+                float(getattr(self.config, "lambda_tacmd_tail_mean", 0.0)),
+                tacmd_cal_start,
+                tacmd_cal_ramp,
+            )
+            tacmd_tail_band_weight = self._ramped_weight(
+                float(getattr(self.config, "lambda_tacmd_tail_band", 0.0)),
+                tacmd_cal_start,
+                tacmd_cal_ramp,
+            )
+            if (tacmd_tail_mean_weight > 0.0 or tacmd_tail_band_weight > 0.0) and tacmd_anchor is not None:
+                tacmd_a_losses = tail_anchor_losses(
+                    medium_rgb=tacmd_a_source,
+                    q_infty=tacmd_tail_evidence.q_infty,
+                    target_anchor=tacmd_anchor,
+                    confidence=tacmd_tail_evidence.confidence,
+                    tolerance=float(getattr(self.config, "tacmd_a_chroma_tolerance", 0.08)),
+                )
+                if tacmd_tail_mean_weight > 0.0:
+                    loss_dict["tacmd_tail_mean_loss"] = tacmd_tail_mean_weight * tacmd_a_losses["mean"]
+                if tacmd_tail_band_weight > 0.0:
+                    loss_dict["tacmd_tail_band_loss"] = tacmd_tail_band_weight * tacmd_a_losses["band"]
+
+            tacmd_bs_state = build_bs_state(
+                medium_bs=outputs["medium_bs"],
+                rgb_medium_total=outputs["rgb_medium_total"],
+                pred_image=outputs["pred_image"],
+                depth=outputs["depth"],
+                radius_near=float(getattr(self.config, "tacmd_bs_radius_near", 0.50)),
+                radius_far=float(getattr(self.config, "tacmd_bs_radius_far", 0.15)),
+                depth_mid=float(getattr(self.config, "tacmd_bs_depth_mid", 0.60)),
+                depth_temp=float(getattr(self.config, "tacmd_bs_depth_temp", 0.15)),
+            )
+            if metrics_dict is not None:
+                for stat_name, stat_value in bs_state_stats(tacmd_bs_state).items():
+                    metrics_dict[f"tacmd_{stat_name}"] = stat_value
+            tacmd_bs_band_weight = self._ramped_weight(
+                float(getattr(self.config, "lambda_tacmd_bs_band", 0.0)),
+                tacmd_cal_start,
+                tacmd_cal_ramp,
+            )
+            if tacmd_bs_band_weight > 0.0:
+                loss_dict["tacmd_bs_band_loss"] = tacmd_bs_band_weight * bs_band_loss(tacmd_bs_state)
+
+            tacmd_bs_mono_weight = self._ramped_weight(
+                float(getattr(self.config, "lambda_tacmd_bs_monotonic", 0.0)),
+                tacmd_cal_start,
+                tacmd_cal_ramp,
+            )
+            tacmd_bs_terminal_weight = self._ramped_weight(
+                float(getattr(self.config, "lambda_tacmd_bs_terminal", 0.0)),
+                tacmd_cal_start,
+                tacmd_cal_ramp,
+            )
+            if (tacmd_bs_mono_weight > 0.0 or tacmd_bs_terminal_weight > 0.0) and tacmd_anchor is not None:
+                tacmd_bs_conv = bs_convergence_losses(
+                    medium_rgb=tacmd_a_source,
+                    medium_bs=outputs["medium_bs"],
+                    depth=outputs["depth"],
+                    q_infty=tacmd_tail_evidence.q_infty,
+                    target_anchor=tacmd_anchor,
+                    confidence=tacmd_tail_evidence.confidence,
+                )
+                if tacmd_bs_mono_weight > 0.0:
+                    loss_dict["tacmd_bs_monotonic_loss"] = tacmd_bs_mono_weight * tacmd_bs_conv["monotonic"]
+                if tacmd_bs_terminal_weight > 0.0:
+                    loss_dict["tacmd_bs_terminal_loss"] = tacmd_bs_terminal_weight * tacmd_bs_conv["terminal"]
+
+            tacmd_cf_weight = self._ramped_weight(
+                float(getattr(self.config, "lambda_tacmd_cf_chroma", 0.0)),
+                int(getattr(self.config, "tacmd_counterfactual_start", 4000)),
+                int(getattr(self.config, "tacmd_counterfactual_ramp", 3000)),
+            )
+            if tacmd_cf_weight > 0.0 and tacmd_anchor_active is not None and "tacmd_cf_rgb" in outputs:
+                tacmd_cf = counterfactual_chroma_loss(
+                    cf_rgb=outputs["tacmd_cf_rgb"],
+                    gt_img=gt_img,
+                    main_rgb=outputs["pred_image"],
+                    bs_state=tacmd_bs_state,
+                    blur_kernel=int(getattr(self.config, "tacmd_cf_blur_kernel", 31)),
+                    rgb_trust_region=float(getattr(self.config, "tacmd_cf_rgb_trust_region", 0.02)),
+                    luma_ratio=float(getattr(self.config, "tacmd_cf_luma_ratio", 0.10)),
+                )
+                loss_dict["tacmd_counterfactual_chroma_loss"] = (
+                    tacmd_cf_weight * tacmd_anchor_active.to(outputs["pred_image"]) * tacmd_cf["loss"]
+                )
+                if metrics_dict is not None:
+                    metrics_dict["tacmd_cf_weight"] = torch.tensor(tacmd_cf_weight, device=self.device)
+                    metrics_dict["tacmd_cf_safe_gate"] = tacmd_cf["safe_gate"].to(self.device)
+                    metrics_dict["tacmd_cf_rgb_delta"] = tacmd_cf["rgb_delta"].to(self.device)
+                    metrics_dict["tacmd_cf_chroma_raw"] = tacmd_cf["chroma"].to(self.device)
+                    metrics_dict["tacmd_cf_luma_raw"] = tacmd_cf["luma"].to(self.device)
 
         medium_weight = self._ramped_weight(
             float(getattr(self.config, "lambda_medium_explainability", 0.0)),
