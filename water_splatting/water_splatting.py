@@ -291,6 +291,42 @@ class WaterSplattingModelConfig(ModelConfig):
     """Maximum per-channel foreground reconstruction multiplier."""
     foreground_transmission_detach_weight: bool = True
     """Detach foreground transmission weights from the weighted reconstruction loss."""
+    tbap_enabled: bool = False
+    """Enable Transmission-Balanced Appearance Preconditioning."""
+    lambda_tbap: float = 0.0
+    """Weight for TBAP appearance-only auxiliary reconstruction."""
+    tbap_start_step: int = 10000
+    """First step where TBAP loss may ramp."""
+    tbap_ramp_steps: int = 0
+    """Ramp length for TBAP loss."""
+    tbap_gamma: float = 0.5
+    """Partial inverse-transmission exponent used by TBAP."""
+    tbap_max_weight: float = 3.0
+    """Maximum normalized per-channel TBAP transmission multiplier before support normalization."""
+    tbap_transmission_floor: float = 0.08
+    """Transmission floor used for stable TBAP weighting and information support."""
+    tbap_transmission_info_temp: float = 0.04
+    """Temperature for TBAP information gate around the transmission floor."""
+    tbap_object_accum_mid: float = 0.35
+    """Accumulation midpoint for TBAP far-object support."""
+    tbap_object_accum_temp: float = 0.08
+    """Accumulation temperature for TBAP far-object support."""
+    tbap_object_concentration_kappa: float = 0.25
+    """Relative-depth concentration scale for TBAP object support."""
+    tbap_far_depth_mid: float = 0.60
+    """Normalized detached-depth midpoint for TBAP far support."""
+    tbap_far_depth_temp: float = 0.15
+    """Normalized detached-depth temperature for TBAP far support."""
+    tbap_depth_normalize_mode: Literal["max", "p95"] = "p95"
+    """Depth normalization mode for TBAP far support."""
+    tbap_smooth_l1_beta: float = 0.01
+    """Smooth-L1 beta for TBAP auxiliary loss."""
+    tbap_freeze_geometry: bool = False
+    """Freeze Gaussian means/scales/quats/opacities and disable densification/culling."""
+    tbap_freeze_medium: bool = False
+    """Freeze medium MLP and direction encoding during TBAP pilots."""
+    tbap_dc_only: bool = False
+    """Freeze features_rest so only Gaussian DC color receives optimization."""
     lambda_pseudo_depth: float = 0.0
     """Reserved pseudo-depth rank-consistency loss weight. Off by default."""
     lambda_medium_context_residual: float = 0.0
@@ -1070,7 +1106,10 @@ class WaterSplattingModel(Model):
 
     def after_train(self, step: int):
         assert step == self.step
-        if getattr(self.config, "dual_color_enabled", False) and getattr(self.config, "dual_color_freeze_geometry", True):
+        if (
+            getattr(self.config, "dual_color_enabled", False)
+            and getattr(self.config, "dual_color_freeze_geometry", True)
+        ) or getattr(self.config, "tbap_freeze_geometry", False):
             return
         # to save some training time, we no longer need to update those stats post refinement
         # if self.step >= self.config.stop_split_at:
@@ -1146,7 +1185,10 @@ class WaterSplattingModel(Model):
 
     def refinement_after(self, optimizers: Optimizers, step):
         assert step == self.step
-        if getattr(self.config, "dual_color_enabled", False) and getattr(self.config, "dual_color_freeze_geometry", True):
+        if (
+            getattr(self.config, "dual_color_enabled", False)
+            and getattr(self.config, "dual_color_freeze_geometry", True)
+        ) or getattr(self.config, "tbap_freeze_geometry", False):
             return
         if self.step <= self.config.warmup_length:
             return
@@ -1373,11 +1415,15 @@ class WaterSplattingModel(Model):
         # Here we explicitly use the means, scales as parameters so that the user can override this function and
         # specify more if they want to add more optimizable params to gaussians.
         names = ["means", "scales", "quats", "features_dc", "features_rest", "opacities"]
-        if getattr(self.config, "dual_color_enabled", False) and getattr(self.config, "dual_color_freeze_geometry", True):
+        freeze_geometry = (
+            getattr(self.config, "dual_color_enabled", False)
+            and getattr(self.config, "dual_color_freeze_geometry", True)
+        ) or getattr(self.config, "tbap_freeze_geometry", False)
+        if freeze_geometry:
             for name in ["means", "scales", "quats", "opacities"]:
                 self.gauss_params[name].requires_grad_(False)
-            for name in ["features_dc", "features_rest"]:
-                self.gauss_params[name].requires_grad_(True)
+            self.gauss_params["features_dc"].requires_grad_(True)
+            self.gauss_params["features_rest"].requires_grad_(not getattr(self.config, "tbap_dc_only", False))
         else:
             for name in names:
                 self.gauss_params[name].requires_grad_(True)
@@ -1390,8 +1436,11 @@ class WaterSplattingModel(Model):
             Mapping of different parameter groups
         """
         gps = self.get_gaussian_param_groups()
-        freeze_medium = getattr(self.config, "dual_color_enabled", False) and getattr(
-            self.config, "dual_color_freeze_medium", True
+        freeze_medium = (
+            getattr(self.config, "dual_color_enabled", False)
+            and getattr(self.config, "dual_color_freeze_medium", True)
+        ) or getattr(
+            self.config, "tbap_freeze_medium", False
         )
         for param in self.medium_mlp.parameters():
             param.requires_grad_(not freeze_medium)
@@ -2078,6 +2127,89 @@ class WaterSplattingModel(Model):
 
         return torch.zeros_like(depth)
 
+    def _normalize_depth_for_support(self, depth: torch.Tensor, mode: str = "p95") -> torch.Tensor:
+        depth = depth.detach()
+        valid = torch.isfinite(depth) & (depth > 0)
+        if not valid.any():
+            return torch.zeros_like(depth)
+        valid_depth = depth[valid]
+        if mode == "p95":
+            scale = torch.quantile(valid_depth, 0.95)
+        elif mode == "max":
+            scale = valid_depth.max()
+        else:
+            raise ValueError(f"Unknown depth normalize mode: {mode}")
+        return (depth / scale.clamp_min(1e-6)).clamp(0.0, 2.0)
+
+    def _tbap_support_and_weights(
+        self,
+        outputs: Dict[str, torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
+        depth = outputs["depth"].detach()
+        accumulation = outputs["accumulation"].detach().clamp(0.0, 1.0)
+        depth_std = outputs["depth_std_relative"].detach().clamp_min(0.0)
+        medium_attn = outputs["medium_attn"].detach().clamp_min(0.0)
+
+        depth_norm = self._normalize_depth_for_support(
+            depth,
+            getattr(self.config, "tbap_depth_normalize_mode", "p95"),
+        )
+        transmission = torch.exp(-(medium_attn * depth).clamp_min(0.0)).clamp(0.0, 1.0)
+        mean_transmission = transmission.mean(dim=-1, keepdim=True)
+
+        q_object = torch.sigmoid(
+            (accumulation - float(getattr(self.config, "tbap_object_accum_mid", 0.35)))
+            / max(float(getattr(self.config, "tbap_object_accum_temp", 0.08)), 1e-6)
+        ).clamp(0.0, 1.0)
+        q_concentration = torch.exp(
+            -depth_std / max(float(getattr(self.config, "tbap_object_concentration_kappa", 0.25)), 1e-6)
+        ).clamp(0.0, 1.0)
+        q_far = torch.sigmoid(
+            (depth_norm - float(getattr(self.config, "tbap_far_depth_mid", 0.60)))
+            / max(float(getattr(self.config, "tbap_far_depth_temp", 0.15)), 1e-6)
+        ).clamp(0.0, 1.0)
+        transmission_floor = float(getattr(self.config, "tbap_transmission_floor", 0.08))
+        q_info = torch.sigmoid(
+            (mean_transmission - transmission_floor)
+            / max(float(getattr(self.config, "tbap_transmission_info_temp", 0.04)), 1e-6)
+        ).clamp(0.0, 1.0)
+
+        support = (q_object * q_concentration * q_far * q_info).detach().clamp(0.0, 1.0)
+        gamma = max(float(getattr(self.config, "tbap_gamma", 0.5)), 0.0)
+        max_weight = max(float(getattr(self.config, "tbap_max_weight", 3.0)), 1.0)
+        raw_weight = torch.pow(transmission.clamp_min(transmission_floor) + 1e-6, -gamma).clamp(1.0, max_weight)
+        support_sum = support.sum().clamp_min(1e-6)
+        support_mean_weight = (support * raw_weight).sum(dim=(0, 1), keepdim=True) / support_sum
+        normalized_weight = (raw_weight / support_mean_weight.clamp_min(1e-6)).detach()
+        diagnostics = {
+            "support": support,
+            "q_object": q_object.detach(),
+            "q_concentration": q_concentration.detach(),
+            "q_far": q_far.detach(),
+            "q_info": q_info.detach(),
+            "transmission": transmission.detach(),
+            "raw_weight": raw_weight.detach(),
+            "normalized_weight": normalized_weight,
+        }
+        return support, normalized_weight, diagnostics
+
+    def _tbap_loss(
+        self,
+        *,
+        outputs: Dict[str, torch.Tensor],
+        gt_img: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        support, normalized_weight, diagnostics = self._tbap_support_and_weights(outputs)
+        if support.sum() <= 0:
+            return gt_img.new_zeros(()), diagnostics
+
+        tbap_proxy = outputs["tbap_rgb_object_proxy"]
+        pred_tbap = outputs["pred_image"].detach() + tbap_proxy - tbap_proxy.detach()
+        beta = max(float(getattr(self.config, "tbap_smooth_l1_beta", 0.01)), 1e-8)
+        residual = F.smooth_l1_loss(pred_tbap, gt_img, beta=beta, reduction="none")
+        loss = (support * normalized_weight * residual).sum() / (support.sum().clamp_min(1e-6) * residual.shape[-1])
+        return loss, diagnostics
+
     def _camera_index_from_outputs(self, outputs: Dict[str, torch.Tensor]) -> Optional[int]:
         camera_index = outputs.get("camera_index")
         if camera_index is None:
@@ -2541,6 +2673,7 @@ class WaterSplattingModel(Model):
         self.xys_grad_abs_proxy = None
         self.xys_grad_abs_capacity = None
         self.xys_grad_abs_tacmd_cf = None
+        self.xys_grad_abs_tbap = None
 
         if self._uses_medium_depth_context():
             depth_seed_render = self.underwater_rasterizer.rasterize(  # type: ignore
@@ -2650,6 +2783,7 @@ class WaterSplattingModel(Model):
         capacity_control_render = None
         tacmd_cf_render = None
         tacmd_cf_bs = None
+        tbap_render = None
         chroma_weight_config = float(getattr(self.config, "lambda_background_clear_chroma", 0.0))
         chroma_active_by_step = (
             chroma_weight_config > 0.0
@@ -2683,6 +2817,12 @@ class WaterSplattingModel(Model):
             and bool(getattr(self.config, "tmica_use_clear_proxy", True))
             and tmica_axis_weight_config > 0.0
             and (not self.training or self.step >= int(getattr(self.config, "tmica_axis_start_step", 6000)))
+        )
+        tbap_weight_config = float(getattr(self.config, "lambda_tbap", 0.0))
+        tbap_active_by_step = (
+            bool(getattr(self.config, "tbap_enabled", False))
+            and tbap_weight_config > 0.0
+            and (not self.training or self.step >= int(getattr(self.config, "tbap_start_step", 10000)))
         )
         clear_proxy_required = bool(
             getattr(self.config, "clear_proxy_enabled", False)
@@ -2839,6 +2979,25 @@ class WaterSplattingModel(Model):
                 opacities=proxy_opacities,
                 height=H,
                 width=W,
+                step=self.step,
+            )
+        if tbap_active_by_step:
+            self.xys_grad_abs_tbap = torch.zeros_like(self.xys)
+            tbap_render = self.underwater_rasterizer.rasterize(  # type: ignore
+                xys=self.xys.detach(),
+                xys_grad_abs=self.xys_grad_abs_tbap,
+                depths=depths.detach(),
+                radii=self.radii.detach(),
+                conics=conics.detach(),
+                num_tiles_hit=num_tiles_hit,
+                colors=rgbs,
+                opacities=opacities.detach(),
+                medium_rgb=medium_rgb.detach(),
+                medium_bs=medium_bs.detach(),
+                medium_attn=medium_attn.detach(),
+                height=H,
+                width=W,
+                background=medium_rgb.detach(),
                 step=self.step,
             )
         tail_weight_last = render.final_transmittance * torch.exp(-medium_bs * render.last_depth)
@@ -3030,6 +3189,12 @@ class WaterSplattingModel(Model):
             )
             outputs["J_proxy_rgb_object"] = clear_proxy_render.rgb_object
             outputs["J_proxy_accumulation"] = clear_proxy_render.accumulation
+        if tbap_render is not None:
+            outputs["tbap_rgb_object_proxy"] = tbap_render.rgb_object
+            outputs["tbap_rgb_proxy"] = tbap_render.rgb
+            outputs["tbap_proxy_abs_diff_rgb_object"] = torch.abs(
+                tbap_render.rgb_object.detach() - render.rgb_object.detach()
+            )
         if capacity_control_render is not None:
             outputs["capacity_control_accumulation"] = capacity_control_render.accumulation
             outputs["capacity_control_opacities"] = capacity_control_opacities
@@ -3984,6 +4149,42 @@ class WaterSplattingModel(Model):
                 loss_dict["foreground_transmission_reconstruction_loss"] = (
                     (weights - 1.0) * torch.abs(pred_img - gt_img)
                 ).mean()
+
+        tbap_weight = self._ramped_weight(
+            float(getattr(self.config, "lambda_tbap", 0.0)),
+            int(getattr(self.config, "tbap_start_step", 10000)),
+            int(getattr(self.config, "tbap_ramp_steps", 0)),
+        )
+        if (
+            bool(getattr(self.config, "tbap_enabled", False))
+            and tbap_weight > 0.0
+            and "tbap_rgb_object_proxy" in outputs
+        ):
+            tbap_loss, tbap_diag = self._tbap_loss(outputs=outputs, gt_img=gt_img)
+            loss_dict["tbap_loss"] = tbap_weight * tbap_loss
+            outputs["tbap_support"] = tbap_diag["support"]
+            outputs["tbap_q_object"] = tbap_diag["q_object"]
+            outputs["tbap_q_concentration"] = tbap_diag["q_concentration"]
+            outputs["tbap_q_far"] = tbap_diag["q_far"]
+            outputs["tbap_q_info"] = tbap_diag["q_info"]
+            outputs["tbap_transmission"] = tbap_diag["transmission"]
+            outputs["tbap_weight"] = tbap_diag["normalized_weight"]
+            if metrics_dict is not None:
+                support = tbap_diag["support"]
+                trans = tbap_diag["transmission"]
+                norm_weight = tbap_diag["normalized_weight"]
+                metrics_dict["tbap_weight"] = torch.tensor(tbap_weight, device=self.device)
+                metrics_dict["tbap_loss_unweighted"] = tbap_loss.detach()
+                metrics_dict["tbap_support_mean"] = support.mean()
+                metrics_dict["tbap_support_gt_0p25_fraction"] = (support > 0.25).float().mean()
+                metrics_dict["tbap_transmission_mean"] = trans.mean()
+                for i in range(3):
+                    metrics_dict[f"tbap_transmission_{i}"] = trans[..., i].mean()
+                    metrics_dict[f"tbap_norm_weight_{i}"] = norm_weight[..., i].mean()
+                if "tbap_proxy_abs_diff_rgb_object" in outputs:
+                    metrics_dict["tbap_proxy_rgb_object_absdiff_mean"] = outputs[
+                        "tbap_proxy_abs_diff_rgb_object"
+                    ].mean()
 
         if getattr(self.config, "infinite_water_enabled", False) and "m_inf" in outputs:
             support = outputs["m_inf"].detach()
