@@ -46,9 +46,13 @@ from water_splatting.attribution import (
     compute_tail_evidence,
     counterfactual_chroma_loss,
     core_zero_capacity_loss,
+    build_tmica_state,
+    register_tmica_axis_gradient_hook,
     rgb_luma_budget_loss,
     support_coverage_stats,
     tail_anchor_losses,
+    tmica_axis_losses,
+    tmica_tail_lite_loss,
     weighted_rgb_l1,
 )
 from water_splatting.cleanup import build_cleanup_candidate_mask, format_cleanup_stats, sample_pixel_map_at_gaussians
@@ -557,6 +561,70 @@ class WaterSplattingModelConfig(ModelConfig):
     """Weight for TACMD counterfactual low-frequency chroma correction."""
     tacmd_cf_luma_ratio: float = 0.10
     """Relative luma weight inside the TACMD counterfactual loss."""
+    tmica_enabled: bool = False
+    """Enable Tail-Guided Medium-Invariant Clear Appearance losses."""
+    tmica_use_clear_proxy: bool = True
+    """Use differentiable appearance-only J_proxy_raw for TMICA training losses."""
+    tmica_axis_gradient_projection: bool = True
+    """Project TMICA clear-appearance gradients to the detached water-color axis."""
+    tmica_tail_quality_threshold: float = 0.20
+    """Minimum strict tail quality required for current-view tail anchoring."""
+    tmica_scene_anchor_fallback: float = 0.15
+    """Weak scene-anchor fallback when the current view tail quality is low."""
+    tmica_tail_coverage_mid: float = 0.015
+    """Tail support coverage midpoint for strict TMICA tail quality."""
+    tmica_tail_coverage_temp: float = 0.010
+    """Tail support coverage temperature for strict TMICA tail quality."""
+    tmica_tail_variance_tau: float = 0.15
+    """Color log-ratio variance scale for strict TMICA tail quality."""
+    tmica_tail_border_width: int = 16
+    """Pixel border width used to test whether tail evidence reaches image edges."""
+    tmica_tail_border_mid: float = 0.010
+    """Border tail-support midpoint for strict TMICA tail quality."""
+    tmica_tail_border_temp: float = 0.010
+    """Border tail-support temperature for strict TMICA tail quality."""
+    tmica_tail_ema_tau: float = 0.75
+    """Scene-anchor chroma consistency scale for strict TMICA tail quality."""
+    tmica_object_accum_mid: float = 0.35
+    """Accumulation midpoint for far-object TMICA support."""
+    tmica_object_accum_temp: float = 0.08
+    """Accumulation temperature for far-object TMICA support."""
+    tmica_object_concentration_kappa: float = 0.25
+    """Relative-depth concentration scale for far-object TMICA support."""
+    tmica_far_depth_mid: float = 0.60
+    """Normalized depth midpoint for far-object TMICA support."""
+    tmica_far_depth_temp: float = 0.15
+    """Normalized depth temperature for far-object TMICA support."""
+    tmica_near_depth_mid: float = 0.40
+    """Normalized depth midpoint for near-object reference support."""
+    tmica_near_depth_temp: float = 0.12
+    """Normalized depth temperature for near-object reference support."""
+    tmica_use_low_transmission: bool = True
+    """Modulate far-object support by detached low-transmission evidence."""
+    tmica_use_sensitivity: bool = True
+    """Modulate far-object support by detached medium sensitivity evidence."""
+    tmica_positive_water_margin: float = 0.05
+    """Allowed far-minus-near water-axis log-chroma projection before penalty."""
+    tmica_negative_overcorrection_margin: float = 0.15
+    """Allowed reverse-axis overcorrection margin."""
+    tmica_trend_margin_step: float = 0.03
+    """Per-depth-bin allowed increase in water-axis projection."""
+    tmica_tail_lite_start_step: int = 4000
+    """First step where strict tail-lite calibration may ramp."""
+    tmica_tail_lite_ramp_steps: int = 2000
+    """Ramp length for strict tail-lite calibration."""
+    tmica_axis_start_step: int = 6000
+    """First step where far J water-axis losses may ramp."""
+    tmica_axis_ramp_steps: int = 2000
+    """Ramp length for far J water-axis losses."""
+    lambda_tmica_tail_lite: float = 0.0
+    """Weight for strict tail-mean-only A/B_inf chroma calibration."""
+    lambda_tmica_far_axis: float = 0.0
+    """Weight for direct far-object J water-axis residual suppression."""
+    lambda_tmica_depth_trend: float = 0.0
+    """Weight for water-axis depth-trend suppression."""
+    lambda_tmica_overcorrection: float = 0.0
+    """Weight for reverse water-axis overcorrection protection."""
     background_densification_enabled: bool = False
     """Enable background region weighting for densification gradient accumulation."""
     background_densification_weight: float = 1.0
@@ -2605,10 +2673,22 @@ class WaterSplattingModel(Model):
             and core_zero_weight_config > 0.0
             and (not self.training or self.step >= int(getattr(self.config, "core_zero_capacity_start_step", 1000)))
         )
+        tmica_axis_weight_config = (
+            float(getattr(self.config, "lambda_tmica_far_axis", 0.0))
+            + float(getattr(self.config, "lambda_tmica_depth_trend", 0.0))
+            + float(getattr(self.config, "lambda_tmica_overcorrection", 0.0))
+        )
+        tmica_proxy_active_by_step = (
+            bool(getattr(self.config, "tmica_enabled", False))
+            and bool(getattr(self.config, "tmica_use_clear_proxy", True))
+            and tmica_axis_weight_config > 0.0
+            and (not self.training or self.step >= int(getattr(self.config, "tmica_axis_start_step", 6000)))
+        )
         clear_proxy_required = bool(
             getattr(self.config, "clear_proxy_enabled", False)
             or chroma_active_by_step
             or halo_active_by_step
+            or tmica_proxy_active_by_step
         )
         capacity_control_required = bool(
             getattr(self.config, "capacity_control_enabled", False)
@@ -2731,7 +2811,7 @@ class WaterSplattingModel(Model):
             proxy_conics = conics
             proxy_colors = rgbs
             proxy_opacities = opacities
-            if bool(getattr(self.config, "clear_proxy_appearance_only", False)):
+            if bool(getattr(self.config, "clear_proxy_appearance_only", False)) or tmica_proxy_active_by_step:
                 proxy_geometry_grad_scale = 0.0
                 proxy_opacity_grad_scale = 0.0
             else:
@@ -3165,7 +3245,9 @@ class WaterSplattingModel(Model):
         tacmd_tail_evidence = None
         tacmd_anchor = None
         tacmd_anchor_active = None
-        if bool(getattr(self.config, "tacmd_enabled", False)):
+        tacmd_active = bool(getattr(self.config, "tacmd_enabled", False))
+        tmica_active = bool(getattr(self.config, "tmica_enabled", False))
+        if tacmd_active or tmica_active:
             tacmd_tail_evidence = compute_tail_evidence(
                 gt_img=gt_img,
                 final_transmittance=outputs["final_transmittance"],
@@ -3181,7 +3263,7 @@ class WaterSplattingModel(Model):
                 confidence_low=float(getattr(self.config, "tacmd_tail_confidence_low", 0.01)),
                 confidence_high=float(getattr(self.config, "tacmd_tail_confidence_high", 0.05)),
             )
-            if self.training:
+            if self.training and tacmd_active:
                 with torch.no_grad():
                     conf = tacmd_tail_evidence.confidence.to(
                         device=self.tacmd_scene_anchor.device,
@@ -3356,7 +3438,125 @@ class WaterSplattingModel(Model):
             ),
         }
 
-        if bool(getattr(self.config, "tacmd_enabled", False)) and tacmd_tail_evidence is not None:
+        tmica_state = None
+        if tmica_active and tacmd_tail_evidence is not None:
+            tmica_j_source = outputs.get("J_proxy_raw", outputs["J"]) if bool(
+                getattr(self.config, "tmica_use_clear_proxy", True)
+            ) else outputs["J"]
+            tmica_state = build_tmica_state(
+                gt_img=gt_img,
+                j_clear=tmica_j_source,
+                tail=tacmd_tail_evidence,
+                scene_anchor=self.tacmd_scene_anchor.detach().to(gt_img),
+                scene_anchor_weight=self.tacmd_scene_anchor_weight.detach().to(gt_img),
+                accumulation=outputs["accumulation"],
+                depth=outputs["depth"],
+                depth_std_relative=outputs["depth_std_relative"],
+                medium_attn=outputs["medium_attn"],
+                medium_bs=outputs["medium_bs"],
+                medium_rgb=outputs.get("b_inf", outputs["medium_rgb"]),
+                image_mask=image_mask,
+                quality_threshold=float(getattr(self.config, "tmica_tail_quality_threshold", 0.20)),
+                scene_fallback=float(getattr(self.config, "tmica_scene_anchor_fallback", 0.15)),
+                coverage_mid=float(getattr(self.config, "tmica_tail_coverage_mid", 0.015)),
+                coverage_temp=float(getattr(self.config, "tmica_tail_coverage_temp", 0.010)),
+                variance_tau=float(getattr(self.config, "tmica_tail_variance_tau", 0.15)),
+                border_width=int(getattr(self.config, "tmica_tail_border_width", 16)),
+                border_mid=float(getattr(self.config, "tmica_tail_border_mid", 0.010)),
+                border_temp=float(getattr(self.config, "tmica_tail_border_temp", 0.010)),
+                ema_tau=float(getattr(self.config, "tmica_tail_ema_tau", 0.75)),
+                object_accum_mid=float(getattr(self.config, "tmica_object_accum_mid", 0.35)),
+                object_accum_temp=float(getattr(self.config, "tmica_object_accum_temp", 0.08)),
+                object_concentration_kappa=float(getattr(self.config, "tmica_object_concentration_kappa", 0.25)),
+                far_depth_mid=float(getattr(self.config, "tmica_far_depth_mid", 0.60)),
+                far_depth_temp=float(getattr(self.config, "tmica_far_depth_temp", 0.15)),
+                near_depth_mid=float(getattr(self.config, "tmica_near_depth_mid", 0.40)),
+                near_depth_temp=float(getattr(self.config, "tmica_near_depth_temp", 0.12)),
+                use_low_transmission=bool(getattr(self.config, "tmica_use_low_transmission", True)),
+                use_sensitivity=bool(getattr(self.config, "tmica_use_sensitivity", True)),
+            )
+            outputs["tmica_support"] = tmica_state.support
+            outputs["tmica_near_support"] = tmica_state.near_support
+            outputs["tmica_q_object"] = tmica_state.q_object
+            outputs["tmica_b_j"] = tmica_state.b_j.detach()
+            outputs["tmica_water_axis"] = tmica_state.water_axis
+            if metrics_dict is not None:
+                for stat_name, stat_value in tmica_state.metrics.items():
+                    metrics_dict[f"tmica_{stat_name}"] = stat_value.to(self.device)
+            if self.training and (not tacmd_active):
+                with torch.no_grad():
+                    if float(tmica_state.tail_active.detach().cpu().item()) > 0.5:
+                        obs = tmica_state.observed_anchor.to(
+                            device=self.tacmd_scene_anchor.device,
+                            dtype=self.tacmd_scene_anchor.dtype,
+                        )
+                        quality = tmica_state.tail_quality.to(
+                            device=self.tacmd_scene_anchor_weight.device,
+                            dtype=self.tacmd_scene_anchor_weight.dtype,
+                        ).clamp(0.0, 1.0)
+                        ema = min(max(float(getattr(self.config, "tacmd_anchor_ema", 0.98)), 0.0), 0.999999)
+                        if float(self.tacmd_scene_anchor_weight.detach().cpu().item()) <= 1e-8:
+                            updated = obs
+                        else:
+                            updated = ema * self.tacmd_scene_anchor + (1.0 - ema) * quality * obs
+                        updated = updated.clamp_min(0.0)
+                        updated = updated / updated.sum().clamp_min(1e-8)
+                        self.tacmd_scene_anchor.copy_(updated)
+                        new_weight = (ema * self.tacmd_scene_anchor_weight + (1.0 - ema) * quality).clamp(0.0, 1.0)
+                        self.tacmd_scene_anchor_weight.copy_(new_weight)
+
+            tmica_tail_weight = self._ramped_weight(
+                float(getattr(self.config, "lambda_tmica_tail_lite", 0.0)),
+                int(getattr(self.config, "tmica_tail_lite_start_step", 4000)),
+                int(getattr(self.config, "tmica_tail_lite_ramp_steps", 2000)),
+            )
+            if tmica_tail_weight > 0.0:
+                loss_dict["tmica_tail_lite_loss"] = tmica_tail_weight * tmica_tail_lite_loss(
+                    medium_rgb=outputs.get("b_inf", outputs["medium_rgb"]),
+                    q_tail=tmica_state.q_tail,
+                    target_anchor=tmica_state.anchor,
+                    tail_active=tmica_state.tail_active,
+                    tolerance=float(getattr(self.config, "tacmd_a_chroma_tolerance", 0.08)),
+                )
+                if metrics_dict is not None:
+                    metrics_dict["tmica_tail_lite_weight"] = torch.tensor(tmica_tail_weight, device=self.device)
+
+            tmica_axis_weight = self._ramped_weight(
+                float(getattr(self.config, "lambda_tmica_far_axis", 0.0)),
+                int(getattr(self.config, "tmica_axis_start_step", 6000)),
+                int(getattr(self.config, "tmica_axis_ramp_steps", 2000)),
+            )
+            tmica_trend_weight = self._ramped_weight(
+                float(getattr(self.config, "lambda_tmica_depth_trend", 0.0)),
+                int(getattr(self.config, "tmica_axis_start_step", 6000)),
+                int(getattr(self.config, "tmica_axis_ramp_steps", 2000)),
+            )
+            tmica_over_weight = self._ramped_weight(
+                float(getattr(self.config, "lambda_tmica_overcorrection", 0.0)),
+                int(getattr(self.config, "tmica_axis_start_step", 6000)),
+                int(getattr(self.config, "tmica_axis_ramp_steps", 2000)),
+            )
+            if tmica_axis_weight > 0.0 or tmica_trend_weight > 0.0 or tmica_over_weight > 0.0:
+                if bool(getattr(self.config, "tmica_axis_gradient_projection", True)):
+                    register_tmica_axis_gradient_hook(tmica_j_source, tmica_state.water_axis)
+                tmica_losses = tmica_axis_losses(
+                    state=tmica_state,
+                    positive_margin=float(getattr(self.config, "tmica_positive_water_margin", 0.05)),
+                    negative_margin=float(getattr(self.config, "tmica_negative_overcorrection_margin", 0.15)),
+                    trend_margin_step=float(getattr(self.config, "tmica_trend_margin_step", 0.03)),
+                )
+                if tmica_axis_weight > 0.0:
+                    loss_dict["tmica_far_axis_loss"] = tmica_axis_weight * tmica_losses["far_axis"]
+                if tmica_trend_weight > 0.0:
+                    loss_dict["tmica_depth_trend_loss"] = tmica_trend_weight * tmica_losses["trend"]
+                if tmica_over_weight > 0.0:
+                    loss_dict["tmica_overcorrection_loss"] = tmica_over_weight * tmica_losses["overcorrection"]
+                if metrics_dict is not None:
+                    metrics_dict["tmica_far_axis_weight"] = torch.tensor(tmica_axis_weight, device=self.device)
+                    metrics_dict["tmica_depth_trend_weight"] = torch.tensor(tmica_trend_weight, device=self.device)
+                    metrics_dict["tmica_overcorrection_weight"] = torch.tensor(tmica_over_weight, device=self.device)
+
+        if tacmd_active and tacmd_tail_evidence is not None:
             tacmd_a_source = outputs.get("b_inf", outputs["medium_rgb"])
             tacmd_cal_start = int(getattr(self.config, "tacmd_calibration_start", 1500))
             tacmd_cal_ramp = int(getattr(self.config, "tacmd_calibration_ramp", 2500))
@@ -3975,6 +4175,15 @@ class WaterSplattingModel(Model):
             images_dict["J_proxy_abs_diff_from_renderer_clear"] = outputs[
                 "J_proxy_abs_diff_from_renderer_clear"
             ].clamp(0.0, 1.0)
+        if "tmica_support" in outputs:
+            images_dict["tmica_support"] = outputs["tmica_support"].expand_as(outputs["rgb"])
+            images_dict["tmica_near_support"] = outputs["tmica_near_support"].expand_as(outputs["rgb"])
+            images_dict["tmica_q_object"] = outputs["tmica_q_object"].expand_as(outputs["rgb"])
+            b_j = outputs["tmica_b_j"]
+            b_min = b_j.detach().amin()
+            b_max = b_j.detach().amax()
+            b_vis = ((b_j - b_min) / (b_max - b_min).clamp_min(1e-6)).clamp(0.0, 1.0)
+            images_dict["tmica_b_j_norm"] = b_vis.expand_as(outputs["rgb"])
         if "background_region_mask" in outputs:
             images_dict["background_region_mask"] = outputs["background_region_mask"].expand_as(outputs["rgb"])
         if "densification_region_weight" in outputs:

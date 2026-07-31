@@ -30,11 +30,19 @@ from .tacmd import (
     counterfactual_chroma_loss,
     tail_anchor_losses,
 )
+from .tmica import (
+    TmicaState,
+    build_tmica_state,
+    register_tmica_axis_gradient_hook,
+    tmica_axis_losses,
+    tmica_tail_lite_loss,
+)
 
 __all__ = [
     "MediumExplainabilitySupport",
     "TacmdBsState",
     "TacmdTailEvidence",
+    "TmicaState",
     "accumulation_clearance_amplifier",
     "bs_band_loss",
     "bs_convergence_losses",
@@ -57,5 +65,9 @@ __all__ = [
     "rgb_luma_budget_loss",
     "support_coverage_stats",
     "tail_anchor_losses",
+    "build_tmica_state",
+    "register_tmica_axis_gradient_hook",
+    "tmica_axis_losses",
+    "tmica_tail_lite_loss",
     "weighted_rgb_l1",
 ]
