@@ -117,6 +117,14 @@ def _compare(main: Dict[str, Any], tbap: Dict[str, Any]) -> Dict[str, Any]:
     }
     for name, row in main["depth_bins"].items():
         tb = tbap["depth_bins"][name]
+        base_rgb = torch.tensor([row["dc_abs_r"], row["dc_abs_g"], row["dc_abs_b"]], dtype=torch.float32)
+        new_rgb = torch.tensor([tb["dc_abs_r"], tb["dc_abs_g"], tb["dc_abs_b"]], dtype=torch.float32)
+        if base_rgb.mean() > 0 and new_rgb.mean() > 0:
+            base_shape = base_rgb / base_rgb.mean().clamp_min(1e-20)
+            new_shape = new_rgb / new_rgb.mean().clamp_min(1e-20)
+            channel_ratio_change = torch.max(torch.abs(new_shape / base_shape.clamp_min(1e-20) - 1.0)).item()
+        else:
+            channel_ratio_change = 0.0
         out["depth_bins"][name] = {
             "dc_abs_r_ratio": _ratio(tb["dc_abs_r"], row["dc_abs_r"]),
             "dc_abs_g_ratio": _ratio(tb["dc_abs_g"], row["dc_abs_g"]),
@@ -124,6 +132,7 @@ def _compare(main: Dict[str, Any], tbap: Dict[str, Any]) -> Dict[str, Any]:
             "dc_abs_mean_ratio": _ratio(tb["dc_abs_mean"], row["dc_abs_mean"]),
             "dc_norm_mean_ratio": _ratio(tb["dc_norm_mean"], row["dc_norm_mean"]),
             "rest_norm_mean_ratio": _ratio(tb["rest_norm_mean"], row["rest_norm_mean"]),
+            "dc_channel_ratio_change_max": float(channel_ratio_change),
         }
     return out
 
@@ -153,6 +162,7 @@ def _pixel_support_summary(
     depth = outputs["depth"].detach().squeeze(-1)
     support_s = support.detach().squeeze(-1)
     transmission = diag["transmission"].detach()
+    conditioning_signal = diag.get("conditioning_signal", transmission).detach()
     raw_weight = diag["raw_weight"].detach()
     normalized_weight = weights.detach()
 
@@ -172,6 +182,7 @@ def _pixel_support_summary(
             "support_mean": float(support_s[mask].float().mean().item()) if mask.any() else 0.0,
             "support_gt_0p25_fraction": float((support_s[mask] > 0.25).float().mean().item()) if mask.any() else 0.0,
             "transmission_mean_rgb": channel_means(transmission, mask),
+            "conditioning_signal_mean": channel_means(conditioning_signal, mask),
             "raw_weight_mean_rgb": channel_means(raw_weight, mask),
             "normalized_weight_mean_rgb": channel_means(normalized_weight, mask),
         }
@@ -185,6 +196,10 @@ def _configure_tbap(model: Any, args: argparse.Namespace, enabled: bool) -> None
     model.config.tbap_ramp_steps = 0
     model.config.tbap_gamma = float(args.gamma)
     model.config.tbap_max_weight = float(args.max_weight)
+    model.config.tbap_weight_mode = str(args.weight_mode)
+    model.config.tbap_support_mode = str(args.support_mode)
+    model.config.tbap_support_top_fraction = float(args.support_top_fraction)
+    model.config.tbap_depth_weight_strength = float(args.depth_weight_strength)
     model.config.tbap_transmission_floor = float(args.transmission_floor)
     model.config.tbap_transmission_info_temp = float(args.transmission_info_temp)
     model.config.tbap_object_accum_mid = float(args.object_accum_mid)
@@ -249,6 +264,47 @@ def _run_case(
     return result
 
 
+def _parse_indices(value: Optional[str]) -> Optional[List[int]]:
+    if value is None or value.strip() == "":
+        return None
+    return [int(part.strip()) for part in value.split(",") if part.strip() != ""]
+
+
+def _train_item(datamanager: Any, image_idx: int) -> Tuple[Any, Dict[str, torch.Tensor]]:
+    data = datamanager.cached_train[image_idx].copy()
+    if "image" in data and hasattr(data["image"], "to"):
+        data["image"] = data["image"].to(datamanager.device)
+    camera = datamanager.train_cameras[image_idx : image_idx + 1].to(datamanager.device)
+    if camera.metadata is None:
+        camera.metadata = {}
+    camera.metadata["cam_idx"] = image_idx
+    return camera, data
+
+
+def _selected_items(datamanager: Any, args: argparse.Namespace) -> List[Tuple[int, Any, Dict[str, torch.Tensor]]]:
+    explicit = _parse_indices(args.image_indices)
+    if args.split == "train":
+        total = len(datamanager.train_dataset)
+        if explicit is None:
+            start = int(args.image_index)
+            indices = list(range(start, min(total, start + int(args.max_images))))
+        else:
+            indices = explicit[: int(args.max_images)]
+        return [(idx, *_train_item(datamanager, idx)) for idx in indices if 0 <= idx < total]
+
+    rows: List[Tuple[int, Any, Dict[str, torch.Tensor]]] = []
+    keep = set(explicit) if explicit is not None else None
+    for image_idx, (camera, batch) in enumerate(datamanager.fixed_indices_eval_dataloader):
+        if keep is None and image_idx < args.image_index:
+            continue
+        if keep is not None and image_idx not in keep:
+            continue
+        rows.append((image_idx, camera, batch))
+        if len(rows) >= args.max_images:
+            break
+    return rows
+
+
 def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
     def update_config(config: Any) -> Any:
         if args.load_step is not None:
@@ -264,15 +320,15 @@ def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
         model.step = int(step)
 
     rows: List[Dict[str, Any]] = []
-    for image_idx, (camera, batch) in enumerate(pipeline.datamanager.fixed_indices_eval_dataloader):
-        if image_idx < args.image_index:
-            continue
+    selected = _selected_items(pipeline.datamanager, args)
+    for image_idx, camera, batch in selected:
         main = _run_case(model, camera, batch, args, enabled=False, loss_mode="main")
         tbap_only = _run_case(model, camera, batch, args, enabled=True, loss_mode="tbap_only")
         tbap = _run_case(model, camera, batch, args, enabled=True, loss_mode="main_plus_tbap")
         rows.append(
             {
                 "image_index": image_idx,
+                "split": args.split,
                 "main": main,
                 "tbap_only": tbap_only,
                 "main_plus_tbap": tbap,
@@ -280,8 +336,6 @@ def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
                 "ratio": _compare(main["gradients"], tbap["gradients"]),
             }
         )
-        if len(rows) >= args.max_images:
-            break
 
     repo = Path(__file__).resolve().parents[2]
     result = {
@@ -291,10 +345,16 @@ def diagnose(args: argparse.Namespace) -> Dict[str, Any]:
         "checkpoint": str(checkpoint_path),
         "step": int(step),
         "step_override": args.step_override,
+        "split": args.split,
+        "image_indices": [row["image_index"] for row in rows],
         "git_commit": _git_commit(repo),
         "lambda_tbap": args.lambda_tbap,
         "gamma": args.gamma,
         "max_weight": args.max_weight,
+        "weight_mode": args.weight_mode,
+        "support_mode": args.support_mode,
+        "support_top_fraction": args.support_top_fraction,
+        "depth_weight_strength": args.depth_weight_strength,
         "transmission_floor": args.transmission_floor,
         "rows": rows,
     }
@@ -311,11 +371,22 @@ def main() -> None:
     parser.add_argument("--scene-name", type=str, default="unknown")
     parser.add_argument("--load-step", type=int, default=None)
     parser.add_argument("--step-override", type=int, default=None)
+    parser.add_argument("--split", type=str, choices=("train", "eval"), default="eval")
     parser.add_argument("--image-index", type=int, default=0)
+    parser.add_argument("--image-indices", type=str, default=None)
     parser.add_argument("--max-images", type=int, default=1)
     parser.add_argument("--lambda-tbap", type=float, default=0.05)
     parser.add_argument("--gamma", type=float, default=0.5)
     parser.add_argument("--max-weight", type=float, default=3.0)
+    parser.add_argument(
+        "--weight-mode",
+        type=str,
+        choices=("channel_transmission", "depth", "scalar_transmission", "median_transmission", "luma_transmission"),
+        default="channel_transmission",
+    )
+    parser.add_argument("--support-mode", type=str, choices=("legacy", "object_far"), default="legacy")
+    parser.add_argument("--support-top-fraction", type=float, default=0.0)
+    parser.add_argument("--depth-weight-strength", type=float, default=1.0)
     parser.add_argument("--transmission-floor", type=float, default=0.08)
     parser.add_argument("--transmission-info-temp", type=float, default=0.04)
     parser.add_argument("--object-accum-mid", type=float, default=0.35)
@@ -342,6 +413,9 @@ def main() -> None:
                 "farthest_r_ratio": row["ratio"]["depth_bins"]["q75_100_farthest"]["dc_abs_r_ratio"],
                 "farthest_g_ratio": row["ratio"]["depth_bins"]["q75_100_farthest"]["dc_abs_g_ratio"],
                 "farthest_b_ratio": row["ratio"]["depth_bins"]["q75_100_farthest"]["dc_abs_b_ratio"],
+                "farthest_channel_ratio_change": row["ratio"]["depth_bins"]["q75_100_farthest"][
+                    "dc_channel_ratio_change_max"
+                ],
                 "support_mean": row["main_plus_tbap"]["support_diag"].get("support", {}).get("mean", 0.0),
             }
         )

@@ -303,6 +303,20 @@ class WaterSplattingModelConfig(ModelConfig):
     """Partial inverse-transmission exponent used by TBAP."""
     tbap_max_weight: float = 3.0
     """Maximum normalized per-channel TBAP transmission multiplier before support normalization."""
+    tbap_weight_mode: Literal[
+        "channel_transmission",
+        "depth",
+        "scalar_transmission",
+        "median_transmission",
+        "luma_transmission",
+    ] = "channel_transmission"
+    """TBAP weighting source. Scalar modes share the same multiplier across RGB channels."""
+    tbap_support_mode: Literal["legacy", "object_far"] = "legacy"
+    """TBAP support construction. legacy preserves the first per-channel TBAP audit."""
+    tbap_support_top_fraction: float = 0.0
+    """If >0, keep only the top support fraction per image for TBAP."""
+    tbap_depth_weight_strength: float = 1.0
+    """Depth-mode scalar weight strength before clamping to tbap_max_weight."""
     tbap_transmission_floor: float = 0.08
     """Transmission floor used for stable TBAP weighting and information support."""
     tbap_transmission_info_temp: float = 0.04
@@ -2174,10 +2188,62 @@ class WaterSplattingModel(Model):
             / max(float(getattr(self.config, "tbap_transmission_info_temp", 0.04)), 1e-6)
         ).clamp(0.0, 1.0)
 
-        support = (q_object * q_concentration * q_far * q_info).detach().clamp(0.0, 1.0)
+        support_mode = str(getattr(self.config, "tbap_support_mode", "legacy"))
+        if support_mode == "legacy":
+            support = q_object * q_concentration * q_far * q_info
+        elif support_mode == "object_far":
+            support = q_object * q_far
+        else:
+            raise ValueError(f"Unknown TBAP support mode: {support_mode}")
+        support = support.detach().clamp(0.0, 1.0)
+
+        top_fraction = float(getattr(self.config, "tbap_support_top_fraction", 0.0))
+        if 0.0 < top_fraction < 1.0:
+            flat_support = support.reshape(-1)
+            k = max(1, min(flat_support.numel(), int(round(flat_support.numel() * top_fraction))))
+            top_idx = torch.topk(flat_support.float(), k=k, largest=True, sorted=False).indices
+            top_mask = torch.zeros_like(flat_support, dtype=support.dtype)
+            top_mask.scatter_(0, top_idx, 1.0)
+            support = support * top_mask.reshape_as(support)
+
         gamma = max(float(getattr(self.config, "tbap_gamma", 0.5)), 0.0)
         max_weight = max(float(getattr(self.config, "tbap_max_weight", 3.0)), 1.0)
-        raw_weight = torch.pow(transmission.clamp_min(transmission_floor) + 1e-6, -gamma).clamp(1.0, max_weight)
+        weight_mode = str(getattr(self.config, "tbap_weight_mode", "channel_transmission"))
+        if weight_mode == "channel_transmission":
+            conditioning_signal = transmission
+            raw_weight = torch.pow(conditioning_signal.clamp_min(transmission_floor) + 1e-6, -gamma).clamp(
+                1.0, max_weight
+            )
+        elif weight_mode == "scalar_transmission":
+            conditioning_signal = torch.exp(-(medium_attn.mean(dim=-1, keepdim=True) * depth).clamp_min(0.0)).clamp(
+                0.0, 1.0
+            )
+            raw_weight = torch.pow(conditioning_signal.clamp_min(transmission_floor) + 1e-6, -gamma).clamp(
+                1.0, max_weight
+            ).expand_as(transmission)
+        elif weight_mode == "median_transmission":
+            conditioning_signal = torch.median(transmission, dim=-1, keepdim=True).values
+            raw_weight = torch.pow(conditioning_signal.clamp_min(transmission_floor) + 1e-6, -gamma).clamp(
+                1.0, max_weight
+            ).expand_as(transmission)
+        elif weight_mode == "luma_transmission":
+            rgb_object = outputs["rgb_object"].detach()
+            clear = outputs.get("J_proxy_raw", outputs.get("J_gaussian_raw", outputs["rgb_clear"])).detach()
+            object_luma = (
+                0.2126 * rgb_object[..., 0:1] + 0.7152 * rgb_object[..., 1:2] + 0.0722 * rgb_object[..., 2:3]
+            ).clamp_min(0.0)
+            clear_luma = (
+                0.2126 * clear[..., 0:1] + 0.7152 * clear[..., 1:2] + 0.0722 * clear[..., 2:3]
+            ).clamp_min(1e-6)
+            conditioning_signal = (object_luma / clear_luma).clamp(transmission_floor, 1.0)
+            raw_weight = torch.pow(conditioning_signal + 1e-6, -gamma).clamp(1.0, max_weight).expand_as(transmission)
+        elif weight_mode == "depth":
+            strength = max(float(getattr(self.config, "tbap_depth_weight_strength", 1.0)), 0.0)
+            conditioning_signal = q_far.detach()
+            raw_scalar = (1.0 + strength * conditioning_signal).clamp(1.0, max_weight)
+            raw_weight = raw_scalar.expand_as(transmission)
+        else:
+            raise ValueError(f"Unknown TBAP weight mode: {weight_mode}")
         support_sum = support.sum().clamp_min(1e-6)
         support_mean_weight = (support * raw_weight).sum(dim=(0, 1), keepdim=True) / support_sum
         normalized_weight = (raw_weight / support_mean_weight.clamp_min(1e-6)).detach()
@@ -2188,6 +2254,7 @@ class WaterSplattingModel(Model):
             "q_far": q_far.detach(),
             "q_info": q_info.detach(),
             "transmission": transmission.detach(),
+            "conditioning_signal": conditioning_signal.detach(),
             "raw_weight": raw_weight.detach(),
             "normalized_weight": normalized_weight,
         }
