@@ -42,6 +42,15 @@ from water_splatting.attribution import (
     support_coverage_stats,
     weighted_rgb_l1,
 )
+from water_splatting.appearance import (
+    GIVAREvidence,
+    build_givar_dc_aux_colors,
+    build_givar_detail_residual,
+    build_givar_gaussian_evidence,
+    build_givar_reliability_map,
+    compute_givar_dc_gate,
+    givar_highpass_charbonnier_loss,
+)
 from water_splatting.cleanup import build_cleanup_candidate_mask, format_cleanup_stats, sample_pixel_map_at_gaussians
 from water_splatting.fields import (
     DirectionConditionedMediumField,
@@ -610,6 +619,50 @@ class WaterSplattingModelConfig(ModelConfig):
     """Maximum MCGR extra candidates as a ratio of base high-gradient candidates."""
     mcgr_max_extra_fraction_per_refine: float = 0.001
     """Maximum MCGR extra candidates as a fraction of current Gaussian count per refinement."""
+    givar_enabled: bool = False
+    """Enable GIVAR Gaussian-ID view-consistent appearance refinement."""
+    givar_diagnostic_only: bool = True
+    """Collect and log GIVAR appearance-consistency evidence without adding the auxiliary loss."""
+    givar_dc_enabled: bool = True
+    """Allow GIVAR auxiliary loss gradients to gated Gaussian DC features."""
+    givar_sh_enabled: bool = False
+    """Reserved for a future SH-consensus branch; V0 keeps SH detached."""
+    givar_start_step: int = 3000
+    """First step where GIVAR auxiliary loss may become active."""
+    givar_ramp_steps: int = 1000
+    """Linear ramp length for GIVAR auxiliary loss."""
+    givar_stop_step: int = 15000
+    """Step where GIVAR auxiliary loss stops."""
+    lambda_givar: float = 0.01
+    """Weight for GIVAR high-frequency underwater RGB auxiliary loss."""
+    givar_highpass_weight: float = 0.35
+    """High-pass residual weight in detached GIVAR evidence maps."""
+    givar_charbonnier_epsilon: float = 1e-3
+    """Charbonnier epsilon for GIVAR high-pass auxiliary loss."""
+    givar_min_view_count: int = 4
+    """Minimum approximate distinct-view support for a GIVAR DC gate."""
+    givar_dc_coherence_threshold: float = 0.55
+    """Minimum multi-view DC gradient direction coherence for GIVAR."""
+    givar_sh_coherence_threshold: float = 0.50
+    """Reserved SH coherence threshold for a future GIVAR branch."""
+    givar_min_view_spread: float = 0.02
+    """Minimum view-direction spread for GIVAR gate eligibility."""
+    givar_gradient_magnitude_quantile: float = 0.75
+    """Gradient-magnitude quantile among coherent Gaussians for GIVAR gate eligibility."""
+    givar_accumulation_mid: float = 0.40
+    """Accumulation midpoint for GIVAR pixel reliability."""
+    givar_accumulation_temp: float = 0.08
+    """Accumulation temperature for GIVAR pixel reliability."""
+    givar_depth_std_kappa: float = 0.25
+    """Depth concentration scale for GIVAR pixel reliability."""
+    givar_texture_mid: float = 0.10
+    """Texture-gradient midpoint for GIVAR pixel reliability."""
+    givar_texture_temp: float = 0.05
+    """Texture-gradient temperature for GIVAR pixel reliability."""
+    givar_stats_window: int = 500
+    """Number of steps in the GIVAR rolling diagnostic window before reset."""
+    givar_log_path: Optional[str] = None
+    """Optional JSONL path for GIVAR evidence, gate, and loss diagnostics."""
     clear_proxy_enabled: bool = False
     """Enable an auxiliary zero-medium black-background clear proxy render."""
     clear_proxy_appearance_only: bool = False
@@ -866,6 +919,38 @@ class WaterSplattingModel(Model):
             torch.zeros(num_points, dtype=torch.float32, device=means.device),
             persistent=True,
         )
+        self.register_buffer(
+            "givar_dc_direction_sum",
+            torch.zeros(num_points, 3, dtype=torch.float32, device=means.device),
+            persistent=True,
+        )
+        self.register_buffer(
+            "givar_dc_weight_sum",
+            torch.zeros(num_points, dtype=torch.float32, device=means.device),
+            persistent=True,
+        )
+        self.register_buffer(
+            "givar_dc_magnitude_sum",
+            torch.zeros(num_points, dtype=torch.float32, device=means.device),
+            persistent=True,
+        )
+        self.register_buffer(
+            "givar_detail_sum",
+            torch.zeros(num_points, dtype=torch.float32, device=means.device),
+            persistent=True,
+        )
+        self.register_buffer(
+            "givar_reliability_sum",
+            torch.zeros(num_points, dtype=torch.float32, device=means.device),
+            persistent=True,
+        )
+        self.register_buffer(
+            "givar_view_direction_sum",
+            torch.zeros(num_points, 3, dtype=torch.float32, device=means.device),
+            persistent=True,
+        )
+        self.register_buffer("givar_view_count", torch.zeros(num_points, dtype=torch.float32, device=means.device), persistent=True)
+        self.register_buffer("givar_last_camera_id", torch.full((num_points,), -1, dtype=torch.long, device=means.device), persistent=True)
 
         # metrics
         from torchmetrics.image import PeakSignalNoiseRatio
@@ -911,6 +996,13 @@ class WaterSplattingModel(Model):
         self._mcgr_last_refinement_stats: Optional[Dict[str, object]] = None
         self._warned_mcgr_missing_correspondence_dir = False
         self._warned_mcgr_shape_reset = False
+        self._givar_current_evidence: Optional[GIVAREvidence] = None
+        self._givar_current_camera_id: Optional[int] = None
+        self._givar_last_stats: Optional[Dict[str, object]] = None
+        self._givar_last_loss_stats: Optional[Dict[str, float]] = None
+        self._givar_window_start_step = 0
+        self._warned_givar_shape_reset = False
+        self._warned_givar_sh = False
 
         self.crop_box: Optional[OrientedBox] = None
         if self.config.background_color == "random":
@@ -992,11 +1084,30 @@ class WaterSplattingModel(Model):
             "mvgar_view_count": torch.zeros(newp, dtype=torch.float32),
             "mvgar_last_camera_id": torch.full((newp,), -1, dtype=torch.long),
         }
-        for key, default in mvgar_defaults.items():
-            if key not in dict or tuple(dict[key].shape) != (newp,):
+        mcgr_defaults = {
+            "mcgr_weight_sum": torch.zeros(newp, dtype=torch.float32),
+            "mcgr_persistent_sum": torch.zeros(newp, dtype=torch.float32),
+            "mcgr_view_count": torch.zeros(newp, dtype=torch.float32),
+            "mcgr_last_camera_id": torch.full((newp,), -1, dtype=torch.long),
+            "mcgr_grad_direction_sum": torch.zeros(newp, 3, dtype=torch.float32),
+            "mcgr_grad_weight_sum": torch.zeros(newp, dtype=torch.float32),
+        }
+        givar_defaults = {
+            "givar_dc_direction_sum": torch.zeros(newp, 3, dtype=torch.float32),
+            "givar_dc_weight_sum": torch.zeros(newp, dtype=torch.float32),
+            "givar_dc_magnitude_sum": torch.zeros(newp, dtype=torch.float32),
+            "givar_detail_sum": torch.zeros(newp, dtype=torch.float32),
+            "givar_reliability_sum": torch.zeros(newp, dtype=torch.float32),
+            "givar_view_direction_sum": torch.zeros(newp, 3, dtype=torch.float32),
+            "givar_view_count": torch.zeros(newp, dtype=torch.float32),
+            "givar_last_camera_id": torch.full((newp,), -1, dtype=torch.long),
+        }
+        per_gaussian_defaults = {**mvgar_defaults, **mcgr_defaults, **givar_defaults}
+        for key, default in per_gaussian_defaults.items():
+            if key not in dict or tuple(dict[key].shape) != tuple(default.shape):
                 dict[key] = default
             buffer = getattr(self, key, None)
-            if buffer is not None and tuple(buffer.shape) != (newp,):
+            if buffer is not None and tuple(buffer.shape) != tuple(default.shape):
                 buffer.data = default.to(device=self.device, dtype=buffer.dtype)
         for name, param in self.gauss_params.items():
             old_shape = param.shape
@@ -1152,6 +1263,8 @@ class WaterSplattingModel(Model):
             )
             self._accumulate_cleanup_evidence(visible_mask)
             self._accumulate_mcgr_gradient_coherence(visible_mask)
+            self._accumulate_givar_gradient_coherence(visible_mask)
+            self._maybe_log_and_reset_givar_window()
 
     def set_crop(self, crop_box: Optional[OrientedBox]):
         self.crop_box = crop_box
@@ -1259,6 +1372,7 @@ class WaterSplattingModel(Model):
                 self._sync_background_candidate_mask_for_densification(splits, dups, nsamps)
                 self._sync_mvgar_buffers_for_densification(splits, dups, nsamps)
                 self._sync_mcgr_buffers_for_densification(splits, dups, nsamps)
+                self._sync_givar_buffers_for_densification(splits, dups, nsamps)
                 if self._mvgar_requested():
                     mvgar_payload.update(
                         {
@@ -1397,6 +1511,7 @@ class WaterSplattingModel(Model):
         self._sync_background_candidate_mask_for_cull(culls)
         self._sync_mvgar_buffers_for_cull(culls)
         self._sync_mcgr_buffers_for_cull(culls)
+        self._sync_givar_buffers_for_cull(culls)
 
         CONSOLE.log(
             f"Culled {n_bef - self.num_points} gaussians "
@@ -1912,6 +2027,229 @@ class WaterSplattingModel(Model):
                 f.write(json.dumps(payload) + "\n")
         except Exception as exc:
             CONSOLE.log(f"[yellow]Failed to write MCGR log: {exc}[/yellow]")
+
+    def _givar_requested(self) -> bool:
+        return bool(getattr(self.config, "givar_enabled", False))
+
+    def _givar_in_window(self) -> bool:
+        start = int(getattr(self.config, "givar_start_step", 3000))
+        stop = int(getattr(self.config, "givar_stop_step", 15000))
+        return self.step >= start and (stop <= 0 or self.step < stop)
+
+    def _givar_loss_weight(self) -> float:
+        if not self._givar_requested():
+            return 0.0
+        if bool(getattr(self.config, "givar_diagnostic_only", True)):
+            return 0.0
+        if not self._givar_in_window():
+            return 0.0
+        return self._ramped_weight(
+            float(getattr(self.config, "lambda_givar", 0.01)),
+            int(getattr(self.config, "givar_start_step", 3000)),
+            int(getattr(self.config, "givar_ramp_steps", 1000)),
+        )
+
+    def _ensure_givar_buffers(self, *, reset_on_mismatch: bool = True) -> bool:
+        n = int(self.num_points)
+        required = [
+            "givar_dc_direction_sum",
+            "givar_dc_weight_sum",
+            "givar_dc_magnitude_sum",
+            "givar_detail_sum",
+            "givar_reliability_sum",
+            "givar_view_direction_sum",
+            "givar_view_count",
+            "givar_last_camera_id",
+        ]
+        ok = all(hasattr(self, name) and getattr(self, name).shape[0] == n for name in required)
+        if ok:
+            return True
+        if not reset_on_mismatch:
+            return False
+        if not self._warned_givar_shape_reset:
+            CONSOLE.log("[yellow]GIVAR buffer shape mismatch; resetting detached appearance buffers.[/yellow]")
+            self._warned_givar_shape_reset = True
+        device = self.device
+        self.givar_dc_direction_sum = torch.zeros(n, 3, dtype=torch.float32, device=device)
+        self.givar_dc_weight_sum = torch.zeros(n, dtype=torch.float32, device=device)
+        self.givar_dc_magnitude_sum = torch.zeros(n, dtype=torch.float32, device=device)
+        self.givar_detail_sum = torch.zeros(n, dtype=torch.float32, device=device)
+        self.givar_reliability_sum = torch.zeros(n, dtype=torch.float32, device=device)
+        self.givar_view_direction_sum = torch.zeros(n, 3, dtype=torch.float32, device=device)
+        self.givar_view_count = torch.zeros(n, dtype=torch.float32, device=device)
+        self.givar_last_camera_id = torch.full((n,), -1, dtype=torch.long, device=device)
+        return True
+
+    def _reset_givar_accumulators(self) -> None:
+        self._ensure_givar_buffers(reset_on_mismatch=True)
+        self.givar_dc_direction_sum.zero_()
+        self.givar_dc_weight_sum.zero_()
+        self.givar_dc_magnitude_sum.zero_()
+        self.givar_detail_sum.zero_()
+        self.givar_reliability_sum.zero_()
+        self.givar_view_direction_sum.zero_()
+        self.givar_view_count.zero_()
+        self.givar_last_camera_id.fill_(-1)
+        self._givar_window_start_step = int(self.step)
+
+    def _sync_givar_buffers_for_densification(
+        self,
+        splits: torch.Tensor,
+        dups: torch.Tensor,
+        nsamps: int,
+    ) -> None:
+        splits = splits.reshape(-1).to(device=self.device)
+        dups = dups.reshape(-1).to(device=self.device)
+        if (
+            not hasattr(self, "givar_dc_weight_sum")
+            or self.givar_dc_weight_sum.numel() != splits.numel()
+            or self.givar_dc_weight_sum.numel() != dups.numel()
+        ):
+            self._ensure_givar_buffers(reset_on_mismatch=True)
+            return
+        extra = int(nsamps * splits.sum().item() + dups.sum().item())
+        if extra <= 0:
+            return
+        float_zeros = torch.zeros(extra, dtype=torch.float32, device=self.device)
+        long_fill = torch.full((extra,), -1, dtype=torch.long, device=self.device)
+        vec_zeros = torch.zeros(extra, 3, dtype=torch.float32, device=self.device)
+        self.givar_dc_direction_sum = torch.cat([self.givar_dc_direction_sum, vec_zeros.clone()], dim=0)
+        self.givar_dc_weight_sum = torch.cat([self.givar_dc_weight_sum, float_zeros.clone()], dim=0)
+        self.givar_dc_magnitude_sum = torch.cat([self.givar_dc_magnitude_sum, float_zeros.clone()], dim=0)
+        self.givar_detail_sum = torch.cat([self.givar_detail_sum, float_zeros.clone()], dim=0)
+        self.givar_reliability_sum = torch.cat([self.givar_reliability_sum, float_zeros.clone()], dim=0)
+        self.givar_view_direction_sum = torch.cat([self.givar_view_direction_sum, vec_zeros.clone()], dim=0)
+        self.givar_view_count = torch.cat([self.givar_view_count, float_zeros.clone()], dim=0)
+        self.givar_last_camera_id = torch.cat([self.givar_last_camera_id, long_fill], dim=0)
+
+    def _sync_givar_buffers_for_cull(self, culls: torch.Tensor) -> None:
+        culls = culls.reshape(-1).to(device=self.device)
+        if not hasattr(self, "givar_dc_weight_sum") or self.givar_dc_weight_sum.numel() != culls.numel():
+            self._ensure_givar_buffers(reset_on_mismatch=True)
+            return
+        keep = ~culls
+        self.givar_dc_direction_sum = self.givar_dc_direction_sum[keep].detach()
+        self.givar_dc_weight_sum = self.givar_dc_weight_sum[keep].detach()
+        self.givar_dc_magnitude_sum = self.givar_dc_magnitude_sum[keep].detach()
+        self.givar_detail_sum = self.givar_detail_sum[keep].detach()
+        self.givar_reliability_sum = self.givar_reliability_sum[keep].detach()
+        self.givar_view_direction_sum = self.givar_view_direction_sum[keep].detach()
+        self.givar_view_count = self.givar_view_count[keep].detach()
+        self.givar_last_camera_id = self.givar_last_camera_id[keep].detach()
+
+    def _givar_gate_and_stats(self) -> Tuple[torch.Tensor, Dict[str, object]]:
+        if not self._ensure_givar_buffers(reset_on_mismatch=False):
+            return torch.zeros(int(self.num_points), dtype=torch.float32, device=self.device), {}
+        if bool(getattr(self.config, "givar_sh_enabled", False)) and not self._warned_givar_sh:
+            CONSOLE.log("[yellow]GIVAR V0 only implements DC consensus; SH branch remains detached.[/yellow]")
+            self._warned_givar_sh = True
+        gate, stats = compute_givar_dc_gate(
+            view_count=self.givar_view_count,
+            grad_direction_sum=self.givar_dc_direction_sum,
+            grad_weight_sum=self.givar_dc_weight_sum,
+            grad_magnitude_sum=self.givar_dc_magnitude_sum,
+            view_direction_sum=self.givar_view_direction_sum,
+            min_view_count=int(getattr(self.config, "givar_min_view_count", 4)),
+            coherence_threshold=float(getattr(self.config, "givar_dc_coherence_threshold", 0.55)),
+            min_view_spread=float(getattr(self.config, "givar_min_view_spread", 0.02)),
+            magnitude_quantile=float(getattr(self.config, "givar_gradient_magnitude_quantile", 0.75)),
+            dc_enabled=bool(getattr(self.config, "givar_dc_enabled", True)),
+        )
+        gw = self.givar_dc_weight_sum.float().clamp_min(1e-6)
+        supported = self.givar_view_count.float() > 0
+        stats.update(
+            {
+                "givar_window_start_step": int(self._givar_window_start_step),
+                "givar_window_step": int(self.step),
+                "givar_mean_detail": tensor_stats((self.givar_detail_sum.float() / gw)[supported]),
+                "givar_mean_reliability": tensor_stats((self.givar_reliability_sum.float() / gw)[supported]),
+            }
+        )
+        return gate, stats
+
+    def _write_givar_log(self, payload: Dict[str, object]) -> None:
+        log_path = getattr(self.config, "givar_log_path", None)
+        if not log_path:
+            return
+        try:
+            path = Path(log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf8") as f:
+                f.write(json.dumps(payload) + "\n")
+        except Exception as exc:
+            CONSOLE.log(f"[yellow]Failed to write GIVAR log: {exc}[/yellow]")
+
+    def _accumulate_givar_gradient_coherence(self, visible_mask: Optional[torch.Tensor] = None) -> None:
+        if not self._givar_requested() or self._givar_current_evidence is None:
+            return
+        evidence = self._givar_current_evidence
+        camera_id = self._givar_current_camera_id
+        if camera_id is None or evidence.weight.numel() != self.num_points:
+            self._ensure_givar_buffers(reset_on_mismatch=True)
+            return
+        grad = self.features_dc.grad
+        if grad is None or grad.shape[0] != self.num_points:
+            return
+        self._ensure_givar_buffers(reset_on_mismatch=True)
+        weight_raw = evidence.weight.detach().to(device=self.device, dtype=torch.float32).reshape(-1)
+        detail = evidence.detail.detach().to(device=self.device, dtype=torch.float32).reshape(-1)
+        reliability = evidence.reliability.detach().to(device=self.device, dtype=torch.float32).reshape(-1)
+        view_direction = evidence.view_direction.detach().to(device=self.device, dtype=torch.float32)
+        if visible_mask is None:
+            visible = torch.ones_like(weight_raw, dtype=torch.bool, device=self.device)
+        else:
+            if visible_mask.numel() != self.num_points:
+                self._ensure_givar_buffers(reset_on_mismatch=True)
+                return
+            visible = visible_mask.reshape(-1).to(device=self.device)
+        grad = grad.detach().to(device=self.device, dtype=torch.float32)
+        grad_norm = grad.norm(dim=-1)
+        keep = (
+            visible
+            & torch.isfinite(weight_raw)
+            & torch.isfinite(detail)
+            & torch.isfinite(reliability)
+            & torch.isfinite(grad_norm)
+            & (weight_raw > 0.0)
+            & (grad_norm > 1e-12)
+        )
+        if not bool(keep.any().item()):
+            return
+        last_camera = self.givar_last_camera_id.reshape(-1)
+        new_view = keep & (last_camera != int(camera_id))
+        if not bool(new_view.any().item()):
+            return
+        q95 = torch.quantile(grad_norm[keep].float(), 0.95).clamp_min(1e-12)
+        magnitude_gate = (grad_norm[new_view] / q95).clamp(0.0, 1.0)
+        w = (weight_raw[new_view] * magnitude_gate).clamp_min(0.0)
+        positive = w > 0.0
+        if not bool(positive.any().item()):
+            return
+        idx = torch.where(new_view)[0][positive]
+        w = w[positive]
+        direction = grad[idx] / grad_norm[idx, None].clamp_min(1e-12)
+        self.givar_dc_direction_sum[idx] += w[:, None] * direction
+        self.givar_dc_weight_sum[idx] += w
+        self.givar_dc_magnitude_sum[idx] += w * grad_norm[idx]
+        self.givar_detail_sum[idx] += w * detail[idx]
+        self.givar_reliability_sum[idx] += w * reliability[idx]
+        self.givar_view_direction_sum[idx] += view_direction[idx]
+        self.givar_view_count[idx] += 1.0
+        self.givar_last_camera_id[idx] = int(camera_id)
+
+    def _maybe_log_and_reset_givar_window(self) -> None:
+        if not self._givar_requested():
+            return
+        window = int(getattr(self.config, "givar_stats_window", 500))
+        if window <= 0 or self.step <= 0:
+            return
+        if (self.step - int(self._givar_window_start_step)) < window:
+            return
+        _gate, stats = self._givar_gate_and_stats()
+        stats = {"event": "window", "step": int(self.step), "total_gaussians": int(self.num_points), **stats}
+        self._givar_last_stats = stats
+        self._write_givar_log(stats)
+        self._reset_givar_accumulators()
 
     def _background_render_ramp_weight(self, weight: float) -> float:
         return self._ramped_weight(
@@ -2824,6 +3162,9 @@ class WaterSplattingModel(Model):
         if self._mcgr_requested() and self.training:
             self._mcgr_current_evidence = None
             self._mcgr_current_camera_id = camera_index
+        if self._givar_requested() and self.training:
+            self._givar_current_evidence = None
+            self._givar_current_camera_id = camera_index
         self.current_densification_region_weight = None
         self.current_densification_region_samples = None
         
@@ -3289,18 +3630,68 @@ class WaterSplattingModel(Model):
                 width=W,
                 step=self.step,
             )
+        givar_aux_render = None
+        givar_dc_gate = None
+        if self.training and self._givar_requested():
+            gate_full, gate_stats = self._givar_gate_and_stats()
+            self._givar_last_stats = {
+                "event": "gate",
+                "step": int(self.step),
+                "total_gaussians": int(self.num_points),
+                **gate_stats,
+            }
+            if crop_ids is not None:
+                givar_dc_gate = gate_full[crop_ids]
+            else:
+                givar_dc_gate = gate_full
+            givar_weight = self._givar_loss_weight()
+            if (
+                givar_weight > 0.0
+                and givar_dc_gate.numel() == rgbs.shape[0]
+                and bool((givar_dc_gate > 0).any().item())
+            ):
+                givar_aux_colors = build_givar_dc_aux_colors(
+                    full_rgb=rgbs,
+                    features_dc=features_dc_crop,
+                    dc_gate=givar_dc_gate,
+                    sh_degree=int(self.config.sh_degree),
+                )
+                givar_aux_render = self.underwater_rasterizer.rasterize(  # type: ignore
+                    xys=self.xys.detach(),
+                    xys_grad_abs=torch.zeros_like(self.xys),
+                    depths=depths.detach(),
+                    radii=self.radii.detach(),
+                    conics=conics.detach(),
+                    num_tiles_hit=num_tiles_hit,
+                    colors=givar_aux_colors,
+                    opacities=opacities.detach(),
+                    medium_rgb=medium_rgb.detach(),
+                    medium_bs=medium_bs.detach(),
+                    medium_attn=medium_attn.detach(),
+                    height=H,
+                    width=W,
+                    background=medium_rgb.detach(),
+                    step=self.step,
+                )
         tail_weight_last = render.final_transmittance * torch.exp(-medium_bs * render.last_depth)
         tail_medium_original = tail_weight_last * medium_rgb
         rgb_medium_finite = render.rgb_medium - tail_medium_original
         b_inf_mode = self._effective_b_inf_mode()
         b_inf = medium.b_inf
         rgb_tail = tail_medium_original
+        givar_aux_rgb = givar_aux_render.rgb if givar_aux_render is not None else None
         if b_inf_mode != "implicit":
             if b_inf is None:
                 raise RuntimeError(f"b_inf_mode='{b_inf_mode}' requires a B_inf output")
             rgb_tail = tail_weight_last * b_inf
             if not getattr(self.config, "infinite_water_enabled", False):
                 rgb = render.rgb_object + rgb_medium_finite + rgb_tail
+                if givar_aux_render is not None:
+                    aux_tail_weight_last = givar_aux_render.final_transmittance * torch.exp(
+                        -medium_bs.detach() * givar_aux_render.last_depth
+                    )
+                    aux_rgb_medium_finite = givar_aux_render.rgb_medium - aux_tail_weight_last * medium_rgb.detach()
+                    givar_aux_rgb = givar_aux_render.rgb_object + aux_rgb_medium_finite + aux_tail_weight_last * b_inf.detach()
         rgb_medium_total = rgb_medium_finite + rgb_tail
         hit_q_alpha = torch.sigmoid(
             (render.accumulation - self.config.infinite_water_hit_alpha_threshold)
@@ -3443,6 +3834,12 @@ class WaterSplattingModel(Model):
             outputs["main_render_opacities"] = opacities
             if capacity_control_scales is not None:
                 outputs["capacity_control_scales"] = capacity_control_scales
+        if self.training and self._givar_requested():
+            if givar_dc_gate is not None:
+                outputs["givar_dc_gate"] = givar_dc_gate.detach()
+            if givar_aux_rgb is not None:
+                outputs["givar_aux_pred_image"] = givar_aux_rgb
+            outputs["givar_camera_position"] = camera.camera_to_worlds[0, :3, 3].detach()
         if camera_index is not None:
             outputs["camera_index"] = torch.tensor(float(camera_index), device=self.device)
         if b_inf is not None:
@@ -3639,6 +4036,13 @@ class WaterSplattingModel(Model):
             ]:
                 if key in self._mcgr_last_refinement_stats:
                     metrics_dict[key] = torch.tensor(float(self._mcgr_last_refinement_stats[key]), device=self.device)
+        if self._givar_last_loss_stats is not None:
+            for key, value in self._givar_last_loss_stats.items():
+                metrics_dict[key] = torch.tensor(float(value), device=self.device)
+        if self._givar_last_stats is not None:
+            for key, value in self._givar_last_stats.items():
+                if isinstance(value, (int, float)):
+                    metrics_dict[key] = torch.tensor(float(value), device=self.device)
         return metrics_dict
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None) -> Dict[str, torch.Tensor]:
@@ -3796,6 +4200,84 @@ class WaterSplattingModel(Model):
                 ssim_metric=self.ssim,
             ),
         }
+
+        if self.training and self._givar_requested() and "camera_index" in outputs and "givar_camera_position" in outputs:
+            camera_index = int(outputs["camera_index"].detach().cpu().reshape(-1)[0].item())
+            detail_map = build_givar_detail_residual(
+                pred_img,
+                gt_img,
+                highpass_weight=float(getattr(self.config, "givar_highpass_weight", 0.35)),
+            )
+            reliability_map, reliability_components = build_givar_reliability_map(
+                gt_img=gt_img,
+                accumulation=outputs["accumulation"],
+                depth_std_relative=outputs["depth_std_relative"],
+                texture_mid=float(getattr(self.config, "givar_texture_mid", 0.10)),
+                texture_temp=float(getattr(self.config, "givar_texture_temp", 0.05)),
+                accumulation_mid=float(getattr(self.config, "givar_accumulation_mid", 0.40)),
+                accumulation_temp=float(getattr(self.config, "givar_accumulation_temp", 0.08)),
+                depth_std_kappa=float(getattr(self.config, "givar_depth_std_kappa", 0.25)),
+                image_mask=image_mask,
+            )
+            evidence = build_givar_gaussian_evidence(
+                detail_map=detail_map,
+                reliability_map=reliability_map,
+                texture_map=reliability_components["texture"],
+                xys=self.xys,
+                radii=self.radii,
+                means=self.means,
+                camera_position=outputs["givar_camera_position"],
+            )
+            self._givar_current_evidence = evidence
+            self._givar_current_camera_id = camera_index
+            support = evidence.weight > 0
+            givar_weight = self._givar_loss_weight()
+            raw_givar_loss = pred_img.new_tensor(0.0)
+            if givar_weight > 0.0 and "givar_aux_pred_image" in outputs:
+                aux_pred = outputs["givar_aux_pred_image"]
+                if image_mask is not None:
+                    aux_pred = aux_pred * image_mask
+                raw_givar_loss = givar_highpass_charbonnier_loss(
+                    pred_img=aux_pred,
+                    gt_img=gt_img,
+                    reliability_map=reliability_map,
+                    epsilon=float(getattr(self.config, "givar_charbonnier_epsilon", 1e-3)),
+                )
+                if raw_givar_loss.requires_grad:
+                    loss_dict["givar_loss"] = float(givar_weight) * raw_givar_loss
+            flat_detail = detail_map.detach().float().reshape(-1)
+            flat_rel = reliability_map.detach().float().reshape(-1)
+            gate = outputs.get("givar_dc_gate", None)
+            gate_count = int((gate > 0).sum().item()) if torch.is_tensor(gate) else 0
+            gate_fraction = float((gate > 0).float().mean().item()) if torch.is_tensor(gate) and gate.numel() else 0.0
+            loss_stats = {
+                "givar_weight": float(givar_weight),
+                "givar_loss_raw": float(raw_givar_loss.detach().item()),
+                "givar_current_detail_mean": float(flat_detail.mean().item()) if flat_detail.numel() else 0.0,
+                "givar_current_detail_p90": float(torch.quantile(flat_detail, 0.90).item()) if flat_detail.numel() else 0.0,
+                "givar_current_reliability_mean": float(flat_rel.mean().item()) if flat_rel.numel() else 0.0,
+                "givar_current_texture_mean": float(reliability_components["texture"].float().mean().item()),
+                "givar_evidence_weight_sum": float(evidence.weight.sum().item()),
+                "givar_evidence_gaussian_count": int(support.sum().item()),
+                "givar_evidence_gaussian_fraction": float(support.float().mean().item()) if support.numel() else 0.0,
+                "givar_gate_count": gate_count,
+                "givar_gate_fraction": gate_fraction,
+            }
+            self._givar_last_loss_stats = loss_stats
+            if self.step % 500 == 0:
+                payload: Dict[str, object] = {
+                    "event": "loss",
+                    "step": int(self.step),
+                    "camera_index": int(camera_index),
+                    "total_gaussians": int(self.num_points),
+                    **loss_stats,
+                }
+                if self._givar_last_stats is not None:
+                    payload.update({k: v for k, v in self._givar_last_stats.items() if k not in payload})
+                self._write_givar_log(payload)
+            if metrics_dict is not None:
+                for key, value in loss_stats.items():
+                    metrics_dict[key] = torch.tensor(float(value), device=self.device)
 
         if self.training and self._mcgr_requested() and "camera_index" in outputs:
             correspondence_dir = getattr(self.config, "mcgr_correspondence_dir", None)
