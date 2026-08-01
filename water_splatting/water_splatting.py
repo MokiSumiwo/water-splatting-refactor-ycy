@@ -31,28 +31,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from water_splatting.attribution import (
     accumulation_clearance_amplifier,
-    bs_band_loss,
-    bs_convergence_losses,
-    bs_state_stats,
-    build_bs_state,
-    build_counterfactual_bs,
     budgeted_capacity_loss,
     build_residual_gated_halo_support,
     build_route_capacity_support,
     build_training_routed_prediction,
     clear_proxy_chroma_loss,
     clear_proxy_luma_budget_loss,
-    combine_tail_anchor,
-    compute_tail_evidence,
-    counterfactual_chroma_loss,
     core_zero_capacity_loss,
-    build_tmica_state,
-    register_tmica_axis_gradient_hook,
     rgb_luma_budget_loss,
     support_coverage_stats,
-    tail_anchor_losses,
-    tmica_axis_losses,
-    tmica_tail_lite_loss,
     weighted_rgb_l1,
 )
 from water_splatting.cleanup import build_cleanup_candidate_mask, format_cleanup_stats, sample_pixel_map_at_gaussians
@@ -291,56 +278,6 @@ class WaterSplattingModelConfig(ModelConfig):
     """Maximum per-channel foreground reconstruction multiplier."""
     foreground_transmission_detach_weight: bool = True
     """Detach foreground transmission weights from the weighted reconstruction loss."""
-    tbap_enabled: bool = False
-    """Enable Transmission-Balanced Appearance Preconditioning."""
-    lambda_tbap: float = 0.0
-    """Weight for TBAP appearance-only auxiliary reconstruction."""
-    tbap_start_step: int = 10000
-    """First step where TBAP loss may ramp."""
-    tbap_ramp_steps: int = 0
-    """Ramp length for TBAP loss."""
-    tbap_gamma: float = 0.5
-    """Partial inverse-transmission exponent used by TBAP."""
-    tbap_max_weight: float = 3.0
-    """Maximum normalized per-channel TBAP transmission multiplier before support normalization."""
-    tbap_weight_mode: Literal[
-        "channel_transmission",
-        "depth",
-        "scalar_transmission",
-        "median_transmission",
-        "luma_transmission",
-    ] = "channel_transmission"
-    """TBAP weighting source. Scalar modes share the same multiplier across RGB channels."""
-    tbap_support_mode: Literal["legacy", "object_far"] = "legacy"
-    """TBAP support construction. legacy preserves the first per-channel TBAP audit."""
-    tbap_support_top_fraction: float = 0.0
-    """If >0, keep only the top support fraction per image for TBAP."""
-    tbap_depth_weight_strength: float = 1.0
-    """Depth-mode scalar weight strength before clamping to tbap_max_weight."""
-    tbap_transmission_floor: float = 0.08
-    """Transmission floor used for stable TBAP weighting and information support."""
-    tbap_transmission_info_temp: float = 0.04
-    """Temperature for TBAP information gate around the transmission floor."""
-    tbap_object_accum_mid: float = 0.35
-    """Accumulation midpoint for TBAP far-object support."""
-    tbap_object_accum_temp: float = 0.08
-    """Accumulation temperature for TBAP far-object support."""
-    tbap_object_concentration_kappa: float = 0.25
-    """Relative-depth concentration scale for TBAP object support."""
-    tbap_far_depth_mid: float = 0.60
-    """Normalized detached-depth midpoint for TBAP far support."""
-    tbap_far_depth_temp: float = 0.15
-    """Normalized detached-depth temperature for TBAP far support."""
-    tbap_depth_normalize_mode: Literal["max", "p95"] = "p95"
-    """Depth normalization mode for TBAP far support."""
-    tbap_smooth_l1_beta: float = 0.01
-    """Smooth-L1 beta for TBAP auxiliary loss."""
-    tbap_freeze_geometry: bool = False
-    """Freeze Gaussian means/scales/quats/opacities and disable densification/culling."""
-    tbap_freeze_medium: bool = False
-    """Freeze medium MLP and direction encoding during TBAP pilots."""
-    tbap_dc_only: bool = False
-    """Freeze features_rest so only Gaussian DC color receives optimization."""
     lambda_pseudo_depth: float = 0.0
     """Reserved pseudo-depth rank-consistency loss weight. Off by default."""
     lambda_medium_context_residual: float = 0.0
@@ -547,134 +484,6 @@ class WaterSplattingModelConfig(ModelConfig):
     """First step where object-radiance budget may ramp."""
     object_radiance_budget_ramp_steps: int = 1000
     """Ramp length for object-radiance budget."""
-    tacmd_enabled: bool = False
-    """Enable Tail-Anchored Counterfactual Medium Disentanglement losses."""
-    tacmd_tail_transmission_mid: float = 0.50
-    """Final-transmittance midpoint for detached tail evidence."""
-    tacmd_tail_transmission_temp: float = 0.10
-    """Final-transmittance temperature for detached tail evidence."""
-    tacmd_tail_accumulation_mid: float = 0.20
-    """Low-accumulation midpoint for detached tail evidence."""
-    tacmd_tail_accumulation_temp: float = 0.05
-    """Low-accumulation temperature for detached tail evidence."""
-    tacmd_tail_depth_mid: float = 0.75
-    """Normalized-depth midpoint for detached tail evidence."""
-    tacmd_tail_depth_temp: float = 0.15
-    """Normalized-depth temperature for detached tail evidence."""
-    tacmd_tail_gradient_scale: float = 0.05
-    """Image-gradient scale for low-texture tail evidence."""
-    tacmd_tail_confidence_low: float = 0.01
-    """Tail support coverage where view-level tail confidence starts."""
-    tacmd_tail_confidence_high: float = 0.05
-    """Tail support coverage where view-level tail confidence reaches one."""
-    tacmd_anchor_ema: float = 0.98
-    """EMA momentum for the non-learned scene tail-color anchor."""
-    tacmd_scene_anchor_fallback: float = 0.25
-    """Weak fallback weight from scene anchor when current view has little tail."""
-    tacmd_a_chroma_tolerance: float = 0.08
-    """Allowed per-pixel A/B_inf chroma deviation from the tail anchor."""
-    tacmd_bs_radius_near: float = 0.50
-    """Near-depth BS log-ratio tolerance radius."""
-    tacmd_bs_radius_far: float = 0.15
-    """Far-depth BS log-ratio tolerance radius."""
-    tacmd_bs_depth_mid: float = 0.60
-    """Depth midpoint for BS log-ratio tolerance tightening."""
-    tacmd_bs_depth_temp: float = 0.15
-    """Depth temperature for BS log-ratio tolerance tightening."""
-    tacmd_cf_projection_max: float = 0.25
-    """Maximum partial projection of BS spectrum in the counterfactual branch."""
-    tacmd_cf_render_every: int = 4
-    """Training interval for the expensive TACMD counterfactual render."""
-    tacmd_cf_blur_kernel: int = 31
-    """Low-pass kernel for counterfactual chroma loss."""
-    tacmd_cf_rgb_trust_region: float = 0.02
-    """RGB trust region that downweights unsafe counterfactual renders."""
-    tacmd_calibration_start: int = 1500
-    """First step where TACMD medium calibration losses may ramp."""
-    tacmd_calibration_ramp: int = 2500
-    """Ramp length for TACMD medium calibration losses."""
-    tacmd_counterfactual_start: int = 4000
-    """First step where TACMD counterfactual loss may ramp."""
-    tacmd_counterfactual_ramp: int = 3000
-    """Ramp length for TACMD counterfactual loss."""
-    lambda_tacmd_tail_mean: float = 0.0
-    """Weight for tail-region mean A/B_inf chroma anchoring."""
-    lambda_tacmd_tail_band: float = 0.0
-    """Weight for tail-region local A/B_inf chroma tolerance band."""
-    lambda_tacmd_bs_band: float = 0.0
-    """Weight for depth-adaptive BS log-ratio tolerance band."""
-    lambda_tacmd_bs_monotonic: float = 0.0
-    """Weight for finite BS chroma monotonic convergence toward tail color."""
-    lambda_tacmd_bs_terminal: float = 0.0
-    """Weight for finite BS terminal chroma alignment with tail color."""
-    lambda_tacmd_cf_chroma: float = 0.0
-    """Weight for TACMD counterfactual low-frequency chroma correction."""
-    tacmd_cf_luma_ratio: float = 0.10
-    """Relative luma weight inside the TACMD counterfactual loss."""
-    tmica_enabled: bool = False
-    """Enable Tail-Guided Medium-Invariant Clear Appearance losses."""
-    tmica_use_clear_proxy: bool = True
-    """Use differentiable appearance-only J_proxy_raw for TMICA training losses."""
-    tmica_axis_gradient_projection: bool = True
-    """Project TMICA clear-appearance gradients to the detached water-color axis."""
-    tmica_tail_quality_threshold: float = 0.20
-    """Minimum strict tail quality required for current-view tail anchoring."""
-    tmica_scene_anchor_fallback: float = 0.15
-    """Weak scene-anchor fallback when the current view tail quality is low."""
-    tmica_tail_coverage_mid: float = 0.015
-    """Tail support coverage midpoint for strict TMICA tail quality."""
-    tmica_tail_coverage_temp: float = 0.010
-    """Tail support coverage temperature for strict TMICA tail quality."""
-    tmica_tail_variance_tau: float = 0.15
-    """Color log-ratio variance scale for strict TMICA tail quality."""
-    tmica_tail_border_width: int = 16
-    """Pixel border width used to test whether tail evidence reaches image edges."""
-    tmica_tail_border_mid: float = 0.010
-    """Border tail-support midpoint for strict TMICA tail quality."""
-    tmica_tail_border_temp: float = 0.010
-    """Border tail-support temperature for strict TMICA tail quality."""
-    tmica_tail_ema_tau: float = 0.75
-    """Scene-anchor chroma consistency scale for strict TMICA tail quality."""
-    tmica_object_accum_mid: float = 0.35
-    """Accumulation midpoint for far-object TMICA support."""
-    tmica_object_accum_temp: float = 0.08
-    """Accumulation temperature for far-object TMICA support."""
-    tmica_object_concentration_kappa: float = 0.25
-    """Relative-depth concentration scale for far-object TMICA support."""
-    tmica_far_depth_mid: float = 0.60
-    """Normalized depth midpoint for far-object TMICA support."""
-    tmica_far_depth_temp: float = 0.15
-    """Normalized depth temperature for far-object TMICA support."""
-    tmica_near_depth_mid: float = 0.40
-    """Normalized depth midpoint for near-object reference support."""
-    tmica_near_depth_temp: float = 0.12
-    """Normalized depth temperature for near-object reference support."""
-    tmica_use_low_transmission: bool = True
-    """Modulate far-object support by detached low-transmission evidence."""
-    tmica_use_sensitivity: bool = True
-    """Modulate far-object support by detached medium sensitivity evidence."""
-    tmica_positive_water_margin: float = 0.05
-    """Allowed far-minus-near water-axis log-chroma projection before penalty."""
-    tmica_negative_overcorrection_margin: float = 0.15
-    """Allowed reverse-axis overcorrection margin."""
-    tmica_trend_margin_step: float = 0.03
-    """Per-depth-bin allowed increase in water-axis projection."""
-    tmica_tail_lite_start_step: int = 4000
-    """First step where strict tail-lite calibration may ramp."""
-    tmica_tail_lite_ramp_steps: int = 2000
-    """Ramp length for strict tail-lite calibration."""
-    tmica_axis_start_step: int = 6000
-    """First step where far J water-axis losses may ramp."""
-    tmica_axis_ramp_steps: int = 2000
-    """Ramp length for far J water-axis losses."""
-    lambda_tmica_tail_lite: float = 0.0
-    """Weight for strict tail-mean-only A/B_inf chroma calibration."""
-    lambda_tmica_far_axis: float = 0.0
-    """Weight for direct far-object J water-axis residual suppression."""
-    lambda_tmica_depth_trend: float = 0.0
-    """Weight for water-axis depth-trend suppression."""
-    lambda_tmica_overcorrection: float = 0.0
-    """Weight for reverse water-axis overcorrection protection."""
     background_densification_enabled: bool = False
     """Enable background region weighting for densification gradient accumulation."""
     background_densification_weight: float = 1.0
@@ -741,38 +550,6 @@ class WaterSplattingModelConfig(ModelConfig):
     """Require average Gaussian depth above gaussian_cleanup_depth_threshold."""
     gaussian_cleanup_require_ownership_gate: bool = True
     """Require M2 ownership support at the projected Gaussian center."""
-    mpdr_enabled: bool = False
-    """Enable Medium-Detached Persistent Detail Refinement candidates."""
-    mpdr_diagnostic_only: bool = False
-    """Collect and log MPDR evidence without changing densification candidates."""
-    mpdr_start_step: int = 500
-    """First step where MPDR may add detail-based refinement candidates."""
-    mpdr_stop_step: int = 10000
-    """Step where MPDR stops adding detail-based refinement candidates."""
-    mpdr_detail_score_weight: float = 0.25
-    """Weight of normalized detached detail EMA in the MPDR refinement score."""
-    mpdr_detail_ema_decay: float = 0.90
-    """EMA decay for per-Gaussian detached detail evidence."""
-    mpdr_highpass_weight: float = 0.35
-    """Weight on high-pass residual inside the detached MPDR detail map."""
-    mpdr_min_visibility_count: int = 4
-    """Minimum MPDR evidence samples before a Gaussian is eligible."""
-    mpdr_object_support_threshold: float = 0.20
-    """Minimum detached object-safe support EMA for MPDR eligibility."""
-    mpdr_detail_threshold_quantile: float = 0.75
-    """Quantile threshold over detail EMA for MPDR eligibility."""
-    mpdr_top_fraction: float = 0.05
-    """Maximum fraction of all Gaussians considered by MPDR score."""
-    mpdr_max_extra_fraction_per_refine: float = 0.02
-    """Maximum extra MPDR-only candidates added per refinement event."""
-    mpdr_obj_accum_mid: float = 0.35
-    """Accumulation midpoint for MPDR object-safe support."""
-    mpdr_obj_accum_temp: float = 0.08
-    """Accumulation temperature for MPDR object-safe support."""
-    mpdr_depth_concentration_kappa: float = 0.25
-    """Depth-concentration scale for MPDR object-safe support."""
-    mpdr_log_path: Optional[str] = None
-    """Optional JSONL path for MPDR refinement diagnostics."""
     constrained_appearance_enabled: bool = False
     """M4: enable constrained view-dependent appearance losses/scheduling."""
     appearance_sh_delay_enabled: bool = False
@@ -947,16 +724,6 @@ class WaterSplattingModel(Model):
             torch.arange(num_points, dtype=torch.long, device=means.device),
             persistent=True,
         )
-        self.register_buffer(
-            "tacmd_scene_anchor",
-            torch.tensor([1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0], dtype=torch.float32, device=means.device),
-            persistent=True,
-        )
-        self.register_buffer(
-            "tacmd_scene_anchor_weight",
-            torch.tensor(0.0, dtype=torch.float32, device=means.device),
-            persistent=True,
-        )
 
         # metrics
         from torchmetrics.image import PeakSignalNoiseRatio
@@ -978,15 +745,7 @@ class WaterSplattingModel(Model):
         self.current_densification_region_samples = None
         self.current_densification_accumulation_map = None
         self.last_densification_region_stats = None
-        self.mpdr_detail_ema = None
-        self.mpdr_obj_ema = None
-        self.mpdr_visibility_count = None
-        self.mpdr_current_detail = None
-        self.mpdr_current_obj = None
-        self.last_mpdr_stats = None
-        self._mpdr_last_warning_step = -1
         self.xys_grad_abs_proxy = None
-        self.xys_grad_abs_tacmd_cf = None
         self._background_candidate_mask = None
         self._background_candidate_path = None
         self._background_candidate_num_points = 0
@@ -1065,10 +824,6 @@ class WaterSplattingModel(Model):
         newp = dict["gauss_params.means"].shape[0]
         if "gaussian_lineage_ids" not in dict:
             dict["gaussian_lineage_ids"] = torch.arange(newp, dtype=torch.long)
-        if "tacmd_scene_anchor" not in dict:
-            dict["tacmd_scene_anchor"] = torch.tensor([1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0])
-        if "tacmd_scene_anchor_weight" not in dict:
-            dict["tacmd_scene_anchor_weight"] = torch.tensor(0.0)
         if tuple(self.gaussian_lineage_ids.shape) != (newp,):
             self.gaussian_lineage_ids.data = torch.zeros(newp, device=self.device, dtype=torch.long)
         for name, param in self.gauss_params.items():
@@ -1159,10 +914,7 @@ class WaterSplattingModel(Model):
 
     def after_train(self, step: int):
         assert step == self.step
-        if (
-            getattr(self.config, "dual_color_enabled", False)
-            and getattr(self.config, "dual_color_freeze_geometry", True)
-        ) or getattr(self.config, "tbap_freeze_geometry", False):
+        if getattr(self.config, "dual_color_enabled", False) and getattr(self.config, "dual_color_freeze_geometry", True):
             return
         # to save some training time, we no longer need to update those stats post refinement
         # if self.step >= self.config.stop_split_at:
@@ -1228,7 +980,6 @@ class WaterSplattingModel(Model):
                 newradii / float(max(self.last_size[0], self.last_size[1])),
             )
             self._accumulate_cleanup_evidence(visible_mask)
-            self._accumulate_mpdr_evidence(visible_mask)
 
     def set_crop(self, crop_box: Optional[OrientedBox]):
         self.crop_box = crop_box
@@ -1239,10 +990,7 @@ class WaterSplattingModel(Model):
 
     def refinement_after(self, optimizers: Optimizers, step):
         assert step == self.step
-        if (
-            getattr(self.config, "dual_color_enabled", False)
-            and getattr(self.config, "dual_color_freeze_geometry", True)
-        ) or getattr(self.config, "tbap_freeze_geometry", False):
+        if getattr(self.config, "dual_color_enabled", False) and getattr(self.config, "dual_color_freeze_geometry", True):
             return
         if self.step <= self.config.warmup_length:
             return
@@ -1263,12 +1011,6 @@ class WaterSplattingModel(Model):
                 avg_grad_norm = (self.xys_grad_norm / self.vis_counts) * 0.5 * max(self.last_size[0], self.last_size[1])
 
                 high_grads = (avg_grad_norm > self.config.densify_grad_thresh).squeeze()
-                base_high_grads = high_grads.clone()
-                mpdr_candidates, mpdr_payload = self._compute_mpdr_candidates(
-                    avg_grad_norm=avg_grad_norm.squeeze(),
-                    base_high_grads=base_high_grads,
-                )
-                high_grads = high_grads | mpdr_candidates
 
                 splits = (self.scales.exp().max(dim=-1).values > self.config.densify_size_thresh).squeeze()
                 if self.step < self.config.stop_screen_size_at:
@@ -1288,9 +1030,6 @@ class WaterSplattingModel(Model):
                     )
                 self._sync_gaussian_lineage_ids_for_densification(splits, dups, nsamps)
                 self._sync_background_candidate_mask_for_densification(splits, dups, nsamps)
-                self._sync_mpdr_buffers_for_densification(splits, dups, nsamps)
-                mpdr_payload["mpdr_split_count"] = int((splits & mpdr_candidates).sum().item())
-                mpdr_payload["mpdr_duplicate_count"] = int((dups & mpdr_candidates).sum().item())
 
                 # append zeros to the max_2Dsize tensor
                 self.max_2Dsize = torch.cat(
@@ -1321,10 +1060,6 @@ class WaterSplattingModel(Model):
                     )
                 )                
                 deleted_mask = self.cull_gaussians(splits_mask)
-                mpdr_payload["post_refine_gaussians"] = int(self.num_points)
-                mpdr_payload["gaussian_growth"] = int(self.num_points) - int(mpdr_payload["total_gaussians"])
-                mpdr_payload["culled_count"] = int(deleted_mask.sum().item()) if deleted_mask is not None else 0
-                self._write_mpdr_log(mpdr_payload)
             elif self.step >= self.config.stop_split_at and self.config.continue_cull_post_densification:
                 deleted_mask = self.cull_gaussians(cleanup_cull_mask)
             elif cleanup_cull_mask is not None:
@@ -1395,7 +1130,6 @@ class WaterSplattingModel(Model):
             self.gauss_params[name] = torch.nn.Parameter(param[~culls])
         self._sync_gaussian_lineage_ids_for_cull(culls)
         self._sync_background_candidate_mask_for_cull(culls)
-        self._sync_mpdr_buffers_for_cull(culls)
 
         CONSOLE.log(
             f"Culled {n_bef - self.num_points} gaussians "
@@ -1483,15 +1217,11 @@ class WaterSplattingModel(Model):
         # Here we explicitly use the means, scales as parameters so that the user can override this function and
         # specify more if they want to add more optimizable params to gaussians.
         names = ["means", "scales", "quats", "features_dc", "features_rest", "opacities"]
-        freeze_geometry = (
-            getattr(self.config, "dual_color_enabled", False)
-            and getattr(self.config, "dual_color_freeze_geometry", True)
-        ) or getattr(self.config, "tbap_freeze_geometry", False)
-        if freeze_geometry:
+        if getattr(self.config, "dual_color_enabled", False) and getattr(self.config, "dual_color_freeze_geometry", True):
             for name in ["means", "scales", "quats", "opacities"]:
                 self.gauss_params[name].requires_grad_(False)
-            self.gauss_params["features_dc"].requires_grad_(True)
-            self.gauss_params["features_rest"].requires_grad_(not getattr(self.config, "tbap_dc_only", False))
+            for name in ["features_dc", "features_rest"]:
+                self.gauss_params[name].requires_grad_(True)
         else:
             for name in names:
                 self.gauss_params[name].requires_grad_(True)
@@ -1504,11 +1234,8 @@ class WaterSplattingModel(Model):
             Mapping of different parameter groups
         """
         gps = self.get_gaussian_param_groups()
-        freeze_medium = (
-            getattr(self.config, "dual_color_enabled", False)
-            and getattr(self.config, "dual_color_freeze_medium", True)
-        ) or getattr(
-            self.config, "tbap_freeze_medium", False
+        freeze_medium = getattr(self.config, "dual_color_enabled", False) and getattr(
+            self.config, "dual_color_freeze_medium", True
         )
         for param in self.medium_mlp.parameters():
             param.requires_grad_(not freeze_medium)
@@ -1661,319 +1388,6 @@ class WaterSplattingModel(Model):
             )
         self._background_candidate_mask = mask[~culls].detach().bool()
         self._background_candidate_num_points = int(self._background_candidate_mask.numel())
-
-    def _mpdr_collect_enabled(self) -> bool:
-        return bool(getattr(self.config, "mpdr_enabled", False)) or bool(
-            getattr(self.config, "mpdr_diagnostic_only", False)
-        )
-
-    def _mpdr_warning(self, message: str) -> None:
-        if self._mpdr_last_warning_step == self.step:
-            return
-        CONSOLE.log(f"[yellow]MPDR warning step={self.step}: {message}[/yellow]")
-        self._mpdr_last_warning_step = int(self.step)
-
-    def _ensure_mpdr_buffers(self, *, reset: bool = False) -> None:
-        n = int(self.num_points)
-        needs_reset = (
-            reset
-            or self.mpdr_detail_ema is None
-            or self.mpdr_obj_ema is None
-            or self.mpdr_visibility_count is None
-            or self.mpdr_detail_ema.reshape(-1).numel() != n
-            or self.mpdr_obj_ema.reshape(-1).numel() != n
-            or self.mpdr_visibility_count.reshape(-1).numel() != n
-        )
-        if not needs_reset:
-            return
-        device = self.means.device
-        self.mpdr_detail_ema = torch.zeros(n, device=device, dtype=torch.float32)
-        self.mpdr_obj_ema = torch.zeros(n, device=device, dtype=torch.float32)
-        self.mpdr_visibility_count = torch.zeros(n, device=device, dtype=torch.float32)
-
-    def _sync_mpdr_buffers_for_densification(
-        self,
-        splits: torch.Tensor,
-        dups: torch.Tensor,
-        nsamps: int,
-    ) -> None:
-        if not self._mpdr_collect_enabled():
-            return
-        old_n = int(splits.reshape(-1).numel())
-        new_n = old_n + int(splits.sum().item()) * int(nsamps) + int(dups.sum().item())
-        if self.mpdr_detail_ema is None or self.mpdr_obj_ema is None or self.mpdr_visibility_count is None:
-            self._ensure_mpdr_buffers(reset=True)
-            return
-        detail = self.mpdr_detail_ema.reshape(-1).to(device=self.device)
-        obj = self.mpdr_obj_ema.reshape(-1).to(device=self.device)
-        vis = self.mpdr_visibility_count.reshape(-1).to(device=self.device)
-        splits = splits.reshape(-1).to(device=self.device)
-        dups = dups.reshape(-1).to(device=self.device)
-        if detail.numel() != old_n or obj.numel() != old_n or vis.numel() != old_n:
-            self._mpdr_warning(
-                "buffer shape mismatch during densification; resetting MPDR EMA buffers "
-                f"(detail={detail.numel()} obj={obj.numel()} vis={vis.numel()} expected={old_n})"
-            )
-            device = self.means.device
-            self.mpdr_detail_ema = torch.zeros(new_n, device=device, dtype=torch.float32)
-            self.mpdr_obj_ema = torch.zeros(new_n, device=device, dtype=torch.float32)
-            self.mpdr_visibility_count = torch.zeros(new_n, device=device, dtype=torch.float32)
-            return
-        self.mpdr_detail_ema = torch.cat(
-            [detail, detail[splits].repeat(int(nsamps)), detail[dups]],
-            dim=0,
-        ).detach()
-        self.mpdr_obj_ema = torch.cat(
-            [obj, obj[splits].repeat(int(nsamps)), obj[dups]],
-            dim=0,
-        ).detach()
-        self.mpdr_visibility_count = torch.cat(
-            [vis, vis[splits].repeat(int(nsamps)), vis[dups]],
-            dim=0,
-        ).detach()
-
-    def _sync_mpdr_buffers_for_cull(self, culls: torch.Tensor) -> None:
-        if not self._mpdr_collect_enabled():
-            return
-        if self.mpdr_detail_ema is None or self.mpdr_obj_ema is None or self.mpdr_visibility_count is None:
-            self._ensure_mpdr_buffers(reset=True)
-            return
-        detail = self.mpdr_detail_ema.reshape(-1).to(device=self.device)
-        obj = self.mpdr_obj_ema.reshape(-1).to(device=self.device)
-        vis = self.mpdr_visibility_count.reshape(-1).to(device=self.device)
-        culls = culls.reshape(-1).to(device=self.device)
-        if detail.numel() != culls.numel() or obj.numel() != culls.numel() or vis.numel() != culls.numel():
-            self._mpdr_warning(
-                "buffer shape mismatch during culling; resetting MPDR EMA buffers "
-                f"(detail={detail.numel()} obj={obj.numel()} vis={vis.numel()} culls={culls.numel()})"
-            )
-            self._ensure_mpdr_buffers(reset=True)
-            return
-        self.mpdr_detail_ema = detail[~culls].detach()
-        self.mpdr_obj_ema = obj[~culls].detach()
-        self.mpdr_visibility_count = vis[~culls].detach()
-
-    def _mpdr_detail_map(self, pred_img: torch.Tensor, gt_img: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        pred = pred_img.detach().float().clamp(0.0, 1.0)
-        gt = gt_img.detach().float().clamp(0.0, 1.0)
-        pred_chw = pred.permute(2, 0, 1).unsqueeze(0)
-        gt_chw = gt.permute(2, 0, 1).unsqueeze(0)
-        channels = pred_chw.shape[1]
-        kx = pred_chw.new_tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]])
-        ky = pred_chw.new_tensor([[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]])
-        kx = kx.view(1, 1, 3, 3).expand(channels, 1, 3, 3)
-        ky = ky.view(1, 1, 3, 3).expand(channels, 1, 3, 3)
-        pred_gx = F.conv2d(pred_chw, kx, padding=1, groups=channels)
-        pred_gy = F.conv2d(pred_chw, ky, padding=1, groups=channels)
-        gt_gx = F.conv2d(gt_chw, kx, padding=1, groups=channels)
-        gt_gy = F.conv2d(gt_chw, ky, padding=1, groups=channels)
-        sobel = 0.5 * ((pred_gx - gt_gx).abs() + (pred_gy - gt_gy).abs()).mean(dim=1)
-
-        pred_blur = F.avg_pool2d(F.pad(pred_chw, (2, 2, 2, 2), mode="reflect"), kernel_size=5, stride=1)
-        gt_blur = F.avg_pool2d(F.pad(gt_chw, (2, 2, 2, 2), mode="reflect"), kernel_size=5, stride=1)
-        highpass = ((pred_chw - pred_blur) - (gt_chw - gt_blur)).abs().mean(dim=1)
-        detail = sobel + float(getattr(self.config, "mpdr_highpass_weight", 0.35)) * highpass
-        return detail.squeeze(0)[..., None], sobel.squeeze(0)[..., None], highpass.squeeze(0)[..., None]
-
-    def _prepare_mpdr_detail_state(
-        self,
-        *,
-        outputs: Dict[str, torch.Tensor],
-        pred_img: torch.Tensor,
-        gt_img: torch.Tensor,
-        image_mask: Optional[torch.Tensor],
-    ) -> None:
-        self.mpdr_current_detail = None
-        self.mpdr_current_obj = None
-        if not self.training or not self._mpdr_collect_enabled():
-            return
-        if self.xys is None or self.radii is None:
-            return
-        with torch.no_grad():
-            height, width = int(pred_img.shape[0]), int(pred_img.shape[1])
-            detail, sobel, highpass = self._mpdr_detail_map(pred_img, gt_img)
-            accumulation = outputs["accumulation"].detach().float()
-            depth_std = outputs["depth_std_relative"].detach().float()
-            q_hit = outputs.get("hit_confidence", torch.ones_like(accumulation)).detach().float().clamp(0.0, 1.0)
-            q_conc = torch.exp(
-                -depth_std / max(float(getattr(self.config, "mpdr_depth_concentration_kappa", 0.25)), 1e-6)
-            ).clamp(0.0, 1.0)
-            q_acc = torch.sigmoid(
-                (accumulation - float(getattr(self.config, "mpdr_obj_accum_mid", 0.35)))
-                / max(float(getattr(self.config, "mpdr_obj_accum_temp", 0.08)), 1e-6)
-            ).clamp(0.0, 1.0)
-            q_obj = (q_hit * q_conc * q_acc).detach().clamp(0.0, 1.0)
-            if image_mask is not None:
-                mask = image_mask.detach().float().clamp(0.0, 1.0)
-                detail = detail * mask
-                sobel = sobel * mask
-                highpass = highpass * mask
-                q_obj = q_obj * mask
-            safe_detail = detail * q_obj
-            self.mpdr_current_detail = sample_pixel_map_at_gaussians(
-                safe_detail,
-                self.xys.detach(),
-                self.radii.detach(),
-                height,
-                width,
-            )
-            self.mpdr_current_obj = sample_pixel_map_at_gaussians(
-                q_obj,
-                self.xys.detach(),
-                self.radii.detach(),
-                height,
-                width,
-            )
-            outputs["mpdr_detail_map"] = detail.detach()
-            outputs["mpdr_sobel_detail_map"] = sobel.detach()
-            outputs["mpdr_highpass_detail_map"] = highpass.detach()
-            outputs["mpdr_object_support"] = q_obj.detach()
-
-    def _accumulate_mpdr_evidence(self, visible_mask: torch.Tensor) -> None:
-        if not self._mpdr_collect_enabled() or self.mpdr_current_detail is None or self.mpdr_current_obj is None:
-            return
-        self._ensure_mpdr_buffers()
-        assert self.mpdr_detail_ema is not None and self.mpdr_obj_ema is not None and self.mpdr_visibility_count is not None
-        detail = self.mpdr_current_detail.reshape(-1).to(device=self.device, dtype=torch.float32)
-        obj = self.mpdr_current_obj.reshape(-1).to(device=self.device, dtype=torch.float32)
-        visible = visible_mask.reshape(-1).to(device=self.device)
-        if detail.numel() != self.num_points or obj.numel() != self.num_points or visible.numel() != self.num_points:
-            self._mpdr_warning(
-                "sample shape mismatch during accumulation; resetting MPDR EMA buffers "
-                f"(detail={detail.numel()} obj={obj.numel()} visible={visible.numel()} points={self.num_points})"
-            )
-            self._ensure_mpdr_buffers(reset=True)
-            return
-        decay = min(max(float(getattr(self.config, "mpdr_detail_ema_decay", 0.90)), 0.0), 0.999999)
-        keep = visible & torch.isfinite(detail) & torch.isfinite(obj)
-        if not bool(keep.any().item()):
-            return
-        self.mpdr_detail_ema[keep] = decay * self.mpdr_detail_ema[keep] + (1.0 - decay) * detail[keep]
-        self.mpdr_obj_ema[keep] = decay * self.mpdr_obj_ema[keep] + (1.0 - decay) * obj[keep]
-        self.mpdr_visibility_count[keep] = self.mpdr_visibility_count[keep] + 1.0
-
-    def _mpdr_stats(self, values: torch.Tensor) -> Dict[str, float]:
-        flat = values.detach().float().reshape(-1)
-        flat = flat[torch.isfinite(flat)]
-        if flat.numel() == 0:
-            return {"mean": 0.0, "p90": 0.0, "p95": 0.0}
-        return {
-            "mean": float(flat.mean().item()),
-            "p90": float(torch.quantile(flat, 0.90).item()),
-            "p95": float(torch.quantile(flat, 0.95).item()),
-        }
-
-    def _mpdr_robust_normalize(self, values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        values = values.detach().float().reshape(-1)
-        out = torch.zeros_like(values)
-        keep = mask.reshape(-1) & torch.isfinite(values)
-        if int(keep.sum().item()) < 4:
-            return out
-        ref = values[keep]
-        lo = torch.quantile(ref, 0.50)
-        hi = torch.quantile(ref, 0.95)
-        denom = (hi - lo).clamp_min(1e-12)
-        out = ((values - lo) / denom).clamp(0.0, 4.0)
-        out[~torch.isfinite(out)] = 0.0
-        return out
-
-    def _compute_mpdr_candidates(
-        self,
-        *,
-        avg_grad_norm: torch.Tensor,
-        base_high_grads: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Dict[str, Union[int, float, bool, Dict[str, float]]]]:
-        n = int(avg_grad_norm.reshape(-1).numel())
-        empty = torch.zeros(n, device=self.device, dtype=torch.bool)
-        payload: Dict[str, Union[int, float, bool, Dict[str, float]]] = {
-            "step": int(self.step),
-            "total_gaussians": int(n),
-            "mpdr_enabled": bool(getattr(self.config, "mpdr_enabled", False)),
-            "mpdr_diagnostic_only": bool(getattr(self.config, "mpdr_diagnostic_only", False)),
-            "mpdr_in_window": False,
-            "base_high_grad_count": int(base_high_grads.reshape(-1).sum().item()),
-            "mpdr_eligible_count": 0,
-            "mpdr_extra_candidate_count": 0,
-            "mpdr_split_count": 0,
-            "mpdr_duplicate_count": 0,
-            "gaussian_growth": 0,
-        }
-        if not self._mpdr_collect_enabled():
-            return empty, payload
-        self._ensure_mpdr_buffers()
-        assert self.mpdr_detail_ema is not None and self.mpdr_obj_ema is not None and self.mpdr_visibility_count is not None
-        detail = self.mpdr_detail_ema.reshape(-1).to(device=self.device, dtype=torch.float32)
-        obj = self.mpdr_obj_ema.reshape(-1).to(device=self.device, dtype=torch.float32)
-        visibility = self.mpdr_visibility_count.reshape(-1).to(device=self.device, dtype=torch.float32)
-        payload["detail_ema"] = self._mpdr_stats(detail)
-        payload["obj_ema"] = self._mpdr_stats(obj)
-        payload["mean_visibility"] = float(visibility.mean().item()) if visibility.numel() else 0.0
-        if detail.numel() != n or obj.numel() != n or visibility.numel() != n:
-            self._mpdr_warning(
-                "buffer shape mismatch during candidate computation; resetting MPDR EMA buffers "
-                f"(detail={detail.numel()} obj={obj.numel()} vis={visibility.numel()} expected={n})"
-            )
-            self._ensure_mpdr_buffers(reset=True)
-            return empty, payload
-
-        start = int(getattr(self.config, "mpdr_start_step", 500))
-        stop = int(getattr(self.config, "mpdr_stop_step", 10000))
-        in_window = self.step >= start and self.step < stop
-        payload["mpdr_in_window"] = bool(in_window)
-        finite_detail = torch.isfinite(detail)
-        if int(finite_detail.sum().item()) < 4:
-            return empty, payload
-        q = min(max(float(getattr(self.config, "mpdr_detail_threshold_quantile", 0.75)), 0.0), 1.0)
-        detail_threshold = torch.quantile(detail[finite_detail], q)
-        eligible = (
-            in_window
-            & finite_detail
-            & (detail >= detail_threshold)
-            & (visibility >= max(int(getattr(self.config, "mpdr_min_visibility_count", 4)), 1))
-            & (obj >= float(getattr(self.config, "mpdr_object_support_threshold", 0.20)))
-        )
-        payload["mpdr_eligible_count"] = int(eligible.sum().item())
-        if not bool(eligible.any().item()):
-            return empty, payload
-
-        base_high = base_high_grads.reshape(-1).to(device=self.device).bool()
-        extra_pool = eligible & (~base_high)
-        if not bool(extra_pool.any().item()):
-            return empty, payload
-        norm_grad = self._mpdr_robust_normalize(avg_grad_norm.reshape(-1), eligible)
-        norm_detail = self._mpdr_robust_normalize(detail, eligible)
-        score = norm_grad + float(getattr(self.config, "mpdr_detail_score_weight", 0.25)) * norm_detail
-        score = torch.where(extra_pool, score, torch.full_like(score, -float("inf")))
-        top_fraction = min(max(float(getattr(self.config, "mpdr_top_fraction", 0.05)), 0.0), 1.0)
-        max_extra_fraction = min(
-            max(float(getattr(self.config, "mpdr_max_extra_fraction_per_refine", 0.02)), 0.0),
-            1.0,
-        )
-        top_limit = int(math.ceil(n * top_fraction))
-        extra_limit = int(math.ceil(n * max_extra_fraction))
-        k = min(int(extra_pool.sum().item()), max(top_limit, 0), max(extra_limit, 0))
-        if k <= 0:
-            return empty, payload
-        top_idx = torch.topk(score, k=k, largest=True).indices
-        candidates = torch.zeros_like(empty)
-        candidates[top_idx] = True
-        payload["mpdr_extra_candidate_count"] = int(candidates.sum().item())
-        if bool(getattr(self.config, "mpdr_diagnostic_only", False)) or not bool(getattr(self.config, "mpdr_enabled", False)):
-            return empty, payload
-        return candidates, payload
-
-    def _write_mpdr_log(self, payload: Dict[str, Union[int, float, bool, Dict[str, float]]]) -> None:
-        self.last_mpdr_stats = payload
-        log_path = getattr(self.config, "mpdr_log_path", None)
-        if not log_path:
-            return
-        try:
-            path = Path(log_path)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf8") as f:
-                f.write(json.dumps(payload) + "\n")
-        except Exception as exc:
-            CONSOLE.log(f"[yellow]Failed to write MPDR log: {exc}[/yellow]")
 
     def _load_background_candidate_mask(self) -> torch.Tensor:
         path_text = getattr(self.config, "background_candidate_mask_path", None)
@@ -2508,142 +1922,6 @@ class WaterSplattingModel(Model):
 
         return torch.zeros_like(depth)
 
-    def _normalize_depth_for_support(self, depth: torch.Tensor, mode: str = "p95") -> torch.Tensor:
-        depth = depth.detach()
-        valid = torch.isfinite(depth) & (depth > 0)
-        if not valid.any():
-            return torch.zeros_like(depth)
-        valid_depth = depth[valid]
-        if mode == "p95":
-            scale = torch.quantile(valid_depth, 0.95)
-        elif mode == "max":
-            scale = valid_depth.max()
-        else:
-            raise ValueError(f"Unknown depth normalize mode: {mode}")
-        return (depth / scale.clamp_min(1e-6)).clamp(0.0, 2.0)
-
-    def _tbap_support_and_weights(
-        self,
-        outputs: Dict[str, torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
-        depth = outputs["depth"].detach()
-        accumulation = outputs["accumulation"].detach().clamp(0.0, 1.0)
-        depth_std = outputs["depth_std_relative"].detach().clamp_min(0.0)
-        medium_attn = outputs["medium_attn"].detach().clamp_min(0.0)
-
-        depth_norm = self._normalize_depth_for_support(
-            depth,
-            getattr(self.config, "tbap_depth_normalize_mode", "p95"),
-        )
-        transmission = torch.exp(-(medium_attn * depth).clamp_min(0.0)).clamp(0.0, 1.0)
-        mean_transmission = transmission.mean(dim=-1, keepdim=True)
-
-        q_object = torch.sigmoid(
-            (accumulation - float(getattr(self.config, "tbap_object_accum_mid", 0.35)))
-            / max(float(getattr(self.config, "tbap_object_accum_temp", 0.08)), 1e-6)
-        ).clamp(0.0, 1.0)
-        q_concentration = torch.exp(
-            -depth_std / max(float(getattr(self.config, "tbap_object_concentration_kappa", 0.25)), 1e-6)
-        ).clamp(0.0, 1.0)
-        q_far = torch.sigmoid(
-            (depth_norm - float(getattr(self.config, "tbap_far_depth_mid", 0.60)))
-            / max(float(getattr(self.config, "tbap_far_depth_temp", 0.15)), 1e-6)
-        ).clamp(0.0, 1.0)
-        transmission_floor = float(getattr(self.config, "tbap_transmission_floor", 0.08))
-        q_info = torch.sigmoid(
-            (mean_transmission - transmission_floor)
-            / max(float(getattr(self.config, "tbap_transmission_info_temp", 0.04)), 1e-6)
-        ).clamp(0.0, 1.0)
-
-        support_mode = str(getattr(self.config, "tbap_support_mode", "legacy"))
-        if support_mode == "legacy":
-            support = q_object * q_concentration * q_far * q_info
-        elif support_mode == "object_far":
-            support = q_object * q_far
-        else:
-            raise ValueError(f"Unknown TBAP support mode: {support_mode}")
-        support = support.detach().clamp(0.0, 1.0)
-
-        top_fraction = float(getattr(self.config, "tbap_support_top_fraction", 0.0))
-        if 0.0 < top_fraction < 1.0:
-            flat_support = support.reshape(-1)
-            k = max(1, min(flat_support.numel(), int(round(flat_support.numel() * top_fraction))))
-            top_idx = torch.topk(flat_support.float(), k=k, largest=True, sorted=False).indices
-            top_mask = torch.zeros_like(flat_support, dtype=support.dtype)
-            top_mask.scatter_(0, top_idx, 1.0)
-            support = support * top_mask.reshape_as(support)
-
-        gamma = max(float(getattr(self.config, "tbap_gamma", 0.5)), 0.0)
-        max_weight = max(float(getattr(self.config, "tbap_max_weight", 3.0)), 1.0)
-        weight_mode = str(getattr(self.config, "tbap_weight_mode", "channel_transmission"))
-        if weight_mode == "channel_transmission":
-            conditioning_signal = transmission
-            raw_weight = torch.pow(conditioning_signal.clamp_min(transmission_floor) + 1e-6, -gamma).clamp(
-                1.0, max_weight
-            )
-        elif weight_mode == "scalar_transmission":
-            conditioning_signal = torch.exp(-(medium_attn.mean(dim=-1, keepdim=True) * depth).clamp_min(0.0)).clamp(
-                0.0, 1.0
-            )
-            raw_weight = torch.pow(conditioning_signal.clamp_min(transmission_floor) + 1e-6, -gamma).clamp(
-                1.0, max_weight
-            ).expand_as(transmission)
-        elif weight_mode == "median_transmission":
-            conditioning_signal = torch.median(transmission, dim=-1, keepdim=True).values
-            raw_weight = torch.pow(conditioning_signal.clamp_min(transmission_floor) + 1e-6, -gamma).clamp(
-                1.0, max_weight
-            ).expand_as(transmission)
-        elif weight_mode == "luma_transmission":
-            rgb_object = outputs["rgb_object"].detach()
-            clear = outputs.get("J_proxy_raw", outputs.get("J_gaussian_raw", outputs["rgb_clear"])).detach()
-            object_luma = (
-                0.2126 * rgb_object[..., 0:1] + 0.7152 * rgb_object[..., 1:2] + 0.0722 * rgb_object[..., 2:3]
-            ).clamp_min(0.0)
-            clear_luma = (
-                0.2126 * clear[..., 0:1] + 0.7152 * clear[..., 1:2] + 0.0722 * clear[..., 2:3]
-            ).clamp_min(1e-6)
-            conditioning_signal = (object_luma / clear_luma).clamp(transmission_floor, 1.0)
-            raw_weight = torch.pow(conditioning_signal + 1e-6, -gamma).clamp(1.0, max_weight).expand_as(transmission)
-        elif weight_mode == "depth":
-            strength = max(float(getattr(self.config, "tbap_depth_weight_strength", 1.0)), 0.0)
-            conditioning_signal = q_far.detach()
-            raw_scalar = (1.0 + strength * conditioning_signal).clamp(1.0, max_weight)
-            raw_weight = raw_scalar.expand_as(transmission)
-        else:
-            raise ValueError(f"Unknown TBAP weight mode: {weight_mode}")
-        support_sum = support.sum().clamp_min(1e-6)
-        support_mean_weight = (support * raw_weight).sum(dim=(0, 1), keepdim=True) / support_sum
-        normalized_weight = (raw_weight / support_mean_weight.clamp_min(1e-6)).detach()
-        diagnostics = {
-            "support": support,
-            "q_object": q_object.detach(),
-            "q_concentration": q_concentration.detach(),
-            "q_far": q_far.detach(),
-            "q_info": q_info.detach(),
-            "transmission": transmission.detach(),
-            "conditioning_signal": conditioning_signal.detach(),
-            "raw_weight": raw_weight.detach(),
-            "normalized_weight": normalized_weight,
-        }
-        return support, normalized_weight, diagnostics
-
-    def _tbap_loss(
-        self,
-        *,
-        outputs: Dict[str, torch.Tensor],
-        gt_img: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        support, normalized_weight, diagnostics = self._tbap_support_and_weights(outputs)
-        if support.sum() <= 0:
-            return gt_img.new_zeros(()), diagnostics
-
-        tbap_proxy = outputs["tbap_rgb_object_proxy"]
-        pred_tbap = outputs["pred_image"].detach() + tbap_proxy - tbap_proxy.detach()
-        beta = max(float(getattr(self.config, "tbap_smooth_l1_beta", 0.01)), 1e-8)
-        residual = F.smooth_l1_loss(pred_tbap, gt_img, beta=beta, reduction="none")
-        loss = (support * normalized_weight * residual).sum() / (support.sum().clamp_min(1e-6) * residual.shape[-1])
-        return loss, diagnostics
-
     def _camera_index_from_outputs(self, outputs: Dict[str, torch.Tensor]) -> Optional[int]:
         camera_index = outputs.get("camera_index")
         if camera_index is None:
@@ -3106,8 +2384,6 @@ class WaterSplattingModel(Model):
         self.xys_grad_abs = torch.zeros_like(self.xys)
         self.xys_grad_abs_proxy = None
         self.xys_grad_abs_capacity = None
-        self.xys_grad_abs_tacmd_cf = None
-        self.xys_grad_abs_tbap = None
 
         if self._uses_medium_depth_context():
             depth_seed_render = self.underwater_rasterizer.rasterize(  # type: ignore
@@ -3215,9 +2491,6 @@ class WaterSplattingModel(Model):
 
         clear_proxy_render = None
         capacity_control_render = None
-        tacmd_cf_render = None
-        tacmd_cf_bs = None
-        tbap_render = None
         chroma_weight_config = float(getattr(self.config, "lambda_background_clear_chroma", 0.0))
         chroma_active_by_step = (
             chroma_weight_config > 0.0
@@ -3241,28 +2514,10 @@ class WaterSplattingModel(Model):
             and core_zero_weight_config > 0.0
             and (not self.training or self.step >= int(getattr(self.config, "core_zero_capacity_start_step", 1000)))
         )
-        tmica_axis_weight_config = (
-            float(getattr(self.config, "lambda_tmica_far_axis", 0.0))
-            + float(getattr(self.config, "lambda_tmica_depth_trend", 0.0))
-            + float(getattr(self.config, "lambda_tmica_overcorrection", 0.0))
-        )
-        tmica_proxy_active_by_step = (
-            bool(getattr(self.config, "tmica_enabled", False))
-            and bool(getattr(self.config, "tmica_use_clear_proxy", True))
-            and tmica_axis_weight_config > 0.0
-            and (not self.training or self.step >= int(getattr(self.config, "tmica_axis_start_step", 6000)))
-        )
-        tbap_weight_config = float(getattr(self.config, "lambda_tbap", 0.0))
-        tbap_active_by_step = (
-            bool(getattr(self.config, "tbap_enabled", False))
-            and tbap_weight_config > 0.0
-            and (not self.training or self.step >= int(getattr(self.config, "tbap_start_step", 10000)))
-        )
         clear_proxy_required = bool(
             getattr(self.config, "clear_proxy_enabled", False)
             or chroma_active_by_step
             or halo_active_by_step
-            or tmica_proxy_active_by_step
         )
         capacity_control_required = bool(
             getattr(self.config, "capacity_control_enabled", False)
@@ -3385,7 +2640,7 @@ class WaterSplattingModel(Model):
             proxy_conics = conics
             proxy_colors = rgbs
             proxy_opacities = opacities
-            if bool(getattr(self.config, "clear_proxy_appearance_only", False)) or tmica_proxy_active_by_step:
+            if bool(getattr(self.config, "clear_proxy_appearance_only", False)):
                 proxy_geometry_grad_scale = 0.0
                 proxy_opacity_grad_scale = 0.0
             else:
@@ -3415,25 +2670,6 @@ class WaterSplattingModel(Model):
                 width=W,
                 step=self.step,
             )
-        if tbap_active_by_step:
-            self.xys_grad_abs_tbap = torch.zeros_like(self.xys)
-            tbap_render = self.underwater_rasterizer.rasterize(  # type: ignore
-                xys=self.xys.detach(),
-                xys_grad_abs=self.xys_grad_abs_tbap,
-                depths=depths.detach(),
-                radii=self.radii.detach(),
-                conics=conics.detach(),
-                num_tiles_hit=num_tiles_hit,
-                colors=rgbs,
-                opacities=opacities.detach(),
-                medium_rgb=medium_rgb.detach(),
-                medium_bs=medium_bs.detach(),
-                medium_attn=medium_attn.detach(),
-                height=H,
-                width=W,
-                background=medium_rgb.detach(),
-                step=self.step,
-            )
         tail_weight_last = render.final_transmittance * torch.exp(-medium_bs * render.last_depth)
         tail_medium_original = tail_weight_last * medium_rgb
         rgb_medium_finite = render.rgb_medium - tail_medium_original
@@ -3447,48 +2683,6 @@ class WaterSplattingModel(Model):
             if not getattr(self.config, "infinite_water_enabled", False):
                 rgb = render.rgb_object + rgb_medium_finite + rgb_tail
         rgb_medium_total = rgb_medium_finite + rgb_tail
-        tacmd_cf_weight_config = float(getattr(self.config, "lambda_tacmd_cf_chroma", 0.0))
-        tacmd_cf_every = max(int(getattr(self.config, "tacmd_cf_render_every", 4)), 1)
-        tacmd_cf_required = bool(
-            self.training
-            and bool(getattr(self.config, "tacmd_enabled", False))
-            and tacmd_cf_weight_config > 0.0
-            and self.step >= int(getattr(self.config, "tacmd_counterfactual_start", 4000))
-            and (self.step % tacmd_cf_every == 0)
-        )
-        if tacmd_cf_required:
-            self.xys_grad_abs_tacmd_cf = torch.zeros_like(self.xys)
-            tacmd_bs_state = build_bs_state(
-                medium_bs=medium_bs,
-                rgb_medium_total=rgb_medium_total,
-                pred_image=rgb,
-                depth=render.depth,
-                radius_near=float(getattr(self.config, "tacmd_bs_radius_near", 0.50)),
-                radius_far=float(getattr(self.config, "tacmd_bs_radius_far", 0.15)),
-                depth_mid=float(getattr(self.config, "tacmd_bs_depth_mid", 0.60)),
-                depth_temp=float(getattr(self.config, "tacmd_bs_depth_temp", 0.15)),
-            )
-            tacmd_cf_bs = build_counterfactual_bs(
-                bs_state=tacmd_bs_state,
-                projection_max=float(getattr(self.config, "tacmd_cf_projection_max", 0.25)),
-            ).detach()
-            tacmd_cf_render = self.underwater_rasterizer.rasterize(  # type: ignore
-                xys=self.xys.detach(),
-                xys_grad_abs=self.xys_grad_abs_tacmd_cf,
-                depths=depths.detach(),
-                radii=self.radii.detach(),
-                conics=conics.detach(),
-                num_tiles_hit=num_tiles_hit,
-                colors=rgbs,
-                opacities=opacities.detach(),
-                medium_rgb=medium_rgb.detach(),
-                medium_bs=tacmd_cf_bs,
-                medium_attn=medium_attn.detach(),
-                height=H,
-                width=W,
-                background=medium_rgb.detach(),
-                step=self.step,
-            )
         hit_q_alpha = torch.sigmoid(
             (render.accumulation - self.config.infinite_water_hit_alpha_threshold)
             / max(self.config.infinite_water_hit_alpha_temp, 1e-6)
@@ -3623,23 +2817,12 @@ class WaterSplattingModel(Model):
             )
             outputs["J_proxy_rgb_object"] = clear_proxy_render.rgb_object
             outputs["J_proxy_accumulation"] = clear_proxy_render.accumulation
-        if tbap_render is not None:
-            outputs["tbap_rgb_object_proxy"] = tbap_render.rgb_object
-            outputs["tbap_rgb_proxy"] = tbap_render.rgb
-            outputs["tbap_proxy_abs_diff_rgb_object"] = torch.abs(
-                tbap_render.rgb_object.detach() - render.rgb_object.detach()
-            )
         if capacity_control_render is not None:
             outputs["capacity_control_accumulation"] = capacity_control_render.accumulation
             outputs["capacity_control_opacities"] = capacity_control_opacities
             outputs["main_render_opacities"] = opacities
             if capacity_control_scales is not None:
                 outputs["capacity_control_scales"] = capacity_control_scales
-        if tacmd_cf_render is not None:
-            outputs["tacmd_cf_rgb"] = tacmd_cf_render.rgb
-            outputs["tacmd_cf_rgb_object"] = tacmd_cf_render.rgb_object
-            outputs["tacmd_cf_medium_rgb"] = tacmd_cf_render.rgb_medium
-            outputs["tacmd_cf_bs"] = tacmd_cf_bs
         if camera_index is not None:
             outputs["camera_index"] = torch.tensor(float(camera_index), device=self.device)
         if b_inf is not None:
@@ -3841,76 +3024,6 @@ class WaterSplattingModel(Model):
             pred_img = pred_img * mask
             image_mask = mask.to(device=self.device, dtype=gt_img.dtype).clamp(0.0, 1.0)
 
-        self._prepare_mpdr_detail_state(
-            outputs=outputs,
-            pred_img=pred_img,
-            gt_img=gt_img,
-            image_mask=image_mask,
-        )
-
-        tacmd_tail_evidence = None
-        tacmd_anchor = None
-        tacmd_anchor_active = None
-        tacmd_active = bool(getattr(self.config, "tacmd_enabled", False))
-        tmica_active = bool(getattr(self.config, "tmica_enabled", False))
-        if tacmd_active or tmica_active:
-            tacmd_tail_evidence = compute_tail_evidence(
-                gt_img=gt_img,
-                final_transmittance=outputs["final_transmittance"],
-                accumulation=outputs["accumulation"],
-                depth=outputs["depth"],
-                transmission_mid=float(getattr(self.config, "tacmd_tail_transmission_mid", 0.50)),
-                transmission_temp=float(getattr(self.config, "tacmd_tail_transmission_temp", 0.10)),
-                accumulation_mid=float(getattr(self.config, "tacmd_tail_accumulation_mid", 0.20)),
-                accumulation_temp=float(getattr(self.config, "tacmd_tail_accumulation_temp", 0.05)),
-                depth_mid=float(getattr(self.config, "tacmd_tail_depth_mid", 0.75)),
-                depth_temp=float(getattr(self.config, "tacmd_tail_depth_temp", 0.15)),
-                gradient_scale=float(getattr(self.config, "tacmd_tail_gradient_scale", 0.05)),
-                confidence_low=float(getattr(self.config, "tacmd_tail_confidence_low", 0.01)),
-                confidence_high=float(getattr(self.config, "tacmd_tail_confidence_high", 0.05)),
-            )
-            if self.training and tacmd_active:
-                with torch.no_grad():
-                    conf = tacmd_tail_evidence.confidence.to(
-                        device=self.tacmd_scene_anchor.device,
-                        dtype=self.tacmd_scene_anchor.dtype,
-                    )
-                    if float(conf.detach().cpu().item()) > 1e-8:
-                        obs = tacmd_tail_evidence.observed_anchor.to(
-                            device=self.tacmd_scene_anchor.device,
-                            dtype=self.tacmd_scene_anchor.dtype,
-                        )
-                        ema = min(max(float(getattr(self.config, "tacmd_anchor_ema", 0.98)), 0.0), 0.999999)
-                        if float(self.tacmd_scene_anchor_weight.detach().cpu().item()) <= 1e-8:
-                            updated = obs
-                        else:
-                            updated = ema * self.tacmd_scene_anchor + (1.0 - ema) * conf * obs
-                        updated = updated.clamp_min(0.0)
-                        updated = updated / updated.sum().clamp_min(1e-8)
-                        self.tacmd_scene_anchor.copy_(updated)
-                        new_weight = (ema * self.tacmd_scene_anchor_weight + (1.0 - ema) * conf).clamp(0.0, 1.0)
-                        self.tacmd_scene_anchor_weight.copy_(new_weight)
-            tacmd_anchor, tacmd_anchor_active = combine_tail_anchor(
-                observed_anchor=tacmd_tail_evidence.observed_anchor,
-                scene_anchor=self.tacmd_scene_anchor.detach().to(gt_img),
-                scene_anchor_weight=self.tacmd_scene_anchor_weight.detach().to(gt_img),
-                confidence=tacmd_tail_evidence.confidence,
-                fallback=float(getattr(self.config, "tacmd_scene_anchor_fallback", 0.25)),
-            )
-            outputs["tacmd_q_infty"] = tacmd_tail_evidence.q_infty
-            outputs["tacmd_tail_observed_anchor"] = tacmd_tail_evidence.observed_anchor.to(gt_img)
-            outputs["tacmd_tail_anchor"] = tacmd_anchor.to(gt_img)
-            outputs["tacmd_tail_confidence"] = tacmd_tail_evidence.confidence.to(gt_img)
-            outputs["tacmd_anchor_active"] = tacmd_anchor_active.to(gt_img)
-            if metrics_dict is not None:
-                metrics_dict["tacmd_tail_support_mean"] = tacmd_tail_evidence.support_mean.to(self.device)
-                metrics_dict["tacmd_tail_confidence"] = tacmd_tail_evidence.confidence.to(self.device)
-                metrics_dict["tacmd_anchor_active"] = tacmd_anchor_active.to(self.device)
-                metrics_dict["tacmd_scene_anchor_weight"] = self.tacmd_scene_anchor_weight.detach()
-                for i in range(3):
-                    metrics_dict[f"tacmd_observed_anchor_{i}"] = tacmd_tail_evidence.observed_anchor[i].to(self.device)
-                    metrics_dict[f"tacmd_scene_anchor_{i}"] = self.tacmd_scene_anchor.detach()[i]
-
         medium_supports = None
         support_route = None
         support_broad = None
@@ -4043,221 +3156,6 @@ class WaterSplattingModel(Model):
                 ssim_metric=self.ssim,
             ),
         }
-
-        tmica_state = None
-        if tmica_active and tacmd_tail_evidence is not None:
-            tmica_j_source = outputs.get("J_proxy_raw", outputs["J"]) if bool(
-                getattr(self.config, "tmica_use_clear_proxy", True)
-            ) else outputs["J"]
-            tmica_state = build_tmica_state(
-                gt_img=gt_img,
-                j_clear=tmica_j_source,
-                tail=tacmd_tail_evidence,
-                scene_anchor=self.tacmd_scene_anchor.detach().to(gt_img),
-                scene_anchor_weight=self.tacmd_scene_anchor_weight.detach().to(gt_img),
-                accumulation=outputs["accumulation"],
-                depth=outputs["depth"],
-                depth_std_relative=outputs["depth_std_relative"],
-                medium_attn=outputs["medium_attn"],
-                medium_bs=outputs["medium_bs"],
-                medium_rgb=outputs.get("b_inf", outputs["medium_rgb"]),
-                image_mask=image_mask,
-                quality_threshold=float(getattr(self.config, "tmica_tail_quality_threshold", 0.20)),
-                scene_fallback=float(getattr(self.config, "tmica_scene_anchor_fallback", 0.15)),
-                coverage_mid=float(getattr(self.config, "tmica_tail_coverage_mid", 0.015)),
-                coverage_temp=float(getattr(self.config, "tmica_tail_coverage_temp", 0.010)),
-                variance_tau=float(getattr(self.config, "tmica_tail_variance_tau", 0.15)),
-                border_width=int(getattr(self.config, "tmica_tail_border_width", 16)),
-                border_mid=float(getattr(self.config, "tmica_tail_border_mid", 0.010)),
-                border_temp=float(getattr(self.config, "tmica_tail_border_temp", 0.010)),
-                ema_tau=float(getattr(self.config, "tmica_tail_ema_tau", 0.75)),
-                object_accum_mid=float(getattr(self.config, "tmica_object_accum_mid", 0.35)),
-                object_accum_temp=float(getattr(self.config, "tmica_object_accum_temp", 0.08)),
-                object_concentration_kappa=float(getattr(self.config, "tmica_object_concentration_kappa", 0.25)),
-                far_depth_mid=float(getattr(self.config, "tmica_far_depth_mid", 0.60)),
-                far_depth_temp=float(getattr(self.config, "tmica_far_depth_temp", 0.15)),
-                near_depth_mid=float(getattr(self.config, "tmica_near_depth_mid", 0.40)),
-                near_depth_temp=float(getattr(self.config, "tmica_near_depth_temp", 0.12)),
-                use_low_transmission=bool(getattr(self.config, "tmica_use_low_transmission", True)),
-                use_sensitivity=bool(getattr(self.config, "tmica_use_sensitivity", True)),
-            )
-            outputs["tmica_support"] = tmica_state.support
-            outputs["tmica_near_support"] = tmica_state.near_support
-            outputs["tmica_q_object"] = tmica_state.q_object
-            outputs["tmica_b_j"] = tmica_state.b_j.detach()
-            outputs["tmica_water_axis"] = tmica_state.water_axis
-            if metrics_dict is not None:
-                for stat_name, stat_value in tmica_state.metrics.items():
-                    metrics_dict[f"tmica_{stat_name}"] = stat_value.to(self.device)
-            if self.training and (not tacmd_active):
-                with torch.no_grad():
-                    if float(tmica_state.tail_active.detach().cpu().item()) > 0.5:
-                        obs = tmica_state.observed_anchor.to(
-                            device=self.tacmd_scene_anchor.device,
-                            dtype=self.tacmd_scene_anchor.dtype,
-                        )
-                        quality = tmica_state.tail_quality.to(
-                            device=self.tacmd_scene_anchor_weight.device,
-                            dtype=self.tacmd_scene_anchor_weight.dtype,
-                        ).clamp(0.0, 1.0)
-                        ema = min(max(float(getattr(self.config, "tacmd_anchor_ema", 0.98)), 0.0), 0.999999)
-                        if float(self.tacmd_scene_anchor_weight.detach().cpu().item()) <= 1e-8:
-                            updated = obs
-                        else:
-                            updated = ema * self.tacmd_scene_anchor + (1.0 - ema) * quality * obs
-                        updated = updated.clamp_min(0.0)
-                        updated = updated / updated.sum().clamp_min(1e-8)
-                        self.tacmd_scene_anchor.copy_(updated)
-                        new_weight = (ema * self.tacmd_scene_anchor_weight + (1.0 - ema) * quality).clamp(0.0, 1.0)
-                        self.tacmd_scene_anchor_weight.copy_(new_weight)
-
-            tmica_tail_weight = self._ramped_weight(
-                float(getattr(self.config, "lambda_tmica_tail_lite", 0.0)),
-                int(getattr(self.config, "tmica_tail_lite_start_step", 4000)),
-                int(getattr(self.config, "tmica_tail_lite_ramp_steps", 2000)),
-            )
-            if tmica_tail_weight > 0.0:
-                loss_dict["tmica_tail_lite_loss"] = tmica_tail_weight * tmica_tail_lite_loss(
-                    medium_rgb=outputs.get("b_inf", outputs["medium_rgb"]),
-                    q_tail=tmica_state.q_tail,
-                    target_anchor=tmica_state.anchor,
-                    tail_active=tmica_state.tail_active,
-                    tolerance=float(getattr(self.config, "tacmd_a_chroma_tolerance", 0.08)),
-                )
-                if metrics_dict is not None:
-                    metrics_dict["tmica_tail_lite_weight"] = torch.tensor(tmica_tail_weight, device=self.device)
-
-            tmica_axis_weight = self._ramped_weight(
-                float(getattr(self.config, "lambda_tmica_far_axis", 0.0)),
-                int(getattr(self.config, "tmica_axis_start_step", 6000)),
-                int(getattr(self.config, "tmica_axis_ramp_steps", 2000)),
-            )
-            tmica_trend_weight = self._ramped_weight(
-                float(getattr(self.config, "lambda_tmica_depth_trend", 0.0)),
-                int(getattr(self.config, "tmica_axis_start_step", 6000)),
-                int(getattr(self.config, "tmica_axis_ramp_steps", 2000)),
-            )
-            tmica_over_weight = self._ramped_weight(
-                float(getattr(self.config, "lambda_tmica_overcorrection", 0.0)),
-                int(getattr(self.config, "tmica_axis_start_step", 6000)),
-                int(getattr(self.config, "tmica_axis_ramp_steps", 2000)),
-            )
-            if tmica_axis_weight > 0.0 or tmica_trend_weight > 0.0 or tmica_over_weight > 0.0:
-                if bool(getattr(self.config, "tmica_axis_gradient_projection", True)):
-                    register_tmica_axis_gradient_hook(tmica_j_source, tmica_state.water_axis)
-                tmica_losses = tmica_axis_losses(
-                    state=tmica_state,
-                    positive_margin=float(getattr(self.config, "tmica_positive_water_margin", 0.05)),
-                    negative_margin=float(getattr(self.config, "tmica_negative_overcorrection_margin", 0.15)),
-                    trend_margin_step=float(getattr(self.config, "tmica_trend_margin_step", 0.03)),
-                )
-                if tmica_axis_weight > 0.0:
-                    loss_dict["tmica_far_axis_loss"] = tmica_axis_weight * tmica_losses["far_axis"]
-                if tmica_trend_weight > 0.0:
-                    loss_dict["tmica_depth_trend_loss"] = tmica_trend_weight * tmica_losses["trend"]
-                if tmica_over_weight > 0.0:
-                    loss_dict["tmica_overcorrection_loss"] = tmica_over_weight * tmica_losses["overcorrection"]
-                if metrics_dict is not None:
-                    metrics_dict["tmica_far_axis_weight"] = torch.tensor(tmica_axis_weight, device=self.device)
-                    metrics_dict["tmica_depth_trend_weight"] = torch.tensor(tmica_trend_weight, device=self.device)
-                    metrics_dict["tmica_overcorrection_weight"] = torch.tensor(tmica_over_weight, device=self.device)
-
-        if tacmd_active and tacmd_tail_evidence is not None:
-            tacmd_a_source = outputs.get("b_inf", outputs["medium_rgb"])
-            tacmd_cal_start = int(getattr(self.config, "tacmd_calibration_start", 1500))
-            tacmd_cal_ramp = int(getattr(self.config, "tacmd_calibration_ramp", 2500))
-            tacmd_tail_mean_weight = self._ramped_weight(
-                float(getattr(self.config, "lambda_tacmd_tail_mean", 0.0)),
-                tacmd_cal_start,
-                tacmd_cal_ramp,
-            )
-            tacmd_tail_band_weight = self._ramped_weight(
-                float(getattr(self.config, "lambda_tacmd_tail_band", 0.0)),
-                tacmd_cal_start,
-                tacmd_cal_ramp,
-            )
-            if (tacmd_tail_mean_weight > 0.0 or tacmd_tail_band_weight > 0.0) and tacmd_anchor is not None:
-                tacmd_a_losses = tail_anchor_losses(
-                    medium_rgb=tacmd_a_source,
-                    q_infty=tacmd_tail_evidence.q_infty,
-                    target_anchor=tacmd_anchor,
-                    confidence=tacmd_tail_evidence.confidence,
-                    tolerance=float(getattr(self.config, "tacmd_a_chroma_tolerance", 0.08)),
-                )
-                if tacmd_tail_mean_weight > 0.0:
-                    loss_dict["tacmd_tail_mean_loss"] = tacmd_tail_mean_weight * tacmd_a_losses["mean"]
-                if tacmd_tail_band_weight > 0.0:
-                    loss_dict["tacmd_tail_band_loss"] = tacmd_tail_band_weight * tacmd_a_losses["band"]
-
-            tacmd_bs_state = build_bs_state(
-                medium_bs=outputs["medium_bs"],
-                rgb_medium_total=outputs["rgb_medium_total"],
-                pred_image=outputs["pred_image"],
-                depth=outputs["depth"],
-                radius_near=float(getattr(self.config, "tacmd_bs_radius_near", 0.50)),
-                radius_far=float(getattr(self.config, "tacmd_bs_radius_far", 0.15)),
-                depth_mid=float(getattr(self.config, "tacmd_bs_depth_mid", 0.60)),
-                depth_temp=float(getattr(self.config, "tacmd_bs_depth_temp", 0.15)),
-            )
-            if metrics_dict is not None:
-                for stat_name, stat_value in bs_state_stats(tacmd_bs_state).items():
-                    metrics_dict[f"tacmd_{stat_name}"] = stat_value
-            tacmd_bs_band_weight = self._ramped_weight(
-                float(getattr(self.config, "lambda_tacmd_bs_band", 0.0)),
-                tacmd_cal_start,
-                tacmd_cal_ramp,
-            )
-            if tacmd_bs_band_weight > 0.0:
-                loss_dict["tacmd_bs_band_loss"] = tacmd_bs_band_weight * bs_band_loss(tacmd_bs_state)
-
-            tacmd_bs_mono_weight = self._ramped_weight(
-                float(getattr(self.config, "lambda_tacmd_bs_monotonic", 0.0)),
-                tacmd_cal_start,
-                tacmd_cal_ramp,
-            )
-            tacmd_bs_terminal_weight = self._ramped_weight(
-                float(getattr(self.config, "lambda_tacmd_bs_terminal", 0.0)),
-                tacmd_cal_start,
-                tacmd_cal_ramp,
-            )
-            if (tacmd_bs_mono_weight > 0.0 or tacmd_bs_terminal_weight > 0.0) and tacmd_anchor is not None:
-                tacmd_bs_conv = bs_convergence_losses(
-                    medium_rgb=tacmd_a_source,
-                    medium_bs=outputs["medium_bs"],
-                    depth=outputs["depth"],
-                    q_infty=tacmd_tail_evidence.q_infty,
-                    target_anchor=tacmd_anchor,
-                    confidence=tacmd_tail_evidence.confidence,
-                )
-                if tacmd_bs_mono_weight > 0.0:
-                    loss_dict["tacmd_bs_monotonic_loss"] = tacmd_bs_mono_weight * tacmd_bs_conv["monotonic"]
-                if tacmd_bs_terminal_weight > 0.0:
-                    loss_dict["tacmd_bs_terminal_loss"] = tacmd_bs_terminal_weight * tacmd_bs_conv["terminal"]
-
-            tacmd_cf_weight = self._ramped_weight(
-                float(getattr(self.config, "lambda_tacmd_cf_chroma", 0.0)),
-                int(getattr(self.config, "tacmd_counterfactual_start", 4000)),
-                int(getattr(self.config, "tacmd_counterfactual_ramp", 3000)),
-            )
-            if tacmd_cf_weight > 0.0 and tacmd_anchor_active is not None and "tacmd_cf_rgb" in outputs:
-                tacmd_cf = counterfactual_chroma_loss(
-                    cf_rgb=outputs["tacmd_cf_rgb"],
-                    gt_img=gt_img,
-                    main_rgb=outputs["pred_image"],
-                    bs_state=tacmd_bs_state,
-                    blur_kernel=int(getattr(self.config, "tacmd_cf_blur_kernel", 31)),
-                    rgb_trust_region=float(getattr(self.config, "tacmd_cf_rgb_trust_region", 0.02)),
-                    luma_ratio=float(getattr(self.config, "tacmd_cf_luma_ratio", 0.10)),
-                )
-                loss_dict["tacmd_counterfactual_chroma_loss"] = (
-                    tacmd_cf_weight * tacmd_anchor_active.to(outputs["pred_image"]) * tacmd_cf["loss"]
-                )
-                if metrics_dict is not None:
-                    metrics_dict["tacmd_cf_weight"] = torch.tensor(tacmd_cf_weight, device=self.device)
-                    metrics_dict["tacmd_cf_safe_gate"] = tacmd_cf["safe_gate"].to(self.device)
-                    metrics_dict["tacmd_cf_rgb_delta"] = tacmd_cf["rgb_delta"].to(self.device)
-                    metrics_dict["tacmd_cf_chroma_raw"] = tacmd_cf["chroma"].to(self.device)
-                    metrics_dict["tacmd_cf_luma_raw"] = tacmd_cf["luma"].to(self.device)
 
         medium_weight = self._ramped_weight(
             float(getattr(self.config, "lambda_medium_explainability", 0.0)),
@@ -4591,42 +3489,6 @@ class WaterSplattingModel(Model):
                     (weights - 1.0) * torch.abs(pred_img - gt_img)
                 ).mean()
 
-        tbap_weight = self._ramped_weight(
-            float(getattr(self.config, "lambda_tbap", 0.0)),
-            int(getattr(self.config, "tbap_start_step", 10000)),
-            int(getattr(self.config, "tbap_ramp_steps", 0)),
-        )
-        if (
-            bool(getattr(self.config, "tbap_enabled", False))
-            and tbap_weight > 0.0
-            and "tbap_rgb_object_proxy" in outputs
-        ):
-            tbap_loss, tbap_diag = self._tbap_loss(outputs=outputs, gt_img=gt_img)
-            loss_dict["tbap_loss"] = tbap_weight * tbap_loss
-            outputs["tbap_support"] = tbap_diag["support"]
-            outputs["tbap_q_object"] = tbap_diag["q_object"]
-            outputs["tbap_q_concentration"] = tbap_diag["q_concentration"]
-            outputs["tbap_q_far"] = tbap_diag["q_far"]
-            outputs["tbap_q_info"] = tbap_diag["q_info"]
-            outputs["tbap_transmission"] = tbap_diag["transmission"]
-            outputs["tbap_weight"] = tbap_diag["normalized_weight"]
-            if metrics_dict is not None:
-                support = tbap_diag["support"]
-                trans = tbap_diag["transmission"]
-                norm_weight = tbap_diag["normalized_weight"]
-                metrics_dict["tbap_weight"] = torch.tensor(tbap_weight, device=self.device)
-                metrics_dict["tbap_loss_unweighted"] = tbap_loss.detach()
-                metrics_dict["tbap_support_mean"] = support.mean()
-                metrics_dict["tbap_support_gt_0p25_fraction"] = (support > 0.25).float().mean()
-                metrics_dict["tbap_transmission_mean"] = trans.mean()
-                for i in range(3):
-                    metrics_dict[f"tbap_transmission_{i}"] = trans[..., i].mean()
-                    metrics_dict[f"tbap_norm_weight_{i}"] = norm_weight[..., i].mean()
-                if "tbap_proxy_abs_diff_rgb_object" in outputs:
-                    metrics_dict["tbap_proxy_rgb_object_absdiff_mean"] = outputs[
-                        "tbap_proxy_abs_diff_rgb_object"
-                    ].mean()
-
         if getattr(self.config, "infinite_water_enabled", False) and "m_inf" in outputs:
             support = outputs["m_inf"].detach()
             support_norm = support.sum().clamp_min(1e-6)
@@ -4817,15 +3679,6 @@ class WaterSplattingModel(Model):
             images_dict["J_proxy_abs_diff_from_renderer_clear"] = outputs[
                 "J_proxy_abs_diff_from_renderer_clear"
             ].clamp(0.0, 1.0)
-        if "tmica_support" in outputs:
-            images_dict["tmica_support"] = outputs["tmica_support"].expand_as(outputs["rgb"])
-            images_dict["tmica_near_support"] = outputs["tmica_near_support"].expand_as(outputs["rgb"])
-            images_dict["tmica_q_object"] = outputs["tmica_q_object"].expand_as(outputs["rgb"])
-            b_j = outputs["tmica_b_j"]
-            b_min = b_j.detach().amin()
-            b_max = b_j.detach().amax()
-            b_vis = ((b_j - b_min) / (b_max - b_min).clamp_min(1e-6)).clamp(0.0, 1.0)
-            images_dict["tmica_b_j_norm"] = b_vis.expand_as(outputs["rgb"])
         if "background_region_mask" in outputs:
             images_dict["background_region_mask"] = outputs["background_region_mask"].expand_as(outputs["rgb"])
         if "densification_region_weight" in outputs:
