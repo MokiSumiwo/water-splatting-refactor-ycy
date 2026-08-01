@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_DIR="/mnt/new/home_old/ycy/water-splatting-refactor"
+export GPU="${GPU:-6}"
+export PYTHON="${PYTHON:-/opt/anaconda3/envs/water_splatting/bin/python}"
+export DATA_PATH="${DATA_PATH:-${REPO_DIR}/undistorted_data/undistorted_JapaneseGradens-RedSea}"
+export OUTPUT_DIR="${OUTPUT_DIR:-${REPO_DIR}/outputs}"
+export RENDER_ROOT="${RENDER_ROOT:-${REPO_DIR}/renders}"
+export LOG_ROOT="${LOG_ROOT:-${REPO_DIR}/logs}"
+export EXPERIMENT_NAME="${EXPERIMENT_NAME:-mpdr_g0_m1_japanesegradens_5k}"
+export TIMESTAMP="${TIMESTAMP:-${EXPERIMENT_NAME}_${STAMP:-20260801_mpdr_5k}}"
+export SEED="${SEED:-42}"
+export MAX_NUM_ITERATIONS="${MAX_NUM_ITERATIONS:-5000}"
+export MODEL_NUM_STEPS="${MODEL_NUM_STEPS:-${MAX_NUM_ITERATIONS}}"
+export MPDR_ENABLED="False"
+export MPDR_DIAGNOSTIC_ONLY="False"
+export MPDR_DETAIL_SCORE_WEIGHT="0.25"
+export SH_CURRICULUM_ENABLED="False"
+exec "${REPO_DIR}/scripts/experiments/mpdr_5k_common.sh"

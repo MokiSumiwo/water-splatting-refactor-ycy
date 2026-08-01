@@ -741,6 +741,38 @@ class WaterSplattingModelConfig(ModelConfig):
     """Require average Gaussian depth above gaussian_cleanup_depth_threshold."""
     gaussian_cleanup_require_ownership_gate: bool = True
     """Require M2 ownership support at the projected Gaussian center."""
+    mpdr_enabled: bool = False
+    """Enable Medium-Detached Persistent Detail Refinement candidates."""
+    mpdr_diagnostic_only: bool = False
+    """Collect and log MPDR evidence without changing densification candidates."""
+    mpdr_start_step: int = 500
+    """First step where MPDR may add detail-based refinement candidates."""
+    mpdr_stop_step: int = 10000
+    """Step where MPDR stops adding detail-based refinement candidates."""
+    mpdr_detail_score_weight: float = 0.25
+    """Weight of normalized detached detail EMA in the MPDR refinement score."""
+    mpdr_detail_ema_decay: float = 0.90
+    """EMA decay for per-Gaussian detached detail evidence."""
+    mpdr_highpass_weight: float = 0.35
+    """Weight on high-pass residual inside the detached MPDR detail map."""
+    mpdr_min_visibility_count: int = 4
+    """Minimum MPDR evidence samples before a Gaussian is eligible."""
+    mpdr_object_support_threshold: float = 0.20
+    """Minimum detached object-safe support EMA for MPDR eligibility."""
+    mpdr_detail_threshold_quantile: float = 0.75
+    """Quantile threshold over detail EMA for MPDR eligibility."""
+    mpdr_top_fraction: float = 0.05
+    """Maximum fraction of all Gaussians considered by MPDR score."""
+    mpdr_max_extra_fraction_per_refine: float = 0.02
+    """Maximum extra MPDR-only candidates added per refinement event."""
+    mpdr_obj_accum_mid: float = 0.35
+    """Accumulation midpoint for MPDR object-safe support."""
+    mpdr_obj_accum_temp: float = 0.08
+    """Accumulation temperature for MPDR object-safe support."""
+    mpdr_depth_concentration_kappa: float = 0.25
+    """Depth-concentration scale for MPDR object-safe support."""
+    mpdr_log_path: Optional[str] = None
+    """Optional JSONL path for MPDR refinement diagnostics."""
     constrained_appearance_enabled: bool = False
     """M4: enable constrained view-dependent appearance losses/scheduling."""
     appearance_sh_delay_enabled: bool = False
@@ -946,6 +978,13 @@ class WaterSplattingModel(Model):
         self.current_densification_region_samples = None
         self.current_densification_accumulation_map = None
         self.last_densification_region_stats = None
+        self.mpdr_detail_ema = None
+        self.mpdr_obj_ema = None
+        self.mpdr_visibility_count = None
+        self.mpdr_current_detail = None
+        self.mpdr_current_obj = None
+        self.last_mpdr_stats = None
+        self._mpdr_last_warning_step = -1
         self.xys_grad_abs_proxy = None
         self.xys_grad_abs_tacmd_cf = None
         self._background_candidate_mask = None
@@ -1189,6 +1228,7 @@ class WaterSplattingModel(Model):
                 newradii / float(max(self.last_size[0], self.last_size[1])),
             )
             self._accumulate_cleanup_evidence(visible_mask)
+            self._accumulate_mpdr_evidence(visible_mask)
 
     def set_crop(self, crop_box: Optional[OrientedBox]):
         self.crop_box = crop_box
@@ -1223,6 +1263,12 @@ class WaterSplattingModel(Model):
                 avg_grad_norm = (self.xys_grad_norm / self.vis_counts) * 0.5 * max(self.last_size[0], self.last_size[1])
 
                 high_grads = (avg_grad_norm > self.config.densify_grad_thresh).squeeze()
+                base_high_grads = high_grads.clone()
+                mpdr_candidates, mpdr_payload = self._compute_mpdr_candidates(
+                    avg_grad_norm=avg_grad_norm.squeeze(),
+                    base_high_grads=base_high_grads,
+                )
+                high_grads = high_grads | mpdr_candidates
 
                 splits = (self.scales.exp().max(dim=-1).values > self.config.densify_size_thresh).squeeze()
                 if self.step < self.config.stop_screen_size_at:
@@ -1242,6 +1288,9 @@ class WaterSplattingModel(Model):
                     )
                 self._sync_gaussian_lineage_ids_for_densification(splits, dups, nsamps)
                 self._sync_background_candidate_mask_for_densification(splits, dups, nsamps)
+                self._sync_mpdr_buffers_for_densification(splits, dups, nsamps)
+                mpdr_payload["mpdr_split_count"] = int((splits & mpdr_candidates).sum().item())
+                mpdr_payload["mpdr_duplicate_count"] = int((dups & mpdr_candidates).sum().item())
 
                 # append zeros to the max_2Dsize tensor
                 self.max_2Dsize = torch.cat(
@@ -1272,6 +1321,10 @@ class WaterSplattingModel(Model):
                     )
                 )                
                 deleted_mask = self.cull_gaussians(splits_mask)
+                mpdr_payload["post_refine_gaussians"] = int(self.num_points)
+                mpdr_payload["gaussian_growth"] = int(self.num_points) - int(mpdr_payload["total_gaussians"])
+                mpdr_payload["culled_count"] = int(deleted_mask.sum().item()) if deleted_mask is not None else 0
+                self._write_mpdr_log(mpdr_payload)
             elif self.step >= self.config.stop_split_at and self.config.continue_cull_post_densification:
                 deleted_mask = self.cull_gaussians(cleanup_cull_mask)
             elif cleanup_cull_mask is not None:
@@ -1342,6 +1395,7 @@ class WaterSplattingModel(Model):
             self.gauss_params[name] = torch.nn.Parameter(param[~culls])
         self._sync_gaussian_lineage_ids_for_cull(culls)
         self._sync_background_candidate_mask_for_cull(culls)
+        self._sync_mpdr_buffers_for_cull(culls)
 
         CONSOLE.log(
             f"Culled {n_bef - self.num_points} gaussians "
@@ -1607,6 +1661,319 @@ class WaterSplattingModel(Model):
             )
         self._background_candidate_mask = mask[~culls].detach().bool()
         self._background_candidate_num_points = int(self._background_candidate_mask.numel())
+
+    def _mpdr_collect_enabled(self) -> bool:
+        return bool(getattr(self.config, "mpdr_enabled", False)) or bool(
+            getattr(self.config, "mpdr_diagnostic_only", False)
+        )
+
+    def _mpdr_warning(self, message: str) -> None:
+        if self._mpdr_last_warning_step == self.step:
+            return
+        CONSOLE.log(f"[yellow]MPDR warning step={self.step}: {message}[/yellow]")
+        self._mpdr_last_warning_step = int(self.step)
+
+    def _ensure_mpdr_buffers(self, *, reset: bool = False) -> None:
+        n = int(self.num_points)
+        needs_reset = (
+            reset
+            or self.mpdr_detail_ema is None
+            or self.mpdr_obj_ema is None
+            or self.mpdr_visibility_count is None
+            or self.mpdr_detail_ema.reshape(-1).numel() != n
+            or self.mpdr_obj_ema.reshape(-1).numel() != n
+            or self.mpdr_visibility_count.reshape(-1).numel() != n
+        )
+        if not needs_reset:
+            return
+        device = self.means.device
+        self.mpdr_detail_ema = torch.zeros(n, device=device, dtype=torch.float32)
+        self.mpdr_obj_ema = torch.zeros(n, device=device, dtype=torch.float32)
+        self.mpdr_visibility_count = torch.zeros(n, device=device, dtype=torch.float32)
+
+    def _sync_mpdr_buffers_for_densification(
+        self,
+        splits: torch.Tensor,
+        dups: torch.Tensor,
+        nsamps: int,
+    ) -> None:
+        if not self._mpdr_collect_enabled():
+            return
+        old_n = int(splits.reshape(-1).numel())
+        new_n = old_n + int(splits.sum().item()) * int(nsamps) + int(dups.sum().item())
+        if self.mpdr_detail_ema is None or self.mpdr_obj_ema is None or self.mpdr_visibility_count is None:
+            self._ensure_mpdr_buffers(reset=True)
+            return
+        detail = self.mpdr_detail_ema.reshape(-1).to(device=self.device)
+        obj = self.mpdr_obj_ema.reshape(-1).to(device=self.device)
+        vis = self.mpdr_visibility_count.reshape(-1).to(device=self.device)
+        splits = splits.reshape(-1).to(device=self.device)
+        dups = dups.reshape(-1).to(device=self.device)
+        if detail.numel() != old_n or obj.numel() != old_n or vis.numel() != old_n:
+            self._mpdr_warning(
+                "buffer shape mismatch during densification; resetting MPDR EMA buffers "
+                f"(detail={detail.numel()} obj={obj.numel()} vis={vis.numel()} expected={old_n})"
+            )
+            device = self.means.device
+            self.mpdr_detail_ema = torch.zeros(new_n, device=device, dtype=torch.float32)
+            self.mpdr_obj_ema = torch.zeros(new_n, device=device, dtype=torch.float32)
+            self.mpdr_visibility_count = torch.zeros(new_n, device=device, dtype=torch.float32)
+            return
+        self.mpdr_detail_ema = torch.cat(
+            [detail, detail[splits].repeat(int(nsamps)), detail[dups]],
+            dim=0,
+        ).detach()
+        self.mpdr_obj_ema = torch.cat(
+            [obj, obj[splits].repeat(int(nsamps)), obj[dups]],
+            dim=0,
+        ).detach()
+        self.mpdr_visibility_count = torch.cat(
+            [vis, vis[splits].repeat(int(nsamps)), vis[dups]],
+            dim=0,
+        ).detach()
+
+    def _sync_mpdr_buffers_for_cull(self, culls: torch.Tensor) -> None:
+        if not self._mpdr_collect_enabled():
+            return
+        if self.mpdr_detail_ema is None or self.mpdr_obj_ema is None or self.mpdr_visibility_count is None:
+            self._ensure_mpdr_buffers(reset=True)
+            return
+        detail = self.mpdr_detail_ema.reshape(-1).to(device=self.device)
+        obj = self.mpdr_obj_ema.reshape(-1).to(device=self.device)
+        vis = self.mpdr_visibility_count.reshape(-1).to(device=self.device)
+        culls = culls.reshape(-1).to(device=self.device)
+        if detail.numel() != culls.numel() or obj.numel() != culls.numel() or vis.numel() != culls.numel():
+            self._mpdr_warning(
+                "buffer shape mismatch during culling; resetting MPDR EMA buffers "
+                f"(detail={detail.numel()} obj={obj.numel()} vis={vis.numel()} culls={culls.numel()})"
+            )
+            self._ensure_mpdr_buffers(reset=True)
+            return
+        self.mpdr_detail_ema = detail[~culls].detach()
+        self.mpdr_obj_ema = obj[~culls].detach()
+        self.mpdr_visibility_count = vis[~culls].detach()
+
+    def _mpdr_detail_map(self, pred_img: torch.Tensor, gt_img: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        pred = pred_img.detach().float().clamp(0.0, 1.0)
+        gt = gt_img.detach().float().clamp(0.0, 1.0)
+        pred_chw = pred.permute(2, 0, 1).unsqueeze(0)
+        gt_chw = gt.permute(2, 0, 1).unsqueeze(0)
+        channels = pred_chw.shape[1]
+        kx = pred_chw.new_tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]])
+        ky = pred_chw.new_tensor([[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]])
+        kx = kx.view(1, 1, 3, 3).expand(channels, 1, 3, 3)
+        ky = ky.view(1, 1, 3, 3).expand(channels, 1, 3, 3)
+        pred_gx = F.conv2d(pred_chw, kx, padding=1, groups=channels)
+        pred_gy = F.conv2d(pred_chw, ky, padding=1, groups=channels)
+        gt_gx = F.conv2d(gt_chw, kx, padding=1, groups=channels)
+        gt_gy = F.conv2d(gt_chw, ky, padding=1, groups=channels)
+        sobel = 0.5 * ((pred_gx - gt_gx).abs() + (pred_gy - gt_gy).abs()).mean(dim=1)
+
+        pred_blur = F.avg_pool2d(F.pad(pred_chw, (2, 2, 2, 2), mode="reflect"), kernel_size=5, stride=1)
+        gt_blur = F.avg_pool2d(F.pad(gt_chw, (2, 2, 2, 2), mode="reflect"), kernel_size=5, stride=1)
+        highpass = ((pred_chw - pred_blur) - (gt_chw - gt_blur)).abs().mean(dim=1)
+        detail = sobel + float(getattr(self.config, "mpdr_highpass_weight", 0.35)) * highpass
+        return detail.squeeze(0)[..., None], sobel.squeeze(0)[..., None], highpass.squeeze(0)[..., None]
+
+    def _prepare_mpdr_detail_state(
+        self,
+        *,
+        outputs: Dict[str, torch.Tensor],
+        pred_img: torch.Tensor,
+        gt_img: torch.Tensor,
+        image_mask: Optional[torch.Tensor],
+    ) -> None:
+        self.mpdr_current_detail = None
+        self.mpdr_current_obj = None
+        if not self.training or not self._mpdr_collect_enabled():
+            return
+        if self.xys is None or self.radii is None:
+            return
+        with torch.no_grad():
+            height, width = int(pred_img.shape[0]), int(pred_img.shape[1])
+            detail, sobel, highpass = self._mpdr_detail_map(pred_img, gt_img)
+            accumulation = outputs["accumulation"].detach().float()
+            depth_std = outputs["depth_std_relative"].detach().float()
+            q_hit = outputs.get("hit_confidence", torch.ones_like(accumulation)).detach().float().clamp(0.0, 1.0)
+            q_conc = torch.exp(
+                -depth_std / max(float(getattr(self.config, "mpdr_depth_concentration_kappa", 0.25)), 1e-6)
+            ).clamp(0.0, 1.0)
+            q_acc = torch.sigmoid(
+                (accumulation - float(getattr(self.config, "mpdr_obj_accum_mid", 0.35)))
+                / max(float(getattr(self.config, "mpdr_obj_accum_temp", 0.08)), 1e-6)
+            ).clamp(0.0, 1.0)
+            q_obj = (q_hit * q_conc * q_acc).detach().clamp(0.0, 1.0)
+            if image_mask is not None:
+                mask = image_mask.detach().float().clamp(0.0, 1.0)
+                detail = detail * mask
+                sobel = sobel * mask
+                highpass = highpass * mask
+                q_obj = q_obj * mask
+            safe_detail = detail * q_obj
+            self.mpdr_current_detail = sample_pixel_map_at_gaussians(
+                safe_detail,
+                self.xys.detach(),
+                self.radii.detach(),
+                height,
+                width,
+            )
+            self.mpdr_current_obj = sample_pixel_map_at_gaussians(
+                q_obj,
+                self.xys.detach(),
+                self.radii.detach(),
+                height,
+                width,
+            )
+            outputs["mpdr_detail_map"] = detail.detach()
+            outputs["mpdr_sobel_detail_map"] = sobel.detach()
+            outputs["mpdr_highpass_detail_map"] = highpass.detach()
+            outputs["mpdr_object_support"] = q_obj.detach()
+
+    def _accumulate_mpdr_evidence(self, visible_mask: torch.Tensor) -> None:
+        if not self._mpdr_collect_enabled() or self.mpdr_current_detail is None or self.mpdr_current_obj is None:
+            return
+        self._ensure_mpdr_buffers()
+        assert self.mpdr_detail_ema is not None and self.mpdr_obj_ema is not None and self.mpdr_visibility_count is not None
+        detail = self.mpdr_current_detail.reshape(-1).to(device=self.device, dtype=torch.float32)
+        obj = self.mpdr_current_obj.reshape(-1).to(device=self.device, dtype=torch.float32)
+        visible = visible_mask.reshape(-1).to(device=self.device)
+        if detail.numel() != self.num_points or obj.numel() != self.num_points or visible.numel() != self.num_points:
+            self._mpdr_warning(
+                "sample shape mismatch during accumulation; resetting MPDR EMA buffers "
+                f"(detail={detail.numel()} obj={obj.numel()} visible={visible.numel()} points={self.num_points})"
+            )
+            self._ensure_mpdr_buffers(reset=True)
+            return
+        decay = min(max(float(getattr(self.config, "mpdr_detail_ema_decay", 0.90)), 0.0), 0.999999)
+        keep = visible & torch.isfinite(detail) & torch.isfinite(obj)
+        if not bool(keep.any().item()):
+            return
+        self.mpdr_detail_ema[keep] = decay * self.mpdr_detail_ema[keep] + (1.0 - decay) * detail[keep]
+        self.mpdr_obj_ema[keep] = decay * self.mpdr_obj_ema[keep] + (1.0 - decay) * obj[keep]
+        self.mpdr_visibility_count[keep] = self.mpdr_visibility_count[keep] + 1.0
+
+    def _mpdr_stats(self, values: torch.Tensor) -> Dict[str, float]:
+        flat = values.detach().float().reshape(-1)
+        flat = flat[torch.isfinite(flat)]
+        if flat.numel() == 0:
+            return {"mean": 0.0, "p90": 0.0, "p95": 0.0}
+        return {
+            "mean": float(flat.mean().item()),
+            "p90": float(torch.quantile(flat, 0.90).item()),
+            "p95": float(torch.quantile(flat, 0.95).item()),
+        }
+
+    def _mpdr_robust_normalize(self, values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        values = values.detach().float().reshape(-1)
+        out = torch.zeros_like(values)
+        keep = mask.reshape(-1) & torch.isfinite(values)
+        if int(keep.sum().item()) < 4:
+            return out
+        ref = values[keep]
+        lo = torch.quantile(ref, 0.50)
+        hi = torch.quantile(ref, 0.95)
+        denom = (hi - lo).clamp_min(1e-12)
+        out = ((values - lo) / denom).clamp(0.0, 4.0)
+        out[~torch.isfinite(out)] = 0.0
+        return out
+
+    def _compute_mpdr_candidates(
+        self,
+        *,
+        avg_grad_norm: torch.Tensor,
+        base_high_grads: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Dict[str, Union[int, float, bool, Dict[str, float]]]]:
+        n = int(avg_grad_norm.reshape(-1).numel())
+        empty = torch.zeros(n, device=self.device, dtype=torch.bool)
+        payload: Dict[str, Union[int, float, bool, Dict[str, float]]] = {
+            "step": int(self.step),
+            "total_gaussians": int(n),
+            "mpdr_enabled": bool(getattr(self.config, "mpdr_enabled", False)),
+            "mpdr_diagnostic_only": bool(getattr(self.config, "mpdr_diagnostic_only", False)),
+            "mpdr_in_window": False,
+            "base_high_grad_count": int(base_high_grads.reshape(-1).sum().item()),
+            "mpdr_eligible_count": 0,
+            "mpdr_extra_candidate_count": 0,
+            "mpdr_split_count": 0,
+            "mpdr_duplicate_count": 0,
+            "gaussian_growth": 0,
+        }
+        if not self._mpdr_collect_enabled():
+            return empty, payload
+        self._ensure_mpdr_buffers()
+        assert self.mpdr_detail_ema is not None and self.mpdr_obj_ema is not None and self.mpdr_visibility_count is not None
+        detail = self.mpdr_detail_ema.reshape(-1).to(device=self.device, dtype=torch.float32)
+        obj = self.mpdr_obj_ema.reshape(-1).to(device=self.device, dtype=torch.float32)
+        visibility = self.mpdr_visibility_count.reshape(-1).to(device=self.device, dtype=torch.float32)
+        payload["detail_ema"] = self._mpdr_stats(detail)
+        payload["obj_ema"] = self._mpdr_stats(obj)
+        payload["mean_visibility"] = float(visibility.mean().item()) if visibility.numel() else 0.0
+        if detail.numel() != n or obj.numel() != n or visibility.numel() != n:
+            self._mpdr_warning(
+                "buffer shape mismatch during candidate computation; resetting MPDR EMA buffers "
+                f"(detail={detail.numel()} obj={obj.numel()} vis={visibility.numel()} expected={n})"
+            )
+            self._ensure_mpdr_buffers(reset=True)
+            return empty, payload
+
+        start = int(getattr(self.config, "mpdr_start_step", 500))
+        stop = int(getattr(self.config, "mpdr_stop_step", 10000))
+        in_window = self.step >= start and self.step < stop
+        payload["mpdr_in_window"] = bool(in_window)
+        finite_detail = torch.isfinite(detail)
+        if int(finite_detail.sum().item()) < 4:
+            return empty, payload
+        q = min(max(float(getattr(self.config, "mpdr_detail_threshold_quantile", 0.75)), 0.0), 1.0)
+        detail_threshold = torch.quantile(detail[finite_detail], q)
+        eligible = (
+            in_window
+            & finite_detail
+            & (detail >= detail_threshold)
+            & (visibility >= max(int(getattr(self.config, "mpdr_min_visibility_count", 4)), 1))
+            & (obj >= float(getattr(self.config, "mpdr_object_support_threshold", 0.20)))
+        )
+        payload["mpdr_eligible_count"] = int(eligible.sum().item())
+        if not bool(eligible.any().item()):
+            return empty, payload
+
+        base_high = base_high_grads.reshape(-1).to(device=self.device).bool()
+        extra_pool = eligible & (~base_high)
+        if not bool(extra_pool.any().item()):
+            return empty, payload
+        norm_grad = self._mpdr_robust_normalize(avg_grad_norm.reshape(-1), eligible)
+        norm_detail = self._mpdr_robust_normalize(detail, eligible)
+        score = norm_grad + float(getattr(self.config, "mpdr_detail_score_weight", 0.25)) * norm_detail
+        score = torch.where(extra_pool, score, torch.full_like(score, -float("inf")))
+        top_fraction = min(max(float(getattr(self.config, "mpdr_top_fraction", 0.05)), 0.0), 1.0)
+        max_extra_fraction = min(
+            max(float(getattr(self.config, "mpdr_max_extra_fraction_per_refine", 0.02)), 0.0),
+            1.0,
+        )
+        top_limit = int(math.ceil(n * top_fraction))
+        extra_limit = int(math.ceil(n * max_extra_fraction))
+        k = min(int(extra_pool.sum().item()), max(top_limit, 0), max(extra_limit, 0))
+        if k <= 0:
+            return empty, payload
+        top_idx = torch.topk(score, k=k, largest=True).indices
+        candidates = torch.zeros_like(empty)
+        candidates[top_idx] = True
+        payload["mpdr_extra_candidate_count"] = int(candidates.sum().item())
+        if bool(getattr(self.config, "mpdr_diagnostic_only", False)) or not bool(getattr(self.config, "mpdr_enabled", False)):
+            return empty, payload
+        return candidates, payload
+
+    def _write_mpdr_log(self, payload: Dict[str, Union[int, float, bool, Dict[str, float]]]) -> None:
+        self.last_mpdr_stats = payload
+        log_path = getattr(self.config, "mpdr_log_path", None)
+        if not log_path:
+            return
+        try:
+            path = Path(log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf8") as f:
+                f.write(json.dumps(payload) + "\n")
+        except Exception as exc:
+            CONSOLE.log(f"[yellow]Failed to write MPDR log: {exc}[/yellow]")
 
     def _load_background_candidate_mask(self) -> torch.Tensor:
         path_text = getattr(self.config, "background_candidate_mask_path", None)
@@ -3473,6 +3840,13 @@ class WaterSplattingModel(Model):
             gt_img = gt_img * mask
             pred_img = pred_img * mask
             image_mask = mask.to(device=self.device, dtype=gt_img.dtype).clamp(0.0, 1.0)
+
+        self._prepare_mpdr_detail_state(
+            outputs=outputs,
+            pred_img=pred_img,
+            gt_img=gt_img,
+            image_mask=image_mask,
+        )
 
         tacmd_tail_evidence = None
         tacmd_anchor = None
