@@ -60,6 +60,15 @@ from water_splatting.losses import (
     reconstruction_loss,
     sh_residual_mean_anchor_loss,
 )
+from water_splatting.geometry import (
+    MVGAREvidence,
+    build_mvgar_detail_map,
+    build_mvgar_surface_evidence,
+    load_mvgar_view_payload,
+    mvgar_surface_anchor_loss,
+    select_mvgar_candidates,
+    tensor_stats,
+)
 from water_splatting.ownership import compute_infinite_water_ownership
 from water_splatting.rendering import UnderwaterRasterizer
 from water_splatting._torch_impl import quat_to_rotmat
@@ -500,6 +509,56 @@ class WaterSplattingModelConfig(ModelConfig):
     """Optional JSONL path for per-region densification diagnostics."""
     opacity_accumulation_diagnostic_enabled: bool = False
     """Retain/log opacity, scale, and sampled accumulation gradient diagnostics."""
+    mvgar_enabled: bool = False
+    """Enable MV-GAR pseudo-depth surface anchoring."""
+    mvgar_diagnostic_only: bool = False
+    """Build and log MV-GAR evidence without adding losses or candidates."""
+    mvgar_pseudo_depth_dir: Optional[str] = None
+    """Directory containing view_XXXX_mvgar.pt aligned pseudo-depth payloads."""
+    mvgar_camera_graph_path: Optional[str] = None
+    """Reserved path for offline MV-GAR camera graph metadata."""
+    mvgar_log_path: Optional[str] = None
+    """Optional JSONL path for MV-GAR surface and refinement diagnostics."""
+    mvgar_start_step: int = 1500
+    """First step where MV-GAR surface anchor may become active."""
+    mvgar_ramp_steps: int = 1500
+    """Linear ramp length for MV-GAR surface anchor."""
+    mvgar_stop_step: int = 10000
+    """Step where MV-GAR surface anchor and extra candidates stop."""
+    lambda_mvgar_surface: float = 0.01
+    """Weight for MV-GAR Gaussian surface anchor loss."""
+    mvgar_surface_huber_delta: float = 0.05
+    """Huber delta for MV-GAR log-depth surface anchor."""
+    mvgar_accumulation_mid: float = 0.45
+    """Accumulation midpoint for MV-GAR render-reliability gate."""
+    mvgar_accumulation_temp: float = 0.08
+    """Accumulation temperature for MV-GAR render-reliability gate."""
+    mvgar_depth_std_kappa: float = 0.20
+    """Relative depth dispersion scale for MV-GAR render-reliability gate."""
+    mvgar_front_depth_log_tau: float = 0.08
+    """Log-depth tolerance for front-surface Gaussian association."""
+    mvgar_min_pseudo_confidence: float = 0.50
+    """Minimum sampled pseudo-depth confidence for MV-GAR support."""
+    mvgar_densification_enabled: bool = False
+    """Enable conservative MV-GAR extra split/duplicate candidates."""
+    mvgar_min_view_count: int = 3
+    """Minimum distinct train-view support before MV-GAR densification can select a Gaussian."""
+    mvgar_min_mean_weight: float = 0.20
+    """Minimum mean MV-GAR support weight for candidate eligibility."""
+    mvgar_detail_quantile: float = 0.85
+    """Eligible-Gaussian detail residual quantile for MV-GAR candidate pool."""
+    mvgar_depth_variance_threshold: float = 0.02
+    """Maximum MV-GAR multi-view log-depth error variance for candidate eligibility."""
+    mvgar_max_extra_ratio_to_base: float = 0.25
+    """Maximum MV-GAR extra candidates as a ratio of base high-gradient candidates."""
+    mvgar_max_extra_fraction_per_refine: float = 0.002
+    """Maximum MV-GAR extra candidates as a fraction of current Gaussian count per refinement."""
+    mvgar_concentration_enabled: bool = False
+    """Reserved for future MV-GAR depth-concentration loss; unused in V0."""
+    lambda_mvgar_concentration: float = 0.002
+    """Reserved future weight for MV-GAR concentration loss."""
+    mvgar_concentration_target: float = 0.12
+    """Reserved future target for MV-GAR concentration loss."""
     clear_proxy_enabled: bool = False
     """Enable an auxiliary zero-medium black-background clear proxy render."""
     clear_proxy_appearance_only: bool = False
@@ -724,6 +783,20 @@ class WaterSplattingModel(Model):
             torch.arange(num_points, dtype=torch.long, device=means.device),
             persistent=True,
         )
+        self.register_buffer("mvgar_weight_sum", torch.zeros(num_points, dtype=torch.float32, device=means.device), persistent=True)
+        self.register_buffer("mvgar_detail_sum", torch.zeros(num_points, dtype=torch.float32, device=means.device), persistent=True)
+        self.register_buffer(
+            "mvgar_depth_error_sum",
+            torch.zeros(num_points, dtype=torch.float32, device=means.device),
+            persistent=True,
+        )
+        self.register_buffer(
+            "mvgar_depth_error_sq_sum",
+            torch.zeros(num_points, dtype=torch.float32, device=means.device),
+            persistent=True,
+        )
+        self.register_buffer("mvgar_view_count", torch.zeros(num_points, dtype=torch.float32, device=means.device), persistent=True)
+        self.register_buffer("mvgar_last_camera_id", torch.full((num_points,), -1, dtype=torch.long, device=means.device), persistent=True)
 
         # metrics
         from torchmetrics.image import PeakSignalNoiseRatio
@@ -753,6 +826,13 @@ class WaterSplattingModel(Model):
         self._background_gradient_hook_param_id = None
         self._background_gradient_surgery_last_log_step = -1
         self._warned_background_clear_gaussian_dead_grad = False
+        self._mvgar_payload_cache: Dict[Tuple[str, int, int, int], Dict[str, torch.Tensor]] = {}
+        self._mvgar_current_evidence: Optional[MVGAREvidence] = None
+        self._mvgar_current_camera_id: Optional[int] = None
+        self._mvgar_last_surface_stats: Optional[Dict[str, float]] = None
+        self._mvgar_last_refinement_stats: Optional[Dict[str, object]] = None
+        self._warned_mvgar_missing_depth_dir = False
+        self._warned_mvgar_shape_reset = False
 
         self.crop_box: Optional[OrientedBox] = None
         if self.config.background_color == "random":
@@ -826,6 +906,20 @@ class WaterSplattingModel(Model):
             dict["gaussian_lineage_ids"] = torch.arange(newp, dtype=torch.long)
         if tuple(self.gaussian_lineage_ids.shape) != (newp,):
             self.gaussian_lineage_ids.data = torch.zeros(newp, device=self.device, dtype=torch.long)
+        mvgar_defaults = {
+            "mvgar_weight_sum": torch.zeros(newp, dtype=torch.float32),
+            "mvgar_detail_sum": torch.zeros(newp, dtype=torch.float32),
+            "mvgar_depth_error_sum": torch.zeros(newp, dtype=torch.float32),
+            "mvgar_depth_error_sq_sum": torch.zeros(newp, dtype=torch.float32),
+            "mvgar_view_count": torch.zeros(newp, dtype=torch.float32),
+            "mvgar_last_camera_id": torch.full((newp,), -1, dtype=torch.long),
+        }
+        for key, default in mvgar_defaults.items():
+            if key not in dict or tuple(dict[key].shape) != (newp,):
+                dict[key] = default
+            buffer = getattr(self, key, None)
+            if buffer is not None and tuple(buffer.shape) != (newp,):
+                buffer.data = default.to(device=self.device, dtype=buffer.dtype)
         for name, param in self.gauss_params.items():
             old_shape = param.shape
             new_shape = (newp,) + old_shape[1:]
@@ -970,7 +1064,6 @@ class WaterSplattingModel(Model):
                 raw_grads=grads,
                 weighted_grads=weighted_grads,
             )
-
             # update the max screen size, as a ratio of number of pixels
             if self.max_2Dsize is None or self.max_2Dsize.shape[0] != self.radii.shape[0]:
                 self.max_2Dsize = torch.zeros_like(self.radii, dtype=torch.float32)
@@ -1011,6 +1104,33 @@ class WaterSplattingModel(Model):
                 avg_grad_norm = (self.xys_grad_norm / self.vis_counts) * 0.5 * max(self.last_size[0], self.last_size[1])
 
                 high_grads = (avg_grad_norm > self.config.densify_grad_thresh).squeeze()
+                base_high_grads = high_grads.clone()
+                mvgar_candidates = torch.zeros_like(high_grads, dtype=torch.bool)
+                mvgar_payload: Dict[str, object] = {}
+                if (
+                    self._mvgar_requested()
+                    and self._mvgar_in_window()
+                    and bool(getattr(self.config, "mvgar_densification_enabled", False))
+                ):
+                    mvgar_candidates, mvgar_payload = select_mvgar_candidates(
+                        base_high_grads=base_high_grads,
+                        avg_grad_norm=avg_grad_norm.squeeze(),
+                        weight_sum=self.mvgar_weight_sum,
+                        detail_sum=self.mvgar_detail_sum,
+                        depth_error_sum=self.mvgar_depth_error_sum,
+                        depth_error_sq_sum=self.mvgar_depth_error_sq_sum,
+                        view_count=self.mvgar_view_count,
+                        min_view_count=int(getattr(self.config, "mvgar_min_view_count", 3)),
+                        min_mean_weight=float(getattr(self.config, "mvgar_min_mean_weight", 0.20)),
+                        detail_quantile=float(getattr(self.config, "mvgar_detail_quantile", 0.85)),
+                        depth_variance_threshold=float(getattr(self.config, "mvgar_depth_variance_threshold", 0.02)),
+                        max_extra_ratio_to_base=float(getattr(self.config, "mvgar_max_extra_ratio_to_base", 0.25)),
+                        max_extra_fraction_per_refine=float(
+                            getattr(self.config, "mvgar_max_extra_fraction_per_refine", 0.002)
+                        ),
+                    )
+                    if not bool(getattr(self.config, "mvgar_diagnostic_only", False)):
+                        high_grads = high_grads | mvgar_candidates
 
                 splits = (self.scales.exp().max(dim=-1).values > self.config.densify_size_thresh).squeeze()
                 if self.step < self.config.stop_screen_size_at:
@@ -1030,6 +1150,18 @@ class WaterSplattingModel(Model):
                     )
                 self._sync_gaussian_lineage_ids_for_densification(splits, dups, nsamps)
                 self._sync_background_candidate_mask_for_densification(splits, dups, nsamps)
+                self._sync_mvgar_buffers_for_densification(splits, dups, nsamps)
+                if self._mvgar_requested():
+                    mvgar_payload.update(
+                        {
+                            "step": int(self.step),
+                            "total_gaussians_before": int(base_high_grads.numel()),
+                            "total_gaussians_after_append": int(self.num_points),
+                            "mvgar_split_count": int((mvgar_candidates & splits).sum().item()),
+                            "mvgar_duplicate_count": int((mvgar_candidates & dups).sum().item()),
+                        }
+                    )
+                    mvgar_payload.update(self._mvgar_buffer_stats())
 
                 # append zeros to the max_2Dsize tensor
                 self.max_2Dsize = torch.cat(
@@ -1060,6 +1192,10 @@ class WaterSplattingModel(Model):
                     )
                 )                
                 deleted_mask = self.cull_gaussians(splits_mask)
+                if self._mvgar_requested():
+                    mvgar_payload["total_gaussians_after_cull"] = int(self.num_points)
+                    self._mvgar_last_refinement_stats = mvgar_payload
+                    self._write_mvgar_log(mvgar_payload)
             elif self.step >= self.config.stop_split_at and self.config.continue_cull_post_densification:
                 deleted_mask = self.cull_gaussians(cleanup_cull_mask)
             elif cleanup_cull_mask is not None:
@@ -1100,6 +1236,8 @@ class WaterSplattingModel(Model):
             self.depths_accum = None
             self.max_2Dsize = None
             self._reset_cleanup_accumulators()
+            if self._mvgar_requested():
+                self._reset_mvgar_accumulators()
 
     def cull_gaussians(self, extra_cull_mask: Optional[torch.Tensor] = None):
         """
@@ -1130,6 +1268,7 @@ class WaterSplattingModel(Model):
             self.gauss_params[name] = torch.nn.Parameter(param[~culls])
         self._sync_gaussian_lineage_ids_for_cull(culls)
         self._sync_background_candidate_mask_for_cull(culls)
+        self._sync_mvgar_buffers_for_cull(culls)
 
         CONSOLE.log(
             f"Culled {n_bef - self.num_points} gaussians "
@@ -1299,6 +1438,174 @@ class WaterSplattingModel(Model):
         if ramp <= 0:
             return float(weight)
         return float(weight) * min((self.step - start) / max(float(ramp), 1.0), 1.0)
+
+    def _mvgar_requested(self) -> bool:
+        return bool(
+            getattr(self.config, "mvgar_enabled", False)
+            or getattr(self.config, "mvgar_diagnostic_only", False)
+            or getattr(self.config, "mvgar_densification_enabled", False)
+        )
+
+    def _mvgar_in_window(self) -> bool:
+        start = int(getattr(self.config, "mvgar_start_step", 1500))
+        stop = int(getattr(self.config, "mvgar_stop_step", 10000))
+        return self.step >= start and (stop <= 0 or self.step < stop)
+
+    def _mvgar_surface_weight(self) -> float:
+        if bool(getattr(self.config, "mvgar_diagnostic_only", False)):
+            return 0.0
+        if not bool(getattr(self.config, "mvgar_enabled", False)):
+            return 0.0
+        if not self._mvgar_in_window():
+            return 0.0
+        return self._ramped_weight(
+            float(getattr(self.config, "lambda_mvgar_surface", 0.01)),
+            int(getattr(self.config, "mvgar_start_step", 1500)),
+            int(getattr(self.config, "mvgar_ramp_steps", 1500)),
+        )
+
+    def _ensure_mvgar_buffers(self, *, reset_on_mismatch: bool = True) -> bool:
+        n = int(self.num_points)
+        required = [
+            "mvgar_weight_sum",
+            "mvgar_detail_sum",
+            "mvgar_depth_error_sum",
+            "mvgar_depth_error_sq_sum",
+            "mvgar_view_count",
+            "mvgar_last_camera_id",
+        ]
+        ok = all(hasattr(self, name) and getattr(self, name).numel() == n for name in required)
+        if ok:
+            return True
+        if not reset_on_mismatch:
+            return False
+        if not self._warned_mvgar_shape_reset:
+            CONSOLE.log("[yellow]MV-GAR buffer shape mismatch; resetting detached evidence buffers.[/yellow]")
+            self._warned_mvgar_shape_reset = True
+        device = self.device
+        self.mvgar_weight_sum = torch.zeros(n, dtype=torch.float32, device=device)
+        self.mvgar_detail_sum = torch.zeros(n, dtype=torch.float32, device=device)
+        self.mvgar_depth_error_sum = torch.zeros(n, dtype=torch.float32, device=device)
+        self.mvgar_depth_error_sq_sum = torch.zeros(n, dtype=torch.float32, device=device)
+        self.mvgar_view_count = torch.zeros(n, dtype=torch.float32, device=device)
+        self.mvgar_last_camera_id = torch.full((n,), -1, dtype=torch.long, device=device)
+        return True
+
+    def _reset_mvgar_accumulators(self) -> None:
+        self._ensure_mvgar_buffers(reset_on_mismatch=True)
+        self.mvgar_weight_sum.zero_()
+        self.mvgar_detail_sum.zero_()
+        self.mvgar_depth_error_sum.zero_()
+        self.mvgar_depth_error_sq_sum.zero_()
+        self.mvgar_view_count.zero_()
+        self.mvgar_last_camera_id.fill_(-1)
+
+    def _sync_mvgar_buffers_for_densification(
+        self,
+        splits: torch.Tensor,
+        dups: torch.Tensor,
+        nsamps: int,
+    ) -> None:
+        splits = splits.reshape(-1).to(device=self.device)
+        dups = dups.reshape(-1).to(device=self.device)
+        if (
+            not hasattr(self, "mvgar_weight_sum")
+            or self.mvgar_weight_sum.numel() != splits.numel()
+            or self.mvgar_weight_sum.numel() != dups.numel()
+        ):
+            self._ensure_mvgar_buffers(reset_on_mismatch=True)
+            return
+        extra = int(nsamps * splits.sum().item() + dups.sum().item())
+        float_zeros = torch.zeros(extra, dtype=torch.float32, device=self.device)
+        long_fill = torch.full((extra,), -1, dtype=torch.long, device=self.device)
+        self.mvgar_weight_sum = torch.cat([self.mvgar_weight_sum, float_zeros.clone()], dim=0)
+        self.mvgar_detail_sum = torch.cat([self.mvgar_detail_sum, float_zeros.clone()], dim=0)
+        self.mvgar_depth_error_sum = torch.cat([self.mvgar_depth_error_sum, float_zeros.clone()], dim=0)
+        self.mvgar_depth_error_sq_sum = torch.cat([self.mvgar_depth_error_sq_sum, float_zeros.clone()], dim=0)
+        self.mvgar_view_count = torch.cat([self.mvgar_view_count, float_zeros.clone()], dim=0)
+        self.mvgar_last_camera_id = torch.cat([self.mvgar_last_camera_id, long_fill], dim=0)
+
+    def _sync_mvgar_buffers_for_cull(self, culls: torch.Tensor) -> None:
+        culls = culls.reshape(-1).to(device=self.device)
+        if not hasattr(self, "mvgar_weight_sum") or self.mvgar_weight_sum.numel() != culls.numel():
+            self._ensure_mvgar_buffers(reset_on_mismatch=True)
+            return
+        keep = ~culls
+        self.mvgar_weight_sum = self.mvgar_weight_sum[keep].detach()
+        self.mvgar_detail_sum = self.mvgar_detail_sum[keep].detach()
+        self.mvgar_depth_error_sum = self.mvgar_depth_error_sum[keep].detach()
+        self.mvgar_depth_error_sq_sum = self.mvgar_depth_error_sq_sum[keep].detach()
+        self.mvgar_view_count = self.mvgar_view_count[keep].detach()
+        self.mvgar_last_camera_id = self.mvgar_last_camera_id[keep].detach()
+
+    def _accumulate_mvgar_evidence(self, visible_mask: Optional[torch.Tensor] = None) -> None:
+        if not self._mvgar_requested() or self._mvgar_current_evidence is None:
+            return
+        evidence = self._mvgar_current_evidence
+        camera_id = self._mvgar_current_camera_id
+        if camera_id is None:
+            return
+        if evidence.weight.numel() != self.num_points:
+            self._ensure_mvgar_buffers(reset_on_mismatch=True)
+            return
+        self._ensure_mvgar_buffers(reset_on_mismatch=True)
+        weight = evidence.weight.detach().to(device=self.device, dtype=torch.float32).reshape(-1)
+        detail = evidence.detail.detach().to(device=self.device, dtype=torch.float32).reshape(-1)
+        log_error = evidence.log_depth_error.detach().to(device=self.device, dtype=torch.float32).reshape(-1)
+        if visible_mask is None:
+            visible = torch.ones_like(weight, dtype=torch.bool, device=self.device)
+        else:
+            if visible_mask.numel() != self.num_points:
+                self._ensure_mvgar_buffers(reset_on_mismatch=True)
+                return
+            visible = visible_mask.reshape(-1).to(device=self.device)
+        keep = visible & torch.isfinite(weight) & torch.isfinite(detail) & torch.isfinite(log_error) & (weight > 0.0)
+        if not bool(keep.any().item()):
+            return
+        camera_ids = self.mvgar_last_camera_id.reshape(-1)
+        new_view = keep & (camera_ids != int(camera_id))
+        if not bool(new_view.any().item()):
+            return
+        w = weight[new_view]
+        self.mvgar_weight_sum[new_view] += w
+        self.mvgar_detail_sum[new_view] += w * detail[new_view]
+        self.mvgar_depth_error_sum[new_view] += w * log_error[new_view]
+        self.mvgar_depth_error_sq_sum[new_view] += w * log_error[new_view].square()
+        self.mvgar_view_count[new_view] += 1.0
+        self.mvgar_last_camera_id[new_view] = int(camera_id)
+
+    def _mvgar_buffer_stats(self) -> Dict[str, object]:
+        if not self._ensure_mvgar_buffers(reset_on_mismatch=False):
+            return {}
+        wsum = self.mvgar_weight_sum.float()
+        vc = self.mvgar_view_count.float()
+        denom = wsum.clamp_min(1e-6)
+        supported = vc > 0
+        mean_weight = wsum / vc.clamp_min(1.0)
+        mean_detail = self.mvgar_detail_sum.float() / denom
+        mean_error = self.mvgar_depth_error_sum.float() / denom
+        error_var = (self.mvgar_depth_error_sq_sum.float() / denom - mean_error.square()).clamp_min(0.0)
+        return {
+            "mvgar_buffer_supported_count": int(supported.sum().item()),
+            "mvgar_buffer_supported_fraction": float(supported.float().mean().item()) if supported.numel() else 0.0,
+            "mvgar_buffer_mean_weight": tensor_stats(mean_weight[supported]),
+            "mvgar_buffer_mean_detail": tensor_stats(mean_detail[supported]),
+            "mvgar_buffer_depth_error_abs": tensor_stats(mean_error[supported].abs()),
+            "mvgar_buffer_depth_error_variance": tensor_stats(error_var[supported]),
+            "mvgar_buffer_view_count": tensor_stats(vc[supported]),
+        }
+
+    def _write_mvgar_log(self, payload: Dict[str, object]) -> None:
+        log_path = getattr(self.config, "mvgar_log_path", None)
+        if not log_path:
+            return
+        try:
+            path = Path(log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf8") as f:
+                f.write(json.dumps(payload) + "\n")
+        except Exception as exc:
+            CONSOLE.log(f"[yellow]Failed to write MV-GAR log: {exc}[/yellow]")
 
     def _background_render_ramp_weight(self, weight: float) -> float:
         return self._ramped_weight(
@@ -2205,6 +2512,9 @@ class WaterSplattingModel(Model):
         if self._cleanup_enabled() and self.training:
             self.cleanup_current_alpha = None
             self.cleanup_current_ownership = None
+        if self._mvgar_requested() and self.training:
+            self._mvgar_current_evidence = None
+            self._mvgar_current_camera_id = camera_index
         self.current_densification_region_weight = None
         self.current_densification_region_samples = None
         
@@ -2775,6 +3085,7 @@ class WaterSplattingModel(Model):
 
         outputs = {
             "rgb": rgb,
+            "gaussian_depths": depths,
             "depth": render.depth,
             "depth_second_moment": render.depth_second_moment,
             "depth_variance": render.depth_variance,
@@ -2999,6 +3310,13 @@ class WaterSplattingModel(Model):
                 float(stats.get("background_accumulation_decrease_pressure_fraction", 0.0)),
                 device=self.device,
             )
+        if self._mvgar_last_surface_stats is not None:
+            for key, value in self._mvgar_last_surface_stats.items():
+                metrics_dict[key] = torch.tensor(float(value), device=self.device)
+        if self._mvgar_last_refinement_stats is not None:
+            for key in ["mvgar_eligible_count", "mvgar_extra_candidate_count", "mvgar_split_count", "mvgar_duplicate_count"]:
+                if key in self._mvgar_last_refinement_stats:
+                    metrics_dict[key] = torch.tensor(float(self._mvgar_last_refinement_stats[key]), device=self.device)
         return metrics_dict
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None) -> Dict[str, torch.Tensor]:
@@ -3156,6 +3474,87 @@ class WaterSplattingModel(Model):
                 ssim_metric=self.ssim,
             ),
         }
+
+        if self.training and self._mvgar_requested() and "gaussian_depths" in outputs and "camera_index" in outputs:
+            pseudo_depth_dir = getattr(self.config, "mvgar_pseudo_depth_dir", None)
+            if not pseudo_depth_dir:
+                if not self._warned_mvgar_missing_depth_dir:
+                    CONSOLE.log("[yellow]MV-GAR requested but mvgar_pseudo_depth_dir is not set; skipping.[/yellow]")
+                    self._warned_mvgar_missing_depth_dir = True
+            else:
+                camera_index = int(outputs["camera_index"].detach().cpu().reshape(-1)[0].item())
+                payload = load_mvgar_view_payload(
+                    pseudo_depth_dir,
+                    camera_index,
+                    height=int(gt_img.shape[0]),
+                    width=int(gt_img.shape[1]),
+                    device=self.device,
+                    dtype=gt_img.dtype,
+                    cache=self._mvgar_payload_cache,
+                )
+                if payload is not None:
+                    detail_map = build_mvgar_detail_map(pred_img, gt_img, highpass_weight=0.35)
+                    evidence = build_mvgar_surface_evidence(
+                        payload=payload,
+                        outputs=outputs,
+                        gaussian_depths=outputs["gaussian_depths"],
+                        xys=self.xys,
+                        radii=self.radii,
+                        detail_map=detail_map,
+                        min_pseudo_confidence=float(getattr(self.config, "mvgar_min_pseudo_confidence", 0.50)),
+                        accumulation_mid=float(getattr(self.config, "mvgar_accumulation_mid", 0.45)),
+                        accumulation_temp=float(getattr(self.config, "mvgar_accumulation_temp", 0.08)),
+                        depth_std_kappa=float(getattr(self.config, "mvgar_depth_std_kappa", 0.20)),
+                        front_depth_log_tau=float(getattr(self.config, "mvgar_front_depth_log_tau", 0.08)),
+                    )
+                    self._mvgar_current_evidence = evidence
+                    self._mvgar_current_camera_id = camera_index
+                    with torch.no_grad():
+                        self._accumulate_mvgar_evidence()
+                    support = evidence.weight > 0
+                    weight_sum = evidence.weight.sum().detach()
+                    raw_surface_loss = mvgar_surface_anchor_loss(
+                        gaussian_depths=outputs["gaussian_depths"],
+                        depth_target=evidence.depth_target,
+                        weight=evidence.weight,
+                        huber_delta=float(getattr(self.config, "mvgar_surface_huber_delta", 0.05)),
+                    )
+                    mvgar_weight = self._mvgar_surface_weight()
+                    if mvgar_weight > 0.0:
+                        loss_dict["mvgar_surface_loss"] = mvgar_weight * raw_surface_loss
+                    surface_stats = {
+                        "mvgar_surface_weight": float(mvgar_weight),
+                        "mvgar_surface_loss_raw": float(raw_surface_loss.detach().item()),
+                        "mvgar_surface_weight_sum": float(weight_sum.item()),
+                        "mvgar_surface_gaussian_count": int(support.sum().item()),
+                        "mvgar_surface_gaussian_fraction": float(support.float().mean().item())
+                        if support.numel()
+                        else 0.0,
+                        "mvgar_surface_log_error_abs_mean": float(
+                            evidence.log_depth_error[support].abs().mean().item()
+                        )
+                        if bool(support.any().item())
+                        else 0.0,
+                        "mvgar_surface_front_gate_mean": float(evidence.front_gate.mean().item())
+                        if evidence.front_gate.numel()
+                        else 0.0,
+                        "mvgar_surface_confidence_mean": float(evidence.sampled_confidence.mean().item())
+                        if evidence.sampled_confidence.numel()
+                        else 0.0,
+                    }
+                    self._mvgar_last_surface_stats = surface_stats
+                    if self.step % 500 == 0:
+                        self._write_mvgar_log(
+                            {
+                                "event": "surface",
+                                "step": int(self.step),
+                                "camera_index": int(camera_index),
+                                **surface_stats,
+                            }
+                        )
+                    if metrics_dict is not None:
+                        for key, value in surface_stats.items():
+                            metrics_dict[key] = torch.tensor(float(value), device=self.device)
 
         medium_weight = self._ramped_weight(
             float(getattr(self.config, "lambda_medium_explainability", 0.0)),
