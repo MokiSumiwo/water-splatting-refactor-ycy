@@ -61,13 +61,20 @@ from water_splatting.losses import (
     sh_residual_mean_anchor_loss,
 )
 from water_splatting.geometry import (
+    MCGREvidence,
     MVGAREvidence,
+    build_mcgr_detail_residual,
+    build_mcgr_gaussian_evidence,
+    build_mcgr_persistent_map,
     build_mvgar_detail_map,
     build_mvgar_surface_evidence,
+    load_mcgr_correspondence_payload,
     load_mvgar_view_payload,
     mvgar_surface_anchor_loss,
+    select_mcgr_candidates,
     select_mvgar_candidates,
     tensor_stats,
+    update_mcgr_residual_bank,
 )
 from water_splatting.ownership import compute_infinite_water_ownership
 from water_splatting.rendering import UnderwaterRasterizer
@@ -559,6 +566,50 @@ class WaterSplattingModelConfig(ModelConfig):
     """Reserved future weight for MV-GAR concentration loss."""
     mvgar_concentration_target: float = 0.12
     """Reserved future target for MV-GAR concentration loss."""
+    mcgr_enabled: bool = False
+    """Enable MCGR correspondence-gated refinement candidates."""
+    mcgr_diagnostic_only: bool = True
+    """Build and log MCGR evidence without adding extra refinement candidates."""
+    mcgr_correspondence_dir: Optional[str] = None
+    """Directory containing view_XXXX_mcgr.pt correspondence payloads."""
+    mcgr_log_path: Optional[str] = None
+    """Optional JSONL path for MCGR residual and refinement diagnostics."""
+    mcgr_start_step: int = 1000
+    """First step where MCGR evidence can select refinement candidates."""
+    mcgr_stop_step: int = 10000
+    """Step where MCGR evidence stops selecting refinement candidates."""
+    mcgr_residual_bank_downscale: int = 4
+    """Downscale factor for the CPU residual bank and correspondence payloads."""
+    mcgr_residual_ema_decay: float = 0.80
+    """EMA decay for per-view detached residual bank entries."""
+    mcgr_residual_max_age_epochs: float = 2.0
+    """Maximum residual-bank age in training-view passes."""
+    mcgr_highpass_weight: float = 0.35
+    """High-pass residual weight in detached underwater RGB detail maps."""
+    mcgr_residual_match_tau: float = 0.30
+    """Residual agreement temperature for warped neighbor residuals."""
+    mcgr_min_valid_neighbors: int = 2
+    """Minimum valid warped neighbor residuals per pixel for persistence."""
+    mcgr_min_view_count: int = 3
+    """Minimum distinct train-view support before MCGR can select a Gaussian."""
+    mcgr_min_mean_confidence: float = 0.30
+    """Minimum mean correspondence/render confidence for MCGR candidate eligibility."""
+    mcgr_persistent_quantile: float = 0.85
+    """Persistent residual quantile threshold among eligible Gaussians."""
+    mcgr_accumulation_mid: float = 0.40
+    """Accumulation midpoint for MCGR render-reliability gate."""
+    mcgr_accumulation_temp: float = 0.08
+    """Accumulation temperature for MCGR render-reliability gate."""
+    mcgr_depth_std_kappa: float = 0.25
+    """Relative depth dispersion scale for MCGR render-reliability gate."""
+    mcgr_gradient_coherence_enabled: bool = False
+    """Enable optional V1 world-space means-gradient direction consistency gate."""
+    mcgr_gradient_coherence_threshold: float = 0.35
+    """Minimum gradient direction coherence when MCGR V1 gating is enabled."""
+    mcgr_max_extra_ratio_to_base: float = 0.20
+    """Maximum MCGR extra candidates as a ratio of base high-gradient candidates."""
+    mcgr_max_extra_fraction_per_refine: float = 0.001
+    """Maximum MCGR extra candidates as a fraction of current Gaussian count per refinement."""
     clear_proxy_enabled: bool = False
     """Enable an auxiliary zero-medium black-background clear proxy render."""
     clear_proxy_appearance_only: bool = False
@@ -797,6 +848,24 @@ class WaterSplattingModel(Model):
         )
         self.register_buffer("mvgar_view_count", torch.zeros(num_points, dtype=torch.float32, device=means.device), persistent=True)
         self.register_buffer("mvgar_last_camera_id", torch.full((num_points,), -1, dtype=torch.long, device=means.device), persistent=True)
+        self.register_buffer("mcgr_weight_sum", torch.zeros(num_points, dtype=torch.float32, device=means.device), persistent=True)
+        self.register_buffer(
+            "mcgr_persistent_sum",
+            torch.zeros(num_points, dtype=torch.float32, device=means.device),
+            persistent=True,
+        )
+        self.register_buffer("mcgr_view_count", torch.zeros(num_points, dtype=torch.float32, device=means.device), persistent=True)
+        self.register_buffer("mcgr_last_camera_id", torch.full((num_points,), -1, dtype=torch.long, device=means.device), persistent=True)
+        self.register_buffer(
+            "mcgr_grad_direction_sum",
+            torch.zeros(num_points, 3, dtype=torch.float32, device=means.device),
+            persistent=True,
+        )
+        self.register_buffer(
+            "mcgr_grad_weight_sum",
+            torch.zeros(num_points, dtype=torch.float32, device=means.device),
+            persistent=True,
+        )
 
         # metrics
         from torchmetrics.image import PeakSignalNoiseRatio
@@ -833,6 +902,15 @@ class WaterSplattingModel(Model):
         self._mvgar_last_refinement_stats: Optional[Dict[str, object]] = None
         self._warned_mvgar_missing_depth_dir = False
         self._warned_mvgar_shape_reset = False
+        self._mcgr_payload_cache: Dict[Tuple[str, int], Dict[str, torch.Tensor]] = {}
+        self._mcgr_residual_bank: Dict[int, torch.Tensor] = {}
+        self._mcgr_residual_bank_steps: Dict[int, int] = {}
+        self._mcgr_current_evidence: Optional[MCGREvidence] = None
+        self._mcgr_current_camera_id: Optional[int] = None
+        self._mcgr_last_evidence_stats: Optional[Dict[str, float]] = None
+        self._mcgr_last_refinement_stats: Optional[Dict[str, object]] = None
+        self._warned_mcgr_missing_correspondence_dir = False
+        self._warned_mcgr_shape_reset = False
 
         self.crop_box: Optional[OrientedBox] = None
         if self.config.background_color == "random":
@@ -1073,6 +1151,7 @@ class WaterSplattingModel(Model):
                 newradii / float(max(self.last_size[0], self.last_size[1])),
             )
             self._accumulate_cleanup_evidence(visible_mask)
+            self._accumulate_mcgr_gradient_coherence(visible_mask)
 
     def set_crop(self, crop_box: Optional[OrientedBox]):
         self.crop_box = crop_box
@@ -1107,6 +1186,8 @@ class WaterSplattingModel(Model):
                 base_high_grads = high_grads.clone()
                 mvgar_candidates = torch.zeros_like(high_grads, dtype=torch.bool)
                 mvgar_payload: Dict[str, object] = {}
+                mcgr_candidates = torch.zeros_like(high_grads, dtype=torch.bool)
+                mcgr_payload: Dict[str, object] = {}
                 if (
                     self._mvgar_requested()
                     and self._mvgar_in_window()
@@ -1131,6 +1212,32 @@ class WaterSplattingModel(Model):
                     )
                     if not bool(getattr(self.config, "mvgar_diagnostic_only", False)):
                         high_grads = high_grads | mvgar_candidates
+                if self._mcgr_requested() and self._mcgr_in_window():
+                    mcgr_candidates, mcgr_payload = select_mcgr_candidates(
+                        base_high_grads=base_high_grads,
+                        weight_sum=self.mcgr_weight_sum,
+                        persistent_sum=self.mcgr_persistent_sum,
+                        view_count=self.mcgr_view_count,
+                        grad_direction_sum=self.mcgr_grad_direction_sum,
+                        grad_weight_sum=self.mcgr_grad_weight_sum,
+                        gradient_coherence_enabled=bool(
+                            getattr(self.config, "mcgr_gradient_coherence_enabled", False)
+                        ),
+                        gradient_coherence_threshold=float(
+                            getattr(self.config, "mcgr_gradient_coherence_threshold", 0.35)
+                        ),
+                        min_view_count=int(getattr(self.config, "mcgr_min_view_count", 3)),
+                        min_mean_confidence=float(getattr(self.config, "mcgr_min_mean_confidence", 0.30)),
+                        persistent_quantile=float(getattr(self.config, "mcgr_persistent_quantile", 0.85)),
+                        max_extra_ratio_to_base=float(getattr(self.config, "mcgr_max_extra_ratio_to_base", 0.20)),
+                        max_extra_fraction_per_refine=float(
+                            getattr(self.config, "mcgr_max_extra_fraction_per_refine", 0.001)
+                        ),
+                    )
+                    if bool(getattr(self.config, "mcgr_enabled", False)) and not bool(
+                        getattr(self.config, "mcgr_diagnostic_only", True)
+                    ):
+                        high_grads = high_grads | mcgr_candidates
 
                 splits = (self.scales.exp().max(dim=-1).values > self.config.densify_size_thresh).squeeze()
                 if self.step < self.config.stop_screen_size_at:
@@ -1151,6 +1258,7 @@ class WaterSplattingModel(Model):
                 self._sync_gaussian_lineage_ids_for_densification(splits, dups, nsamps)
                 self._sync_background_candidate_mask_for_densification(splits, dups, nsamps)
                 self._sync_mvgar_buffers_for_densification(splits, dups, nsamps)
+                self._sync_mcgr_buffers_for_densification(splits, dups, nsamps)
                 if self._mvgar_requested():
                     mvgar_payload.update(
                         {
@@ -1162,6 +1270,19 @@ class WaterSplattingModel(Model):
                         }
                     )
                     mvgar_payload.update(self._mvgar_buffer_stats())
+                if self._mcgr_requested():
+                    mcgr_payload.update(
+                        {
+                            "event": "refinement",
+                            "step": int(self.step),
+                            "total_gaussians_before": int(base_high_grads.numel()),
+                            "total_gaussians_after_append": int(self.num_points),
+                            "mcgr_split_count": int((mcgr_candidates & splits).sum().item()),
+                            "mcgr_duplicate_count": int((mcgr_candidates & dups).sum().item()),
+                            "mcgr_diagnostic_only": bool(getattr(self.config, "mcgr_diagnostic_only", True)),
+                        }
+                    )
+                    mcgr_payload.update(self._mcgr_buffer_stats())
 
                 # append zeros to the max_2Dsize tensor
                 self.max_2Dsize = torch.cat(
@@ -1196,6 +1317,10 @@ class WaterSplattingModel(Model):
                     mvgar_payload["total_gaussians_after_cull"] = int(self.num_points)
                     self._mvgar_last_refinement_stats = mvgar_payload
                     self._write_mvgar_log(mvgar_payload)
+                if self._mcgr_requested():
+                    mcgr_payload["total_gaussians_after_cull"] = int(self.num_points)
+                    self._mcgr_last_refinement_stats = mcgr_payload
+                    self._write_mcgr_log(mcgr_payload)
             elif self.step >= self.config.stop_split_at and self.config.continue_cull_post_densification:
                 deleted_mask = self.cull_gaussians(cleanup_cull_mask)
             elif cleanup_cull_mask is not None:
@@ -1238,6 +1363,8 @@ class WaterSplattingModel(Model):
             self._reset_cleanup_accumulators()
             if self._mvgar_requested():
                 self._reset_mvgar_accumulators()
+            if self._mcgr_requested():
+                self._reset_mcgr_accumulators()
 
     def cull_gaussians(self, extra_cull_mask: Optional[torch.Tensor] = None):
         """
@@ -1269,6 +1396,7 @@ class WaterSplattingModel(Model):
         self._sync_gaussian_lineage_ids_for_cull(culls)
         self._sync_background_candidate_mask_for_cull(culls)
         self._sync_mvgar_buffers_for_cull(culls)
+        self._sync_mcgr_buffers_for_cull(culls)
 
         CONSOLE.log(
             f"Culled {n_bef - self.num_points} gaussians "
@@ -1606,6 +1734,184 @@ class WaterSplattingModel(Model):
                 f.write(json.dumps(payload) + "\n")
         except Exception as exc:
             CONSOLE.log(f"[yellow]Failed to write MV-GAR log: {exc}[/yellow]")
+
+    def _mcgr_requested(self) -> bool:
+        return bool(getattr(self.config, "mcgr_enabled", False) or getattr(self.config, "mcgr_diagnostic_only", False))
+
+    def _mcgr_in_window(self) -> bool:
+        start = int(getattr(self.config, "mcgr_start_step", 1000))
+        stop = int(getattr(self.config, "mcgr_stop_step", 10000))
+        return self.step >= start and (stop <= 0 or self.step < stop)
+
+    def _ensure_mcgr_buffers(self, *, reset_on_mismatch: bool = True) -> bool:
+        n = int(self.num_points)
+        required = [
+            "mcgr_weight_sum",
+            "mcgr_persistent_sum",
+            "mcgr_view_count",
+            "mcgr_last_camera_id",
+            "mcgr_grad_direction_sum",
+            "mcgr_grad_weight_sum",
+        ]
+        ok = all(hasattr(self, name) and getattr(self, name).shape[0] == n for name in required)
+        if ok:
+            return True
+        if not reset_on_mismatch:
+            return False
+        if not self._warned_mcgr_shape_reset:
+            CONSOLE.log("[yellow]MCGR buffer shape mismatch; resetting detached evidence buffers.[/yellow]")
+            self._warned_mcgr_shape_reset = True
+        device = self.device
+        self.mcgr_weight_sum = torch.zeros(n, dtype=torch.float32, device=device)
+        self.mcgr_persistent_sum = torch.zeros(n, dtype=torch.float32, device=device)
+        self.mcgr_view_count = torch.zeros(n, dtype=torch.float32, device=device)
+        self.mcgr_last_camera_id = torch.full((n,), -1, dtype=torch.long, device=device)
+        self.mcgr_grad_direction_sum = torch.zeros(n, 3, dtype=torch.float32, device=device)
+        self.mcgr_grad_weight_sum = torch.zeros(n, dtype=torch.float32, device=device)
+        return True
+
+    def _reset_mcgr_accumulators(self) -> None:
+        self._ensure_mcgr_buffers(reset_on_mismatch=True)
+        self.mcgr_weight_sum.zero_()
+        self.mcgr_persistent_sum.zero_()
+        self.mcgr_view_count.zero_()
+        self.mcgr_last_camera_id.fill_(-1)
+        self.mcgr_grad_direction_sum.zero_()
+        self.mcgr_grad_weight_sum.zero_()
+
+    def _sync_mcgr_buffers_for_densification(
+        self,
+        splits: torch.Tensor,
+        dups: torch.Tensor,
+        nsamps: int,
+    ) -> None:
+        splits = splits.reshape(-1).to(device=self.device)
+        dups = dups.reshape(-1).to(device=self.device)
+        if (
+            not hasattr(self, "mcgr_weight_sum")
+            or self.mcgr_weight_sum.numel() != splits.numel()
+            or self.mcgr_weight_sum.numel() != dups.numel()
+        ):
+            self._ensure_mcgr_buffers(reset_on_mismatch=True)
+            return
+        extra = int(nsamps * splits.sum().item() + dups.sum().item())
+        float_zeros = torch.zeros(extra, dtype=torch.float32, device=self.device)
+        long_fill = torch.full((extra,), -1, dtype=torch.long, device=self.device)
+        self.mcgr_weight_sum = torch.cat([self.mcgr_weight_sum, float_zeros.clone()], dim=0)
+        self.mcgr_persistent_sum = torch.cat([self.mcgr_persistent_sum, float_zeros.clone()], dim=0)
+        self.mcgr_view_count = torch.cat([self.mcgr_view_count, float_zeros.clone()], dim=0)
+        self.mcgr_last_camera_id = torch.cat([self.mcgr_last_camera_id, long_fill], dim=0)
+        self.mcgr_grad_direction_sum = torch.cat(
+            [self.mcgr_grad_direction_sum, torch.zeros(extra, 3, dtype=torch.float32, device=self.device)],
+            dim=0,
+        )
+        self.mcgr_grad_weight_sum = torch.cat([self.mcgr_grad_weight_sum, float_zeros.clone()], dim=0)
+
+    def _sync_mcgr_buffers_for_cull(self, culls: torch.Tensor) -> None:
+        culls = culls.reshape(-1).to(device=self.device)
+        if not hasattr(self, "mcgr_weight_sum") or self.mcgr_weight_sum.numel() != culls.numel():
+            self._ensure_mcgr_buffers(reset_on_mismatch=True)
+            return
+        keep = ~culls
+        self.mcgr_weight_sum = self.mcgr_weight_sum[keep].detach()
+        self.mcgr_persistent_sum = self.mcgr_persistent_sum[keep].detach()
+        self.mcgr_view_count = self.mcgr_view_count[keep].detach()
+        self.mcgr_last_camera_id = self.mcgr_last_camera_id[keep].detach()
+        self.mcgr_grad_direction_sum = self.mcgr_grad_direction_sum[keep].detach()
+        self.mcgr_grad_weight_sum = self.mcgr_grad_weight_sum[keep].detach()
+
+    def _accumulate_mcgr_evidence(self, visible_mask: Optional[torch.Tensor] = None) -> None:
+        if not self._mcgr_requested() or self._mcgr_current_evidence is None:
+            return
+        evidence = self._mcgr_current_evidence
+        camera_id = self._mcgr_current_camera_id
+        if camera_id is None:
+            return
+        if evidence.weight.numel() != self.num_points:
+            self._ensure_mcgr_buffers(reset_on_mismatch=True)
+            return
+        self._ensure_mcgr_buffers(reset_on_mismatch=True)
+        weight = evidence.weight.detach().to(device=self.device, dtype=torch.float32).reshape(-1)
+        persistent = evidence.persistent.detach().to(device=self.device, dtype=torch.float32).reshape(-1)
+        if visible_mask is None:
+            visible = torch.ones_like(weight, dtype=torch.bool, device=self.device)
+        else:
+            if visible_mask.numel() != self.num_points:
+                self._ensure_mcgr_buffers(reset_on_mismatch=True)
+                return
+            visible = visible_mask.reshape(-1).to(device=self.device)
+        keep = visible & torch.isfinite(weight) & torch.isfinite(persistent) & (weight > 0.0)
+        if not bool(keep.any().item()):
+            return
+        camera_ids = self.mcgr_last_camera_id.reshape(-1)
+        new_view = keep & (camera_ids != int(camera_id))
+        if not bool(new_view.any().item()):
+            return
+        w = weight[new_view]
+        self.mcgr_weight_sum[new_view] += w
+        self.mcgr_persistent_sum[new_view] += w * persistent[new_view]
+        self.mcgr_view_count[new_view] += 1.0
+        self.mcgr_last_camera_id[new_view] = int(camera_id)
+
+    def _accumulate_mcgr_gradient_coherence(self, visible_mask: Optional[torch.Tensor] = None) -> None:
+        if not bool(getattr(self.config, "mcgr_gradient_coherence_enabled", False)):
+            return
+        if not self._mcgr_requested() or self._mcgr_current_evidence is None:
+            return
+        means_grad = self.means.grad
+        if means_grad is None or means_grad.shape[0] != self.num_points:
+            return
+        evidence = self._mcgr_current_evidence
+        if evidence.weight.numel() != self.num_points:
+            return
+        self._ensure_mcgr_buffers(reset_on_mismatch=True)
+        weight = evidence.weight.detach().to(device=self.device, dtype=torch.float32).reshape(-1)
+        if visible_mask is None:
+            visible = torch.ones_like(weight, dtype=torch.bool, device=self.device)
+        else:
+            if visible_mask.numel() != self.num_points:
+                return
+            visible = visible_mask.reshape(-1).to(device=self.device)
+        grad = means_grad.detach().to(device=self.device, dtype=torch.float32)
+        norm = grad.norm(dim=-1)
+        keep = visible & torch.isfinite(weight) & torch.isfinite(norm) & (weight > 0.0) & (norm > 1e-12)
+        if not bool(keep.any().item()):
+            return
+        direction = grad[keep] / norm[keep, None].clamp_min(1e-12)
+        w = weight[keep]
+        self.mcgr_grad_direction_sum[keep] += w[:, None] * direction
+        self.mcgr_grad_weight_sum[keep] += w
+
+    def _mcgr_buffer_stats(self) -> Dict[str, object]:
+        if not self._ensure_mcgr_buffers(reset_on_mismatch=False):
+            return {}
+        wsum = self.mcgr_weight_sum.float()
+        vc = self.mcgr_view_count.float()
+        supported = vc > 0
+        mean_conf = wsum / vc.clamp_min(1.0)
+        mean_persistent = self.mcgr_persistent_sum.float() / wsum.clamp_min(1e-6)
+        grad_weight = self.mcgr_grad_weight_sum.float().clamp_min(1e-6)
+        grad_coherence = (self.mcgr_grad_direction_sum.float().norm(dim=-1) / grad_weight).clamp(0.0, 1.0)
+        return {
+            "mcgr_buffer_supported_count": int(supported.sum().item()),
+            "mcgr_buffer_supported_fraction": float(supported.float().mean().item()) if supported.numel() else 0.0,
+            "mcgr_buffer_mean_confidence": tensor_stats(mean_conf[supported]),
+            "mcgr_buffer_mean_persistent": tensor_stats(mean_persistent[supported]),
+            "mcgr_buffer_view_count": tensor_stats(vc[supported]),
+            "mcgr_buffer_grad_coherence": tensor_stats(grad_coherence[supported]),
+        }
+
+    def _write_mcgr_log(self, payload: Dict[str, object]) -> None:
+        log_path = getattr(self.config, "mcgr_log_path", None)
+        if not log_path:
+            return
+        try:
+            path = Path(log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf8") as f:
+                f.write(json.dumps(payload) + "\n")
+        except Exception as exc:
+            CONSOLE.log(f"[yellow]Failed to write MCGR log: {exc}[/yellow]")
 
     def _background_render_ramp_weight(self, weight: float) -> float:
         return self._ramped_weight(
@@ -2515,6 +2821,9 @@ class WaterSplattingModel(Model):
         if self._mvgar_requested() and self.training:
             self._mvgar_current_evidence = None
             self._mvgar_current_camera_id = camera_index
+        if self._mcgr_requested() and self.training:
+            self._mcgr_current_evidence = None
+            self._mcgr_current_camera_id = camera_index
         self.current_densification_region_weight = None
         self.current_densification_region_samples = None
         
@@ -3317,6 +3626,19 @@ class WaterSplattingModel(Model):
             for key in ["mvgar_eligible_count", "mvgar_extra_candidate_count", "mvgar_split_count", "mvgar_duplicate_count"]:
                 if key in self._mvgar_last_refinement_stats:
                     metrics_dict[key] = torch.tensor(float(self._mvgar_last_refinement_stats[key]), device=self.device)
+        if self._mcgr_last_evidence_stats is not None:
+            for key, value in self._mcgr_last_evidence_stats.items():
+                metrics_dict[key] = torch.tensor(float(value), device=self.device)
+        if self._mcgr_last_refinement_stats is not None:
+            for key in [
+                "mcgr_extra_candidate_count",
+                "mcgr_split_count",
+                "mcgr_duplicate_count",
+                "mcgr_supported_gaussian_count",
+                "mcgr_confidence_qualified_count",
+            ]:
+                if key in self._mcgr_last_refinement_stats:
+                    metrics_dict[key] = torch.tensor(float(self._mcgr_last_refinement_stats[key]), device=self.device)
         return metrics_dict
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None) -> Dict[str, torch.Tensor]:
@@ -3474,6 +3796,118 @@ class WaterSplattingModel(Model):
                 ssim_metric=self.ssim,
             ),
         }
+
+        if self.training and self._mcgr_requested() and "camera_index" in outputs:
+            correspondence_dir = getattr(self.config, "mcgr_correspondence_dir", None)
+            if not correspondence_dir:
+                if not self._warned_mcgr_missing_correspondence_dir:
+                    CONSOLE.log("[yellow]MCGR requested but mcgr_correspondence_dir is not set; skipping.[/yellow]")
+                    self._warned_mcgr_missing_correspondence_dir = True
+            else:
+                camera_index = int(outputs["camera_index"].detach().cpu().reshape(-1)[0].item())
+                camera_downscale = max(int(self._get_downscale_factor()), 1)
+                base_downscale = max(int(getattr(self.config, "mcgr_residual_bank_downscale", 4)), 1)
+                effective_downscale = max(int(round(base_downscale / camera_downscale)), 1)
+                current_residual = build_mcgr_detail_residual(
+                    pred_img,
+                    gt_img,
+                    downscale=effective_downscale,
+                    highpass_weight=float(getattr(self.config, "mcgr_highpass_weight", 0.35)),
+                )
+                payload = load_mcgr_correspondence_payload(
+                    correspondence_dir,
+                    camera_index,
+                    device=self.device,
+                    dtype=gt_img.dtype,
+                    cache=self._mcgr_payload_cache,
+                )
+                evidence_stats: Dict[str, float] = {
+                    "mcgr_current_detail_residual_mean": float(current_residual.float().mean().item()),
+                    "mcgr_current_detail_residual_p90": float(
+                        torch.quantile(current_residual.float().reshape(-1), 0.90).item()
+                    ),
+                    "mcgr_residual_bank_count": float(len(self._mcgr_residual_bank)),
+                    "mcgr_effective_downscale": float(effective_downscale),
+                    "mcgr_payload_loaded": 1.0 if payload is not None else 0.0,
+                }
+                if payload is not None and self._mcgr_in_window():
+                    max_age_steps = int(
+                        math.ceil(
+                            max(float(getattr(self.config, "mcgr_residual_max_age_epochs", 2.0)), 0.0)
+                            * max(int(getattr(self, "num_train_data", 1)), 1)
+                        )
+                    )
+                    persistent_map, persistent_stats = build_mcgr_persistent_map(
+                        payload=payload,
+                        current_residual=current_residual,
+                        residual_bank=self._mcgr_residual_bank,
+                        residual_bank_steps=self._mcgr_residual_bank_steps,
+                        step=int(self.step),
+                        max_age_steps=max_age_steps,
+                        min_valid_neighbors=int(getattr(self.config, "mcgr_min_valid_neighbors", 2)),
+                        residual_match_tau=float(getattr(self.config, "mcgr_residual_match_tau", 0.30)),
+                    )
+                    evidence = build_mcgr_gaussian_evidence(
+                        outputs=outputs,
+                        xys=self.xys,
+                        radii=self.radii,
+                        persistent_map=persistent_map,
+                        correspondence_payload=payload,
+                        accumulation_mid=float(getattr(self.config, "mcgr_accumulation_mid", 0.40)),
+                        accumulation_temp=float(getattr(self.config, "mcgr_accumulation_temp", 0.08)),
+                        depth_std_kappa=float(getattr(self.config, "mcgr_depth_std_kappa", 0.25)),
+                        downscale=effective_downscale,
+                    )
+                    self._mcgr_current_evidence = evidence
+                    self._mcgr_current_camera_id = camera_index
+                    with torch.no_grad():
+                        self._accumulate_mcgr_evidence()
+                    support = evidence.weight > 0
+                    evidence_stats.update(
+                        {
+                            **persistent_stats,
+                            "mcgr_evidence_weight_sum": float(evidence.weight.sum().item()),
+                            "mcgr_evidence_gaussian_count": int(support.sum().item()),
+                            "mcgr_evidence_gaussian_fraction": float(support.float().mean().item())
+                            if support.numel()
+                            else 0.0,
+                            "mcgr_evidence_persistent_mean": float(evidence.persistent[support].mean().item())
+                            if bool(support.any().item())
+                            else 0.0,
+                            "mcgr_evidence_confidence_mean": float(evidence.sampled_confidence[support].mean().item())
+                            if bool(support.any().item())
+                            else 0.0,
+                            "mcgr_evidence_valid_neighbors_mean": float(
+                                evidence.sampled_valid_neighbors[support].mean().item()
+                            )
+                            if bool(support.any().item())
+                            else 0.0,
+                            "mcgr_evidence_render_reliability_mean": float(
+                                evidence.sampled_render_reliability[support].mean().item()
+                            )
+                            if bool(support.any().item())
+                            else 0.0,
+                        }
+                    )
+                self._mcgr_residual_bank[camera_index] = update_mcgr_residual_bank(
+                    self._mcgr_residual_bank.get(camera_index),
+                    current_residual,
+                    ema_decay=float(getattr(self.config, "mcgr_residual_ema_decay", 0.80)),
+                )
+                self._mcgr_residual_bank_steps[camera_index] = int(self.step)
+                self._mcgr_last_evidence_stats = evidence_stats
+                if self.step % 500 == 0:
+                    self._write_mcgr_log(
+                        {
+                            "event": "evidence",
+                            "step": int(self.step),
+                            "camera_index": int(camera_index),
+                            **evidence_stats,
+                        }
+                    )
+                if metrics_dict is not None:
+                    for key, value in evidence_stats.items():
+                        metrics_dict[key] = torch.tensor(float(value), device=self.device)
 
         if self.training and self._mvgar_requested() and "gaussian_depths" in outputs and "camera_index" in outputs:
             pseudo_depth_dir = getattr(self.config, "mvgar_pseudo_depth_dir", None)
