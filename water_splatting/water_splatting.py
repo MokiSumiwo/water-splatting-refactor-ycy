@@ -305,6 +305,14 @@ class WaterSplattingModelConfig(ModelConfig):
     """Weight for weak B_inf/medium_rgb scene-center consistency."""
     lambda_gmvc_intrinsic: float = 0.0
     """Weight for renderer intrinsic Gaussian color consistency against detached track consensus."""
+    gmvc_intrinsic_source: Literal["J_proxy_raw", "J_gaussian_raw", "J_raw", "J"] = "J_proxy_raw"
+    """Rendered intrinsic output used by lambda_gmvc_intrinsic. J_proxy_raw has an active color backward path."""
+    gmvc_intrinsic_use_dc_proxy: bool = True
+    """Use DC-only Gaussian colors for the GMVC-triggered clear proxy render."""
+    gmvc_grad_log_path: Optional[str] = None
+    """Optional JSONL path for GMVC intrinsic-vs-RGB DC gradient diagnostics."""
+    gmvc_grad_log_every: int = 100
+    """Training-step interval for GMVC gradient JSONL diagnostics when gmvc_grad_log_path is set."""
     gmvc_max_tracks_per_step: int = 4096
     """Maximum detached track observations sampled for the current camera per step."""
     gmvc_eps: float = 1e-4
@@ -1333,6 +1341,107 @@ class WaterSplattingModel(Model):
 
     def _gmvc_requested(self) -> bool:
         return bool(getattr(self.config, "gmvc_enabled", False) or getattr(self.config, "gmvc_diagnostic_only", False))
+
+    def _gmvc_intrinsic_active(self) -> bool:
+        if not (self.training and self._gmvc_requested()):
+            return False
+        weight = float(getattr(self.config, "lambda_gmvc_intrinsic", 0.0))
+        if weight <= 0.0:
+            return False
+        start = int(getattr(self.config, "gmvc_start_step", 10000))
+        stop = int(getattr(self.config, "gmvc_stop_step", 15000))
+        return start <= int(self.step) < stop
+
+    def _gmvc_intrinsic_uses_proxy(self) -> bool:
+        return str(getattr(self.config, "gmvc_intrinsic_source", "J_proxy_raw")) == "J_proxy_raw"
+
+    @staticmethod
+    def _grad_norm(grads: Tuple[Optional[torch.Tensor], ...]) -> float:
+        total = 0.0
+        for grad in grads:
+            if grad is not None:
+                total += float(grad.detach().float().square().sum().item())
+        return math.sqrt(total)
+
+    def _maybe_log_gmvc_grad_stats(
+        self,
+        loss_dict: Dict[str, torch.Tensor],
+        metrics_dict: Optional[Dict[str, torch.Tensor]],
+    ) -> None:
+        path = getattr(self.config, "gmvc_grad_log_path", None)
+        if not (self.training and path):
+            return
+        every = max(int(getattr(self.config, "gmvc_grad_log_every", 100)), 1)
+        if int(self.step) % every != 0:
+            return
+        intrinsic_loss = loss_dict.get("gmvc_intrinsic_loss")
+        main_loss = loss_dict.get("main_loss")
+        if intrinsic_loss is None or not bool(getattr(intrinsic_loss, "requires_grad", False)):
+            return
+
+        def _safe_grad(loss: Optional[torch.Tensor], params: List[torch.Tensor]) -> Tuple[Optional[torch.Tensor], ...]:
+            if loss is None or not bool(getattr(loss, "requires_grad", False)):
+                return tuple(None for _ in params)
+            try:
+                return torch.autograd.grad(
+                    loss,
+                    params,
+                    retain_graph=True,
+                    create_graph=False,
+                    allow_unused=True,
+                )
+            except RuntimeError as exc:
+                CONSOLE.log(f"[yellow]GMVC grad diagnostic skipped at step {self.step}: {exc}[/yellow]")
+                return tuple(None for _ in params)
+
+        xys_grad_abs_before = self.xys_grad_abs.detach().clone() if self.xys_grad_abs is not None else None
+        xys_grad_abs_proxy_before = (
+            self.xys_grad_abs_proxy.detach().clone() if self.xys_grad_abs_proxy is not None else None
+        )
+
+        dc_params = [self.gauss_params["features_dc"]]
+        geom_params = [
+            self.gauss_params["means"],
+            self.gauss_params["scales"],
+            self.gauss_params["quats"],
+        ]
+        opacity_params = [self.gauss_params["opacities"]]
+        medium_params = list(self.medium_mlp.parameters()) + list(self.direction_encoding.parameters())
+
+        intrinsic_dc = _safe_grad(intrinsic_loss, dc_params)
+        rgb_dc = _safe_grad(main_loss, dc_params)
+        intrinsic_geom = _safe_grad(intrinsic_loss, geom_params)
+        intrinsic_opacity = _safe_grad(intrinsic_loss, opacity_params)
+        intrinsic_medium = _safe_grad(intrinsic_loss, medium_params)
+
+        if xys_grad_abs_before is not None and self.xys_grad_abs is not None:
+            self.xys_grad_abs = xys_grad_abs_before
+        if xys_grad_abs_proxy_before is not None and self.xys_grad_abs_proxy is not None:
+            self.xys_grad_abs_proxy = xys_grad_abs_proxy_before
+
+        intrinsic_dc_norm = self._grad_norm(intrinsic_dc)
+        rgb_dc_norm = self._grad_norm(rgb_dc)
+        row = {
+            "step": int(self.step),
+            "gmvc_intrinsic_raw": float(
+                metrics_dict.get("gmvc_intrinsic_raw", intrinsic_loss.detach()).detach().float().item()
+                if metrics_dict is not None
+                else intrinsic_loss.detach().float().item()
+            ),
+            "gmvc_intrinsic_weighted": float(intrinsic_loss.detach().float().item()),
+            "gmvc_intrinsic_grad_norm_dc": intrinsic_dc_norm,
+            "rgb_grad_norm_dc": rgb_dc_norm,
+            "intrinsic_to_rgb_dc_grad_ratio": intrinsic_dc_norm / (rgb_dc_norm + 1e-12),
+            "gmvc_intrinsic_grad_norm_geometry": self._grad_norm(intrinsic_geom),
+            "gmvc_intrinsic_grad_norm_opacity": self._grad_norm(intrinsic_opacity),
+            "gmvc_intrinsic_grad_norm_medium": self._grad_norm(intrinsic_medium),
+            "gmvc_intrinsic_source": str(getattr(self.config, "gmvc_intrinsic_source", "J_proxy_raw")),
+            "gmvc_intrinsic_use_dc_proxy": bool(getattr(self.config, "gmvc_intrinsic_use_dc_proxy", True)),
+        }
+        log_path = Path(path)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf8") as f:
+            f.write(json.dumps(row) + "\n")
 
     def _load_gmvc_training_bank(self):
         path = getattr(self.config, "gmvc_track_bank_path", None)
@@ -2587,10 +2696,12 @@ class WaterSplattingModel(Model):
             and core_zero_weight_config > 0.0
             and (not self.training or self.step >= int(getattr(self.config, "core_zero_capacity_start_step", 1000)))
         )
+        gmvc_intrinsic_proxy_active = self._gmvc_intrinsic_active() and self._gmvc_intrinsic_uses_proxy()
         clear_proxy_required = bool(
             getattr(self.config, "clear_proxy_enabled", False)
             or chroma_active_by_step
             or halo_active_by_step
+            or gmvc_intrinsic_proxy_active
         )
         capacity_control_required = bool(
             getattr(self.config, "capacity_control_enabled", False)
@@ -2713,7 +2824,11 @@ class WaterSplattingModel(Model):
             proxy_conics = conics
             proxy_colors = rgbs
             proxy_opacities = opacities
-            if bool(getattr(self.config, "clear_proxy_appearance_only", False)):
+            proxy_uses_dc_colors = False
+            if gmvc_intrinsic_proxy_active and bool(getattr(self.config, "gmvc_intrinsic_use_dc_proxy", True)):
+                proxy_colors = SH2RGB(features_dc_crop) if self.config.sh_degree > 0 else torch.sigmoid(features_dc_crop)
+                proxy_uses_dc_colors = True
+            if gmvc_intrinsic_proxy_active or bool(getattr(self.config, "clear_proxy_appearance_only", False)):
                 proxy_geometry_grad_scale = 0.0
                 proxy_opacity_grad_scale = 0.0
             else:
@@ -2723,7 +2838,9 @@ class WaterSplattingModel(Model):
                 proxy_opacity_grad_scale = float(
                     getattr(self.config, "clear_proxy_opacity_gradient_scale", 1.0)
                 )
-            proxy_color_grad_scale = float(getattr(self.config, "clear_proxy_color_gradient_scale", 1.0))
+            proxy_color_grad_scale = (
+                1.0 if gmvc_intrinsic_proxy_active else float(getattr(self.config, "clear_proxy_color_gradient_scale", 1.0))
+            )
             proxy_xys = _scale_aux_grad(proxy_xys, proxy_geometry_grad_scale)
             proxy_depths = _scale_aux_grad(proxy_depths, proxy_geometry_grad_scale)
             proxy_radii = _scale_aux_grad(proxy_radii, proxy_geometry_grad_scale)
@@ -2743,6 +2860,8 @@ class WaterSplattingModel(Model):
                 width=W,
                 step=self.step,
             )
+        else:
+            proxy_uses_dc_colors = False
         tail_weight_last = render.final_transmittance * torch.exp(-medium_bs * render.last_depth)
         tail_medium_original = tail_weight_last * medium_rgb
         rgb_medium_finite = render.rgb_medium - tail_medium_original
@@ -2885,6 +3004,7 @@ class WaterSplattingModel(Model):
             j_proxy_raw = clear_proxy_render.rgb
             outputs["J_proxy_raw"] = j_proxy_raw
             outputs["J_proxy"] = torch.clamp(j_proxy_raw, 0.0, 1.0)
+            outputs["J_proxy_uses_dc_colors"] = j_proxy_raw.new_tensor(float(proxy_uses_dc_colors))
             outputs["J_proxy_abs_diff_from_renderer_clear"] = torch.abs(
                 j_proxy_raw.detach() - j_gaussian_raw.detach()
             )
@@ -3680,6 +3800,8 @@ class WaterSplattingModel(Model):
                         beta=self.config.medium_attenuation_order_beta,
                     )
                 )
+
+        self._maybe_log_gmvc_grad_stats(loss_dict, metrics_dict)
 
         return loss_dict
 

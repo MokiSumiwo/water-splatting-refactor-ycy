@@ -1389,4 +1389,168 @@ renders/gmvc_phase_b_identifiability_20260803/japanesegradens_c4_intrinsic010/gm
 - C4 的 \(E_J\) 约为 0.05895，仍比 C0 的 0.05434 差约 8.5%，不满足 GMVC 的物理一致性 gate。
 - 因为 JapaneseGradens 主场景已经失败，本轮不进入 IUI3 / Curasao / Panama，也不进入四场景 15k。
 
-当前判断：GMVC 在现有 detached track-consensus formulation 下不能证明能缓解 M1 的 medium/Gaussian 不可辨识性。若继续研究，应优先改成 online track variance 或 scene-level parameter prior，而不是继续加大 `lambda_gmvc_intrinsic` 或扩展场景。
+修正判断：旧 C4 未能有效测试 intrinsic DC calibration，因为默认 target `J_gaussian_raw` 对应 CUDA wrapper 中未使用的 `out_clr` backward 路径；它只能说明“直接解冻 DC + RGB loss”不够，不能说明 active intrinsic DC proxy 无效。下一步已按 GPT 复盘建议先修复梯度路径，再做短程验证。
+
+### 18.8 Active DC proxy intrinsic path 复核
+
+本轮将 C4 intrinsic source 从旧 `J_gaussian_raw` 改为默认 `J_proxy_raw`。`J_proxy_raw` 来自零 medium、黑背景的 clear proxy render，走主 `out_img` backward 路径，因此可以把颜色梯度传回 Gaussian appearance。为避免完整 SH clear render 混入 view-dependent residual，本轮 GMVC 触发的 proxy 默认使用 DC-only color：
+
+```text
+gmvc_intrinsic_source = J_proxy_raw
+gmvc_intrinsic_use_dc_proxy = True
+clear proxy geometry gradient = 0
+clear proxy opacity gradient = 0
+clear proxy color gradient = 1
+```
+
+新增默认关闭/可配置项：
+
+```text
+lambda_gmvc_intrinsic: float = 0.0
+gmvc_intrinsic_source: Literal["J_proxy_raw", "J_gaussian_raw", "J_raw", "J"] = "J_proxy_raw"
+gmvc_intrinsic_use_dc_proxy: bool = True
+gmvc_grad_log_path: Optional[str] = None
+gmvc_grad_log_every: int = 100
+```
+
+代码改动：
+
+```text
+water_splatting/water_splatting.py
+  - GMVC intrinsic active 时自动触发 clear proxy render；
+  - GMVC proxy 默认使用 DC-only colors；
+  - GMVC proxy 对 geometry/opacities/medium 梯度隔离；
+  - 可选记录 intrinsic/RGB DC grad ratio JSONL。
+
+water_splatting/medium_calibration/gmvc_training.py
+  - intrinsic source 改为配置项，默认 J_proxy_raw；
+  - 记录 gmvc_intrinsic_source_available。
+
+scripts/diagnostics/diagnose_gmvc_intrinsic_gradient_paths.py
+  - 对同一 checkpoint 和 track bank 比较 J_gaussian_raw vs J_proxy_raw 的 intrinsic loss 梯度。
+
+scripts/experiments/gmvc_p0_nofreeze_japanesegradens_10k_to_10200.sh
+scripts/experiments/gmvc_p1_active_proxy003_japanesegradens_10k_to_10200.sh
+scripts/experiments/gmvc_p2_active_proxy005_japanesegradens_10k_to_10200.sh
+  - P0/P1/P2 no-freeze short-run 筛选脚本。
+```
+
+#### 18.8.1 梯度路径诊断
+
+命令：
+
+```bash
+CUDA_VISIBLE_DEVICES=6 /opt/anaconda3/envs/water_splatting/bin/python \
+  scripts/diagnostics/diagnose_gmvc_intrinsic_gradient_paths.py \
+  --load-config outputs/cross_scene_japanesegradens_redsea_m1_seed42_15000/water-splatting/cross_scene_japanesegradens_redsea_m1_seed42_15000_20260730_cross_scene/config.yml \
+  --load-step 10000 \
+  --probe-step 10001 \
+  --gmvc-track-bank renders/gmvc_track_banks/japanesegradens_redsea_m1_step10000_train_s4096/gmvc_track_bank.pt \
+  --lambda-gmvc-intrinsic 1.0 \
+  --max-tracks 2048 \
+  --max-images 17 \
+  --use-dc-proxy \
+  --output-json renders/gmvc_phase_b_gradients_20260803/japanesegradens_intrinsic_paths.json
+```
+
+结果：
+
+| Source | intrinsic raw | DC grad norm | RGB DC grad norm | ratio | geometry | opacity | medium |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `J_gaussian_raw` | 0.04224 | 0.000000 | 0.000623 | 0.0000 | 0.0 | 0.0 | 0.0 |
+| `J_proxy_raw` DC-only | 0.04724 | 0.001910 | 0.000623 | 3.0671 | 0.0 | 0.0 | 0.0 |
+
+结论：
+
+- 旧 C4 的 `J_gaussian_raw` intrinsic loss 确认是 dead-gradient，不能更新 `features_dc`。
+- 新 `J_proxy_raw` DC-only path 确认可以更新 `features_dc`，同时 geometry / opacity / medium 梯度为 0。
+- 因为 λ=1.0 的 ratio 约 3.07，短程训练选用 λ=0.03 和 λ=0.05，使实际 ratio 落在约 5%–10%。
+
+#### 18.8.2 Active proxy short-run 结果
+
+所有实验均从 JapaneseGradens M1 step 10000 checkpoint 继续，不冻结 geometry，不改变原始 densification / culling 路径。
+
+200-step 命令：
+
+```bash
+GPU=6 STAMP=20260803_gmvc_p0_nofreeze_short RUN_EVAL=1 RUN_CLOSURE_DIAG=0 \
+  scripts/experiments/gmvc_p0_nofreeze_japanesegradens_10k_to_10200.sh
+
+GPU=7 STAMP=20260803_gmvc_p1_active_proxy003_short RUN_EVAL=1 RUN_CLOSURE_DIAG=0 \
+  scripts/experiments/gmvc_p1_active_proxy003_japanesegradens_10k_to_10200.sh
+
+GPU=8 STAMP=20260803_gmvc_p2_active_proxy005_short RUN_EVAL=1 RUN_CLOSURE_DIAG=0 \
+  scripts/experiments/gmvc_p2_active_proxy005_japanesegradens_10k_to_10200.sh
+```
+
+500-step 命令：
+
+```bash
+GPU=6 EXPERIMENT_NAME=gmvc_p0_nofreeze_japanesegradens_redsea_seed42_step10000_to_10500 \
+  STAMP=20260803_gmvc_p0_nofreeze_500 TARGET_FINAL_STEP=10500 MODEL_NUM_STEPS=10500 \
+  MAX_NUM_ITERATIONS=500 STEPS_PER_SAVE=500 RUN_EVAL=1 RUN_CLOSURE_DIAG=0 \
+  scripts/experiments/gmvc_p0_nofreeze_japanesegradens_10k_to_10200.sh
+
+GPU=7 EXPERIMENT_NAME=gmvc_p1_active_proxy003_japanesegradens_redsea_seed42_step10000_to_10500 \
+  STAMP=20260803_gmvc_p1_active_proxy003_500 TARGET_FINAL_STEP=10500 MODEL_NUM_STEPS=10500 \
+  MAX_NUM_ITERATIONS=500 STEPS_PER_SAVE=500 GMVC_GRAD_LOG_EVERY=100 RUN_EVAL=1 RUN_CLOSURE_DIAG=0 \
+  scripts/experiments/gmvc_p1_active_proxy003_japanesegradens_10k_to_10200.sh
+
+GPU=8 EXPERIMENT_NAME=gmvc_p2_active_proxy005_japanesegradens_redsea_seed42_step10000_to_10500 \
+  STAMP=20260803_gmvc_p2_active_proxy005_500 TARGET_FINAL_STEP=10500 MODEL_NUM_STEPS=10500 \
+  MAX_NUM_ITERATIONS=500 STEPS_PER_SAVE=500 GMVC_GRAD_LOG_EVERY=100 RUN_EVAL=1 RUN_CLOSURE_DIAG=0 \
+  scripts/experiments/gmvc_p2_active_proxy005_japanesegradens_10k_to_10200.sh
+```
+
+质量结果：
+
+| Run | PSNR | SSIM | LPIPS | J blue | J sat |
+|---|---:|---:|---:|---:|---:|
+| 200 P0 no-freeze | 24.9172 | 0.8981 | 0.1220 | 0.1451 | 0.0573 |
+| 200 P1 proxy λ=0.03 | 24.9212 | 0.8980 | 0.1220 | 0.1443 | 0.0574 |
+| 200 P2 proxy λ=0.05 | 24.9277 | 0.8980 | 0.1220 | 0.1441 | 0.0575 |
+| 500 P0 no-freeze | 24.9521 | 0.9005 | 0.1197 | 0.1449 | 0.0563 |
+| 500 P1 proxy λ=0.03 | 24.9612 | 0.9006 | 0.1199 | 0.1445 | 0.0565 |
+| 500 P2 proxy λ=0.05 | 24.9633 | 0.9006 | 0.1201 | 0.1441 | 0.0566 |
+
+梯度日志：
+
+| Run | entries | raw first→last | DC grad ratio mean | ratio min/max | max non-DC grad |
+|---|---:|---:|---:|---:|---:|
+| 200 P1 λ=0.03 | 4 | 0.03958→0.04466 | 0.0478 | 0.0389/0.0603 | 0.0e+00 |
+| 200 P2 λ=0.05 | 4 | 0.03913→0.04348 | 0.0793 | 0.0646/0.0999 | 0.0e+00 |
+| 500 P1 λ=0.03 | 5 | 0.03884→0.05157 | 0.0503 | 0.0403/0.0602 | 0.0e+00 |
+| 500 P2 λ=0.05 | 5 | 0.03806→0.04972 | 0.0833 | 0.0666/0.0999 | 0.0e+00 |
+
+#### 18.8.3 500-step identifiability
+
+| Variant | Final tracks | T valid ratio | \(E_J\) mean | corr \(\Delta\beta^D,\Delta B_\infty\) | corr \(\Delta\beta^B,\Delta B_\infty\) |
+|---|---:|---:|---:|---:|---:|
+| P0 no-freeze 10k→10.5k | 53,441 | 0.9875 | 0.05943 | -0.3127 | -0.2147 |
+| P1 active proxy λ=0.03 | 53,413 | 0.9869 | 0.05981 | -0.3193 | -0.2074 |
+| P2 active proxy λ=0.05 | 53,308 | 0.9862 | 0.05981 | -0.3165 | -0.2009 |
+
+Diagnostic JSONs：
+
+```text
+renders/gmvc_phase_b_gradients_20260803/japanesegradens_intrinsic_paths.json
+renders/gmvc_phase_b_identifiability_20260803/japanesegradens_p0_nofreeze_10500/gmvc_identifiability.json
+renders/gmvc_phase_b_identifiability_20260803/japanesegradens_p1_active_proxy003_10500/gmvc_identifiability.json
+renders/gmvc_phase_b_identifiability_20260803/japanesegradens_p2_active_proxy005_10500/gmvc_identifiability.json
+```
+
+#### 18.8.4 Active proxy 结论
+
+Active `J_proxy_raw` 修复了旧 C4 的梯度路径问题，并且 λ=0.03/0.05 产生了可控的 DC-only auxiliary gradient。但是，短程结果显示：
+
+- RGB 质量只有很小的 PSNR 剂量响应，SSIM 基本持平；
+- P2 的 LPIPS 相对 P0 略差；
+- \(E_J\) 没有改善，P1/P2 反而比 P0 更高；
+- compensation correlation 没有朝更稳定方向移动；
+- intrinsic raw loss 在训练日志中没有下降，说明 detached M1 consensus 不是有效的新观测目标。
+
+因此，结论不是“GMVC 核心思路失败”，而是：
+
+> offline detached M1 consensus formulation 即使使用 active DC proxy，也主要是旧 M1 分解的自蒸馏，不能改善 medium/Gaussian 不可辨识性。
+
+本轮不应继续把 active-proxy offline intrinsic target 拉到 15k 或扩展四场景。下一步若继续 GMVC，应转向 GPT 建议的 online multi-view degradation closure / scene-level bounded medium variation，或者先做低维物理 oracle 验证场景级 medium 参数假设是否成立。

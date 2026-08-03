@@ -152,10 +152,13 @@ def compute_gmvc_training_terms(
     b_inf_residual = charbonnier_loss(b_inf - b_inf_center, eps=huber_eps)
     b_inf_loss = _weighted_mean(b_inf_residual, weight, eps)
 
-    intrinsic_source = outputs.get("J_gaussian_raw", outputs.get("J_raw", outputs.get("J")))
+    intrinsic_source_key = str(getattr(config, "gmvc_intrinsic_source", "J_proxy_raw"))
+    intrinsic_source = outputs.get(intrinsic_source_key)
     if intrinsic_source is None:
         intrinsic_loss = zero
+        intrinsic_source_available = zero
     else:
+        intrinsic_source_available = gt_img.new_tensor(1.0)
         intrinsic_sample = _sample_hwc(intrinsic_source, xy)
         valid_intrinsic = torch.isfinite(intrinsic_sample).all(dim=-1)
         intrinsic_weight = torch.where(valid_intrinsic, weight, torch.zeros_like(weight))
@@ -194,6 +197,7 @@ def compute_gmvc_training_terms(
         "gmvc_range_raw": range_loss.detach(),
         "gmvc_binf_raw": b_inf_loss.detach(),
         "gmvc_intrinsic_raw": intrinsic_loss.detach(),
+        "gmvc_intrinsic_source_available": intrinsic_source_available.detach(),
         "gmvc_lambda_j": gt_img.new_tensor(float(lambda_j)),
         "gmvc_lambda_range": gt_img.new_tensor(float(lambda_range)),
         "gmvc_lambda_binf": gt_img.new_tensor(float(lambda_binf)),
