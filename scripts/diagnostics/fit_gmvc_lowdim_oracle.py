@@ -7,7 +7,7 @@ import argparse
 import json
 import math
 import subprocess
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
@@ -309,6 +309,63 @@ def _logit_from_unit(value: Tensor, eps: float = 1e-4) -> Tensor:
     return torch.log(value) - torch.log1p(-value)
 
 
+@dataclass
+class OracleFitVariant:
+    """One low-dimensional oracle fit configuration."""
+
+    name: str
+    model_name: str = "O1"
+    beta_scale: float = 0.15
+    binf_scale: float = 0.10
+    lambda_res: float = 0.0
+    lambda_sat: float = 0.0
+    lambda_closure: float = 0.0
+
+
+def _parse_o1_variants(args: argparse.Namespace) -> List[OracleFitVariant]:
+    entries = [entry.strip() for entry in str(args.o1_variants or "").split(";") if entry.strip()]
+    if not entries:
+        return [
+            OracleFitVariant(
+                name="O1",
+                model_name="O1",
+                beta_scale=float(args.o1_log_beta_scale),
+                binf_scale=float(args.o1_binf_logit_scale),
+                lambda_res=float(args.lambda_res),
+                lambda_sat=float(args.lambda_sat),
+                lambda_closure=float(args.lambda_closure),
+            )
+        ]
+    variants: List[OracleFitVariant] = []
+    for entry in entries:
+        parts = [part.strip() for part in entry.split(":")]
+        if len(parts) != 6:
+            raise ValueError(
+                "Each --o1-variants entry must be name:beta_scale:binf_scale:lambda_res:lambda_sat:lambda_closure"
+            )
+        name, beta_scale, binf_scale, lambda_res, lambda_sat, lambda_closure = parts
+        variants.append(
+            OracleFitVariant(
+                name=name,
+                model_name="O1",
+                beta_scale=float(beta_scale),
+                binf_scale=float(binf_scale),
+                lambda_res=float(lambda_res),
+                lambda_sat=float(lambda_sat),
+                lambda_closure=float(lambda_closure),
+            )
+        )
+    return variants
+
+
+def _camera_weight_vector(obs: Dict[str, Tensor], camera_count: int, eps: float) -> Tensor:
+    weights = obs["weight"].detach().float()
+    camera_id = obs["camera_id"].detach().long()
+    out = torch.zeros((camera_count, 1), dtype=torch.float32, device=weights.device)
+    out.index_add_(0, camera_id, weights[:, None])
+    return out / out.sum().clamp_min(float(eps))
+
+
 class LowDimOracle(torch.nn.Module):
     def __init__(
         self,
@@ -316,11 +373,13 @@ class LowDimOracle(torch.nn.Module):
         obs: Dict[str, Tensor],
         track_count: int,
         camera_count: int,
+        camera_weights: Tensor,
         j_min: float,
         j_max: float,
         eps: float,
         beta_residual_scale: float,
         binf_residual_scale: float,
+        center_residuals: bool,
     ) -> None:
         super().__init__()
         self.model_name = model_name
@@ -329,6 +388,8 @@ class LowDimOracle(torch.nn.Module):
         self.eps = float(eps)
         self.beta_residual_scale = float(beta_residual_scale)
         self.binf_residual_scale = float(binf_residual_scale)
+        self.center_residuals = bool(center_residuals)
+        self.register_buffer("camera_weights", camera_weights.detach().float().reshape(camera_count, 1))
         weight = obs["weight"]
         denom = weight.sum().clamp_min(self.eps)
         attn_init = (obs["medium_attn"] * weight[:, None]).sum(dim=0) / denom
@@ -353,17 +414,28 @@ class LowDimOracle(torch.nn.Module):
     def j(self) -> Tensor:
         return self.j_min + (self.j_max - self.j_min) * torch.sigmoid(self.j_raw)
 
+    def _center_delta(self, delta: Tensor) -> Tensor:
+        if not self.center_residuals:
+            return delta
+        mean = (delta * self.camera_weights.to(delta.device)).sum(dim=0, keepdim=True)
+        return delta - mean
+
+    def _centered_deltas(self) -> Tuple[Tensor, Tensor, Tensor]:
+        if self.model_name != "O1":
+            empty = torch.empty((0, 3), dtype=self.log_beta_d_center.dtype, device=self.log_beta_d_center.device)
+            return empty, empty, empty
+        return (
+            self._center_delta(self.delta_log_beta_d),
+            self._center_delta(self.delta_log_beta_b),
+            self._center_delta(self.delta_b_inf_raw),
+        )
+
     def medium(self, camera_id: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         if self.model_name == "O1":
-            log_beta_d = self.log_beta_d_center[None] + self.beta_residual_scale * torch.tanh(
-                self.delta_log_beta_d[camera_id]
-            )
-            log_beta_b = self.log_beta_b_center[None] + self.beta_residual_scale * torch.tanh(
-                self.delta_log_beta_b[camera_id]
-            )
-            b_inf_raw = self.b_inf_center_raw[None] + self.binf_residual_scale * torch.tanh(
-                self.delta_b_inf_raw[camera_id]
-            )
+            delta_d, delta_b, delta_inf = self._centered_deltas()
+            log_beta_d = self.log_beta_d_center[None] + self.beta_residual_scale * torch.tanh(delta_d[camera_id])
+            log_beta_b = self.log_beta_b_center[None] + self.beta_residual_scale * torch.tanh(delta_b[camera_id])
+            b_inf_raw = self.b_inf_center_raw[None] + self.binf_residual_scale * torch.tanh(delta_inf[camera_id])
             return torch.exp(log_beta_d), torch.exp(log_beta_b), torch.sigmoid(b_inf_raw)
         return (
             torch.exp(self.log_beta_d_center)[None].expand(camera_id.shape[0], 3),
@@ -395,26 +467,51 @@ class LowDimOracle(torch.nn.Module):
                 "b_inf_logit_residual_abs": {"mean": 0.0, "p95": 0.0, "max": 0.0},
                 "saturation_ratio_abs_tanh_gt_095": 0.0,
             }
-        beta_resid = torch.cat(
-            [
-                self.beta_residual_scale * torch.tanh(self.delta_log_beta_d.detach()),
-                self.beta_residual_scale * torch.tanh(self.delta_log_beta_b.detach()),
-            ],
-            dim=0,
-        ).abs()
-        binf_resid = (self.binf_residual_scale * torch.tanh(self.delta_b_inf_raw.detach())).abs()
-        tanh_abs = torch.cat(
-            [
-                torch.tanh(self.delta_log_beta_d.detach()).abs().reshape(-1),
-                torch.tanh(self.delta_log_beta_b.detach()).abs().reshape(-1),
-                torch.tanh(self.delta_b_inf_raw.detach()).abs().reshape(-1),
-            ]
-        )
+        delta_d, delta_b, delta_inf = [value.detach() for value in self._centered_deltas()]
+        tanh_d = torch.tanh(delta_d).abs()
+        tanh_b = torch.tanh(delta_b).abs()
+        tanh_inf = torch.tanh(delta_inf).abs()
+        beta_d_resid = (self.beta_residual_scale * tanh_d).abs()
+        beta_b_resid = (self.beta_residual_scale * tanh_b).abs()
+        binf_resid = (self.binf_residual_scale * tanh_inf).abs()
+        beta_resid = torch.cat([beta_d_resid, beta_b_resid], dim=0)
+        tanh_abs = torch.cat([tanh_d.reshape(-1), tanh_b.reshape(-1), tanh_inf.reshape(-1)])
+        channel_sat = {
+            "r": float((tanh_abs[0::3] > 0.95).float().mean().item()) if tanh_abs.numel() >= 3 else 0.0,
+            "g": float((tanh_abs[1::3] > 0.95).float().mean().item()) if tanh_abs.numel() >= 3 else 0.0,
+            "b": float((tanh_abs[2::3] > 0.95).float().mean().item()) if tanh_abs.numel() >= 3 else 0.0,
+        }
         return {
+            "center_residuals": self.center_residuals,
+            "beta_d_log_residual_abs": _stats(beta_d_resid),
+            "beta_b_log_residual_abs": _stats(beta_b_resid),
             "beta_log_residual_abs": _stats(beta_resid),
             "b_inf_logit_residual_abs": _stats(binf_resid),
             "saturation_ratio_abs_tanh_gt_095": float((tanh_abs > 0.95).float().mean().item()),
+            "saturation_ratio_by_parameter": {
+                "beta_d": float((tanh_d > 0.95).float().mean().item()),
+                "beta_b": float((tanh_b > 0.95).float().mean().item()),
+                "b_inf": float((tanh_inf > 0.95).float().mean().item()),
+            },
+            "saturation_ratio_by_channel": channel_sat,
         }
+
+    def regularization_terms(self, sat_threshold: float, sat_temp: float) -> Dict[str, Tensor]:
+        zero = self.log_beta_d_center.new_tensor(0.0)
+        if self.model_name != "O1":
+            return {"residual_l2": zero, "saturation_softplus": zero}
+        delta_d, delta_b, delta_inf = self._centered_deltas()
+        residual_l2 = delta_d.square().mean() + delta_b.square().mean() + delta_inf.square().mean()
+        tanh_abs = torch.cat(
+            [
+                torch.tanh(delta_d).abs().reshape(-1),
+                torch.tanh(delta_b).abs().reshape(-1),
+                torch.tanh(delta_inf).abs().reshape(-1),
+            ]
+        )
+        temp = max(float(sat_temp), self.eps)
+        saturation = torch.nn.functional.softplus((tanh_abs - float(sat_threshold)) / temp).mean() * temp
+        return {"residual_l2": residual_l2, "saturation_softplus": saturation}
 
     def fitted_parameters(self, camera_index_values: List[int]) -> Dict[str, Any]:
         camera_id = torch.arange(len(camera_index_values), dtype=torch.long, device=self.log_beta_d_center.device)
@@ -480,44 +577,123 @@ def _weighted_l1_for_indices(model: LowDimOracle, obs: Dict[str, Tensor], indice
     return float(value.detach().cpu().item())
 
 
+def _build_farthest_pair_indices(obs: Dict[str, Tensor], indices: Tensor, track_count: int) -> Tuple[Tensor, Tensor]:
+    buckets: List[List[int]] = [[] for _ in range(track_count)]
+    for idx in indices.detach().cpu().tolist():
+        buckets[int(obs["track_id"][idx].detach().cpu().item())].append(int(idx))
+    src: List[int] = []
+    dst: List[int] = []
+    depth_cpu = obs["depth"].detach().cpu().reshape(-1)
+    for bucket in buckets:
+        if len(bucket) < 2:
+            continue
+        depths = depth_cpu[torch.tensor(bucket, dtype=torch.long)]
+        local_min = int(torch.argmin(depths).item())
+        local_max = int(torch.argmax(depths).item())
+        if local_min == local_max:
+            continue
+        near_idx = bucket[local_min]
+        far_idx = bucket[local_max]
+        src.extend([near_idx, far_idx])
+        dst.extend([far_idx, near_idx])
+    device = indices.device
+    return torch.tensor(src, dtype=torch.long, device=device), torch.tensor(dst, dtype=torch.long, device=device)
+
+
+def _closure_loss_for_pairs(
+    model: LowDimOracle,
+    obs: Dict[str, Tensor],
+    src_indices: Tensor,
+    dst_indices: Tensor,
+    eps: float,
+    signal_floor: float,
+    charbonnier_eps: float,
+) -> Tensor:
+    if src_indices.numel() == 0:
+        return obs["gt"].new_tensor(0.0)
+    _, transmission_src, backscatter_src, gt_src = model.predict(obs, src_indices)
+    _, transmission_dst, backscatter_dst, gt_dst = model.predict(obs, dst_indices)
+    left = (gt_src - backscatter_src) * transmission_dst
+    right = (gt_dst - backscatter_dst) * transmission_src
+    denom = torch.clamp(left.abs() + right.abs(), min=float(signal_floor))
+    residual = (left - right) / denom.clamp_min(float(eps))
+    pair_weights = torch.sqrt(obs["weight"][src_indices] * obs["weight"][dst_indices]).clamp_min(0.0)
+    return _weighted_loss(residual, pair_weights, charbonnier_eps)
+
+
 def _fit_model(
-    model_name: str,
+    variant: OracleFitVariant,
     obs: Dict[str, Tensor],
     track_count: int,
     camera_count: int,
+    camera_weights: Tensor,
     train_indices: Tensor,
+    closure_pair_indices: Tuple[Tensor, Tensor],
     args: argparse.Namespace,
 ) -> Tuple[LowDimOracle, List[Dict[str, float]]]:
     model = LowDimOracle(
-        model_name=model_name,
+        model_name=variant.model_name,
         obs=obs,
         track_count=track_count,
         camera_count=camera_count,
+        camera_weights=camera_weights,
         j_min=args.j_min,
         j_max=args.j_max,
         eps=args.eps,
-        beta_residual_scale=args.o1_log_beta_scale,
-        binf_residual_scale=args.o1_binf_logit_scale,
+        beta_residual_scale=variant.beta_scale,
+        binf_residual_scale=variant.binf_scale,
+        center_residuals=not bool(args.no_center_residuals),
     ).to(args.fit_device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     history: List[Dict[str, float]] = []
+    closure_src, closure_dst = closure_pair_indices
     for step in range(args.iters):
         total_loss = 0.0
+        total_recon = 0.0
+        total_closure = 0.0
+        total_res = 0.0
+        total_sat = 0.0
         total_weight = 0.0
         for batch_indices in _iter_minibatches(train_indices, args.batch_size, args.seed, step):
             optimizer.zero_grad(set_to_none=True)
             pred, _, _, gt = model.predict(obs, batch_indices)
             weights = obs["weight"][batch_indices]
-            loss = _weighted_loss(pred - gt, weights, args.charbonnier_eps)
+            recon_loss = _weighted_loss(pred - gt, weights, args.charbonnier_eps)
+            reg_terms = model.regularization_terms(args.sat_threshold, args.sat_temp)
+            closure_loss = _closure_loss_for_pairs(
+                model,
+                obs,
+                closure_src,
+                closure_dst,
+                args.eps,
+                args.closure_signal_floor,
+                args.charbonnier_eps,
+            )
+            loss = (
+                recon_loss
+                + float(variant.lambda_res) * reg_terms["residual_l2"]
+                + float(variant.lambda_sat) * reg_terms["saturation_softplus"]
+                + float(variant.lambda_closure) * closure_loss
+            )
             loss.backward()
             optimizer.step()
             total_loss += float(loss.detach().cpu().item()) * float(weights.sum().detach().cpu().item())
+            total_recon += float(recon_loss.detach().cpu().item()) * float(weights.sum().detach().cpu().item())
+            total_closure += float(closure_loss.detach().cpu().item()) * float(weights.sum().detach().cpu().item())
+            total_res += float(reg_terms["residual_l2"].detach().cpu().item()) * float(weights.sum().detach().cpu().item())
+            total_sat += float(reg_terms["saturation_softplus"].detach().cpu().item()) * float(
+                weights.sum().detach().cpu().item()
+            )
             total_weight += float(weights.sum().detach().cpu().item())
         if step == 0 or (step + 1) % args.log_every == 0 or step + 1 == args.iters:
             history.append(
                 {
                     "iter": float(step + 1),
-                    "weighted_charbonnier": total_loss / max(total_weight, 1e-8),
+                    "weighted_objective": total_loss / max(total_weight, 1e-8),
+                    "reconstruction_charbonnier": total_recon / max(total_weight, 1e-8),
+                    "closure_robust": total_closure / max(total_weight, 1e-8),
+                    "residual_l2": total_res / max(total_weight, 1e-8),
+                    "saturation_softplus": total_sat / max(total_weight, 1e-8),
                     "train_weighted_l1": _weighted_l1_for_indices(model, obs, train_indices),
                 }
             )
@@ -531,23 +707,53 @@ def _per_track_indices(track_id: Tensor, track_count: int, indices: Tensor) -> L
     return [torch.tensor(bucket, dtype=torch.long, device=indices.device) for bucket in buckets if len(bucket) >= 2]
 
 
-def _pair_metrics(model: LowDimOracle, obs: Dict[str, Tensor], indices: Tensor, eps: float) -> Dict[str, Any]:
+def _weighted_mean(values: Tensor, weights: Tensor, eps: float) -> float:
+    denom = weights.sum().clamp_min(float(eps))
+    return float((values * weights).sum().detach().cpu().item() / denom.detach().cpu().item())
+
+
+def _bucket_summary(values: Tensor, weights: Tensor, key: Tensor, bins: List[Tuple[str, float, float]], eps: float) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for name, lo, hi in bins:
+        mask = (key >= float(lo)) & (key < float(hi))
+        if not mask.any():
+            out[name] = {"count": 0, "mean": 0.0}
+            continue
+        out[name] = {
+            "count": int(mask.sum().item()),
+            "mean": _weighted_mean(values[mask], weights[mask], eps),
+        }
+    return out
+
+
+def _pair_metrics(
+    model: LowDimOracle,
+    obs: Dict[str, Tensor],
+    indices: Tensor,
+    eps: float,
+    signal_floor: float,
+) -> Dict[str, Any]:
     with torch.no_grad():
         track_count = int(obs["track_id"].max().item()) + 1
         track_buckets = _per_track_indices(obs["track_id"], track_count, indices)
         transfer_values: List[Tensor] = []
         closure_values: List[Tensor] = []
         closure_norm_values: List[Tensor] = []
+        closure_floor_values: List[Tensor] = []
         consensus_recon_values: List[Tensor] = []
         j_var_values: List[Tensor] = []
         pair_weights: List[Tensor] = []
         obs_weights: List[Tensor] = []
         track_weights: List[Tensor] = []
+        pair_t_values: List[Tensor] = []
+        pair_signal_values: List[Tensor] = []
         for bucket in track_buckets:
             pred, transmission, backscatter, gt = model.predict(obs, bucket)
             del pred
             weights = obs["weight"][bucket]
             j_hat = (gt - backscatter) / transmission.clamp_min(float(eps))
+            t_scalar = transmission.mean(dim=-1)
+            signal_abs = (gt - backscatter).abs().mean(dim=-1)
             obs_count = int(bucket.numel())
             if obs_count < 2:
                 continue
@@ -564,6 +770,11 @@ def _pair_metrics(model: LowDimOracle, obs: Dict[str, Tensor], indices: Tensor, 
             closure = (left - right).abs().mean(dim=-1)
             closure_norm = (left - right).abs() / (left.abs() + right.abs() + float(eps))
             closure_norm = closure_norm.mean(dim=-1)
+            closure_floor = (left - right).abs() / torch.clamp(
+                left.abs() + right.abs(),
+                min=float(signal_floor),
+            )
+            closure_floor = closure_floor.mean(dim=-1)
             mean_j = (j_hat * weights[:, None]).sum(dim=0) / weights.sum().clamp_min(float(eps))
             consensus_pred = mean_j[None] * transmission + backscatter
             consensus_recon = (consensus_pred - gt).abs().mean(dim=-1)
@@ -571,11 +782,14 @@ def _pair_metrics(model: LowDimOracle, obs: Dict[str, Tensor], indices: Tensor, 
             transfer_values.append(transfer)
             closure_values.append(closure)
             closure_norm_values.append(closure_norm)
+            closure_floor_values.append(closure_floor)
             consensus_recon_values.append(consensus_recon)
             pair_weights.append(pair_w)
             obs_weights.append(weights)
             j_var_values.append(j_var.reshape(1))
             track_weights.append(weights.mean().reshape(1))
+            pair_t_values.append(torch.minimum(t_scalar[src], t_scalar[dst]))
+            pair_signal_values.append(torch.minimum(signal_abs[src], signal_abs[dst]))
 
         if not transfer_values:
             return {
@@ -584,16 +798,20 @@ def _pair_metrics(model: LowDimOracle, obs: Dict[str, Tensor], indices: Tensor, 
                 "transfer_l1": 0.0,
                 "closure_l1": 0.0,
                 "closure_norm_l1": 0.0,
+                "closure_signal_floor_l1": 0.0,
                 "object_j_variance": 0.0,
             }
         transfer_t = torch.cat(transfer_values)
         closure_t = torch.cat(closure_values)
         closure_norm_t = torch.cat(closure_norm_values)
+        closure_floor_t = torch.cat(closure_floor_values)
         consensus_recon_t = torch.cat(consensus_recon_values)
         pair_w_t = torch.cat(pair_weights)
         obs_w_t = torch.cat(obs_weights)
         j_var_t = torch.cat(j_var_values)
         track_w_t = torch.cat(track_weights)
+        pair_t_t = torch.cat(pair_t_values)
+        pair_signal_t = torch.cat(pair_signal_values)
         denom_pair = pair_w_t.sum().clamp_min(float(eps))
         denom_obs = obs_w_t.sum().clamp_min(float(eps))
         denom_track = track_w_t.sum().clamp_min(float(eps))
@@ -606,9 +824,32 @@ def _pair_metrics(model: LowDimOracle, obs: Dict[str, Tensor], indices: Tensor, 
             "transfer_l1": float((transfer_t * pair_w_t).sum().cpu().item() / denom_pair.cpu().item()),
             "closure_l1": float((closure_t * pair_w_t).sum().cpu().item() / denom_pair.cpu().item()),
             "closure_norm_l1": float((closure_norm_t * pair_w_t).sum().cpu().item() / denom_pair.cpu().item()),
+            "closure_signal_floor_l1": float((closure_floor_t * pair_w_t).sum().cpu().item() / denom_pair.cpu().item()),
             "object_j_variance": float((j_var_t * track_w_t).sum().cpu().item() / denom_track.cpu().item()),
             "transfer_l1_stats": _stats(transfer_t.detach().cpu()),
+            "closure_l1_stats": _stats(closure_t.detach().cpu()),
             "closure_norm_l1_stats": _stats(closure_norm_t.detach().cpu()),
+            "closure_signal_floor_l1_stats": _stats(closure_floor_t.detach().cpu()),
+            "transmission_pair_min_stats": _stats(pair_t_t.detach().cpu()),
+            "signal_pair_min_stats": _stats(pair_signal_t.detach().cpu()),
+            "transfer_by_transmission_min": _bucket_summary(
+                transfer_t,
+                pair_w_t,
+                pair_t_t,
+                [("t_lt_020", 0.0, 0.20), ("t_020_050", 0.20, 0.50), ("t_ge_050", 0.50, float("inf"))],
+                eps,
+            ),
+            "closure_signal_floor_by_signal_min": _bucket_summary(
+                closure_floor_t,
+                pair_w_t,
+                pair_signal_t,
+                [
+                    ("signal_lt_floor", 0.0, float(signal_floor)),
+                    ("signal_floor_010", float(signal_floor), 0.10),
+                    ("signal_ge_010", 0.10, float("inf")),
+                ],
+                eps,
+            ),
         }
 
 
@@ -618,6 +859,7 @@ def _evaluate_model(
     train_indices: Tensor,
     heldout_indices: Tensor,
     eps: float,
+    signal_floor: float,
 ) -> Dict[str, Any]:
     train_recon = _weighted_l1_for_indices(model, obs, train_indices)
     heldout_recon = _weighted_l1_for_indices(model, obs, heldout_indices)
@@ -627,8 +869,8 @@ def _evaluate_model(
             "heldout": heldout_recon,
         },
         "cross_view": {
-            "train": _pair_metrics(model, obs, train_indices, eps),
-            "heldout": _pair_metrics(model, obs, heldout_indices, eps),
+            "train": _pair_metrics(model, obs, train_indices, eps, signal_floor),
+            "heldout": _pair_metrics(model, obs, heldout_indices, eps, signal_floor),
         },
     }
 
@@ -686,30 +928,40 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     heldout_indices = heldout_indices_cpu.to(args.fit_device)
 
     model_names = [name.strip().upper() for name in args.models.split(",") if name.strip()]
+    variants: List[OracleFitVariant] = []
+    if "O0" in model_names:
+        variants.append(OracleFitVariant(name="O0", model_name="O0", beta_scale=0.0, binf_scale=0.0))
+    if "O1" in model_names:
+        variants.extend(_parse_o1_variants(args))
+    if not variants:
+        raise ValueError("No oracle variants requested. Use --models O0, O1, or O0,O1.")
+    camera_weights = _camera_weight_vector(obs, camera_count, args.eps).to(args.fit_device)
+    closure_pair_indices = _build_farthest_pair_indices(obs, train_indices, track_count)
     results: Dict[str, Any] = {}
     fitted_payload: Dict[str, Any] = {
         "train_tracks": train_tracks,
         "heldout_tracks": heldout_tracks,
         "camera_index_values": dataset["summary"]["camera_index_values"],
     }
-    for model_name in model_names:
-        if model_name not in {"O0", "O1"}:
-            raise ValueError(f"Unsupported oracle model: {model_name}. Expected O0 or O1.")
+    for variant in variants:
         model, history = _fit_model(
-            model_name=model_name,
+            variant=variant,
             obs=obs,
             track_count=track_count,
             camera_count=camera_count,
+            camera_weights=camera_weights,
             train_indices=train_indices,
+            closure_pair_indices=closure_pair_indices,
             args=args,
         )
-        metrics = _evaluate_model(model, obs, train_indices, heldout_indices, args.eps)
-        results[model_name] = {
+        metrics = _evaluate_model(model, obs, train_indices, heldout_indices, args.eps, args.closure_signal_floor)
+        results[variant.name] = {
+            "variant": asdict(variant),
             "history": history,
             "metrics": metrics,
             "parameters": model.fitted_parameters(dataset["summary"]["camera_index_values"]),
         }
-        fitted_payload[f"{model_name}_state_dict"] = {key: value.detach().cpu() for key, value in model.state_dict().items()}
+        fitted_payload[f"{variant.name}_state_dict"] = {key: value.detach().cpu() for key, value in model.state_dict().items()}
 
     summary: Dict[str, Any] = {
         "diagnostic": "gmvc_lowdim_physical_oracle",
@@ -722,6 +974,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         "track_config": asdict(track_cfg),
         "fit_config": {
             "models": model_names,
+            "variants": [asdict(variant) for variant in variants],
             "iters": args.iters,
             "lr": args.lr,
             "batch_size": args.batch_size,
@@ -730,6 +983,14 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             "j_max": args.j_max,
             "o1_log_beta_scale": args.o1_log_beta_scale,
             "o1_binf_logit_scale": args.o1_binf_logit_scale,
+            "lambda_res": args.lambda_res,
+            "lambda_sat": args.lambda_sat,
+            "lambda_closure": args.lambda_closure,
+            "closure_signal_floor": args.closure_signal_floor,
+            "sat_threshold": args.sat_threshold,
+            "sat_temp": args.sat_temp,
+            "center_residuals": not bool(args.no_center_residuals),
+            "closure_pair_count": int(closure_pair_indices[0].numel()),
             "charbonnier_eps": args.charbonnier_eps,
             "fit_device": str(args.fit_device),
         },
@@ -775,6 +1036,11 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-tracks", type=int, default=0)
     parser.add_argument("--models", default="O0,O1")
+    parser.add_argument(
+        "--o1-variants",
+        default="",
+        help="Semicolon-separated O1 variants: name:beta_scale:binf_scale:lambda_res:lambda_sat:lambda_closure.",
+    )
     parser.add_argument("--train-fraction", type=float, default=0.80)
     parser.add_argument("--iters", type=int, default=600)
     parser.add_argument("--lr", type=float, default=0.03)
@@ -785,6 +1051,13 @@ def main() -> None:
     parser.add_argument("--j-max", type=float, default=1.25)
     parser.add_argument("--o1-log-beta-scale", type=float, default=0.15)
     parser.add_argument("--o1-binf-logit-scale", type=float, default=0.10)
+    parser.add_argument("--lambda-res", type=float, default=0.0)
+    parser.add_argument("--lambda-sat", type=float, default=0.0)
+    parser.add_argument("--lambda-closure", type=float, default=0.0)
+    parser.add_argument("--closure-signal-floor", type=float, default=0.03)
+    parser.add_argument("--sat-threshold", type=float, default=0.80)
+    parser.add_argument("--sat-temp", type=float, default=0.05)
+    parser.add_argument("--no-center-residuals", action="store_true")
     parser.add_argument("--fit-device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--output-json", type=Path, default=None)
@@ -810,7 +1083,11 @@ def main() -> None:
                     "consensus_j_reconstruction_l1"
                 ],
                 "heldout_transfer_l1": model_result["metrics"]["cross_view"]["heldout"]["transfer_l1"],
+                "heldout_closure_l1": model_result["metrics"]["cross_view"]["heldout"]["closure_l1"],
                 "heldout_closure_norm_l1": model_result["metrics"]["cross_view"]["heldout"]["closure_norm_l1"],
+                "heldout_closure_signal_floor_l1": model_result["metrics"]["cross_view"]["heldout"][
+                    "closure_signal_floor_l1"
+                ],
                 "heldout_object_j_variance": model_result["metrics"]["cross_view"]["heldout"]["object_j_variance"],
                 "residual_saturation": model_result["parameters"]["residual_budget"][
                     "saturation_ratio_abs_tanh_gt_095"

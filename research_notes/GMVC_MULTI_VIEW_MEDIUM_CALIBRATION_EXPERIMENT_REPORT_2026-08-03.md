@@ -1680,3 +1680,146 @@ Consensus-J reconstruction:
 4. **JapaneseGradens 的结论更谨慎。** O1 transfer 下降 5.6%，J variance 下降 13.4%，consensus-J recon 下降 6.9%，但 closure-norm 上升 14.2%。这支持继续做 GMVC-V2，但不支持直接把 O1 形式无正则地塞进训练。
 
 5. **下一步应进入 V1，而不是回到 offline consensus。** 建议先实现 medium-only online cross-view closure，附带 scene-centered bounded medium parameterization 和 residual saturation 日志；只有 V1 能降低 held-out closure/transfer 后，再接回 active DC proxy 做 V2 alternating object-medium calibration。
+
+---
+
+## 20. Phase O-Pareto：centered residual、regularization、closure sweep
+
+### 20.1 动机
+
+Phase O 证明 O1 中的 per-camera bounded residual 有可优化信号，但原始 O1 只优化 RGB reconstruction，没有直接约束 transfer、closure 或 residual budget。因此本轮补充 Oracle-Pareto，目标不是追求最低 reconstruction，而是找到：
+
+```text
+transfer 降低
+object-J variance 降低
+robust closure 不明显变差，最好降低
+residual saturation <= 10%–15%
+```
+
+同时修复 Phase O 的两个诊断边界：
+
+1. O1 residual 默认按相机观测权重去均值，降低 center-residual gauge 自由度；
+2. 新增 signal-floor normalized closure，分母使用 `max(|L|+|R|, tau_signal)`，默认 `tau_signal=0.03`，避免暗通道/低信号 pair 主导旧 normalized closure。
+
+### 20.2 代码改动
+
+更新：
+
+```text
+scripts/diagnostics/fit_gmvc_lowdim_oracle.py
+scripts/experiments/gmvc_phase_o_pareto_oracle.sh
+```
+
+新增能力：
+
+- `--o1-variants`：一次运行多个 O1 variant，格式为 `name:beta_scale:binf_scale:lambda_res:lambda_sat:lambda_closure`；
+- centered residual：默认启用，使用相机权重对 residual 去均值；
+- residual L2 regularization；
+- saturation softplus penalty；
+- farthest-depth pair robust closure loss；
+- held-out raw closure、旧 normalized closure、signal-floor closure；
+- 按 transmission 和 signal strength 分桶的诊断；
+- saturation 按参数和 RGB channel 拆分记录。
+
+### 20.3 实验设置
+
+复现命令：
+
+```bash
+SCENE=japanesegradens scripts/experiments/gmvc_phase_o_pareto_oracle.sh
+SCENE=panama scripts/experiments/gmvc_phase_o_pareto_oracle.sh
+SCENE=curasao scripts/experiments/gmvc_phase_o_pareto_oracle.sh
+SCENE=iui3 scripts/experiments/gmvc_phase_o_pareto_oracle.sh
+```
+
+统一配置：
+
+```text
+SAMPLES_PER_VIEW=4096
+MAX_TRACKS=30000
+ITERS=500
+LR=0.03
+CLOSURE_SIGNAL_FLOOR=0.03
+```
+
+Variant 矩阵：
+
+| Variant | beta scale | B-inf scale | lambda_res | lambda_sat | lambda_closure |
+|---|---:|---:|---:|---:|---:|
+| O1_S1 | 0.05 | 0.05 | 0 | 0 | 0 |
+| O1_S2 | 0.10 | 0.075 | 0 | 0 | 0 |
+| O1_S3 | 0.15 | 0.10 | 0 | 0 | 0 |
+| O1_S4 | 0.20 | 0.15 | 0 | 0 | 0 |
+| O1_R1 | 0.15 | 0.10 | 0.0001 | 0.0001 | 0 |
+| O1_R2 | 0.15 | 0.10 | 0.0005 | 0.0001 | 0 |
+| O1_R3 | 0.15 | 0.10 | 0.0010 | 0.0005 | 0 |
+| O1_C1 | 0.15 | 0.10 | 0.0005 | 0.0001 | 0.01 |
+| O1_C2 | 0.15 | 0.10 | 0.0005 | 0.0001 | 0.05 |
+| O1_C3 | 0.15 | 0.10 | 0.0005 | 0.0001 | 0.10 |
+
+Output JSONs：
+
+```text
+renders/gmvc_oracle_pareto_20260803/japanesegradens_m1_step10000_train_s4096/gmvc_lowdim_oracle.json
+renders/gmvc_oracle_pareto_20260803/iui3_m1_step14999_train_s4096/gmvc_lowdim_oracle.json
+renders/gmvc_oracle_pareto_20260803/curasao_m1_step10000_train_s4096/gmvc_lowdim_oracle.json
+renders/gmvc_oracle_pareto_20260803/panama_m1_step10000_train_s4096/gmvc_lowdim_oracle.json
+```
+
+### 20.4 关键结果
+
+表中 Δ 均相对 O0 held-out 指标。
+
+| Scene | Candidate | transfer Δ | J-var Δ | robust closure Δ | raw closure Δ | saturation | 判断 |
+|---|---|---:|---:|---:|---:|---:|---|
+| JapaneseGradens | O1_R3 | -5.0% | -4.9% | +8.7% | -7.8% | 0.0% | transfer 勉强过线，但 J-var/robust closure 不足 |
+| JapaneseGradens | O1_C1 | -3.8% | -27.0% | -39.2% | +7.0% | 0.0% | closure/J-var 强，但 transfer 不足 |
+| IUI3 | O1_R3 | -6.6% | -27.3% | -2.8% | +0.1% | 0.0% | 通过 Pareto gate |
+| IUI3 | O1_C1 | -6.6% | -32.5% | -11.5% | +3.0% | 0.0% | 更强 closure/J-var，通过 |
+| Curasao | O1_S4 | -35.0% | -52.5% | -21.7% | -40.4% | 13.0% | range sweep 最佳，saturation 可接受 |
+| Curasao | O1_R1 | -29.8% | -45.2% | -16.0% | -34.8% | 6.8% | 更保守，强候选 |
+| Curasao | O1_C1 | -25.8% | -37.0% | -24.3% | -33.0% | 4.3% | closure 更强，强候选 |
+| Panama | O1_R1 | -7.2% | -17.9% | -10.3% | -1.3% | 0.0% | 通过 Pareto gate |
+| Panama | O1_C1 | -5.1% | -23.0% | -34.7% | +4.6% | 0.0% | closure 强，通过 |
+
+### 20.5 场景结论
+
+1. **Curasao 解释最清楚。** Phase O 中 40.7% saturation 主要是 residual range/regularization 选择问题，不是 GMVC 信号失败。O1_S4 将 saturation 降到 13.0%，同时 transfer、J-var、robust closure、raw closure 全部改善；O1_R1/O1_C1 在 saturation 更低时仍保留大部分收益。
+
+2. **Panama 是稳定正例。** O1_R1 与 O1_C1 都满足 transfer、J-var、closure、saturation gate。后续 V1 可以优先用 Panama 做 medium-only online closure 的正向 sanity check。
+
+3. **IUI3 可以被正则化修复。** 无正则 range sweep 中 robust closure 会随自由度扩大而变差，但 R3/C1 在 0% saturation 下同时改善 transfer、J-var 和 robust closure。
+
+4. **JapaneseGradens 仍是压力测试。** 没有单个 variant 同时满足所有 gate。R3 保留 transfer 改善并消除 saturation，但 J-var 和 robust closure 不够；C1 显著改善 closure/J-var，但 transfer 只有 -3.8%。这说明 JapaneseGradens 的在线训练不能只优化单一 closure 或单一 transfer，需要 V1 中分阶段/分权重测试。
+
+5. **closure loss 存在明确 trade-off。** C2/C3 通常继续降低 robust closure 和 J-var，但会牺牲 transfer 或 raw closure。第一版 V1 不应使用过大的 `lambda_C`，更合理的起点是接近 C1：`lambda_C≈0.01`，配合 residual/saturation regularization。
+
+### 20.6 下一步 V1 建议
+
+进入 medium-only online closure，但先只做 500-step continuation，不接 active DC proxy。
+
+建议矩阵：
+
+| Run | Setting |
+|---|---|
+| V0 | M1 continuation |
+| V1 | closure only, original M1 medium parameterization |
+| V2 | centered bounded residual, no closure |
+| V3 | centered bounded residual + residual/saturation regularization |
+| V4 | V3 + weak closure, `lambda_C≈0.01` |
+
+首轮场景：
+
+- Panama：正向 sanity check；
+- JapaneseGradens：压力测试。
+
+进入下一阶段的条件：
+
+```text
+PSNR drop <= 0.15 dB
+LPIPS increase <= 0.003
+held-out transfer降低 >= 5%
+object-J variance降低 >= 10%
+robust closure不变差超过 5%，最好降低
+residual saturation <= 15%
+```
