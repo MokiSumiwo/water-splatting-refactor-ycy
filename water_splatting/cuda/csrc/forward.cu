@@ -35,21 +35,23 @@ __device__ __forceinline__ float3 igaf_apply_rgb(
     const float3* __restrict__ igaf_coeffs,
     const int32_t gaussian_id,
     const float* __restrict__ basis,
-    const float gate,
+    const float* __restrict__ igaf_gate,
     const float amplitude_max
 ) {
     float3 raw = {0.f, 0.f, 0.f};
     #pragma unroll
     for (int k = 0; k < 4; ++k) {
         const float3 coeff = igaf_coeffs[gaussian_id * 4 + k];
-        raw.x += coeff.x * basis[k];
-        raw.y += coeff.y * basis[k];
-        raw.z += coeff.z * basis[k];
+        const float gated_basis = igaf_gate[gaussian_id * 5 + 1 + k] * basis[k];
+        raw.x += coeff.x * gated_basis;
+        raw.y += coeff.y * gated_basis;
+        raw.z += coeff.z * gated_basis;
     }
+    const float output_gate = igaf_gate[gaussian_id * 5];
     float3 out;
-    out.x = base_rgb.x + gate * amplitude_max * tanhf(raw.x);
-    out.y = base_rgb.y + gate * amplitude_max * tanhf(raw.y);
-    out.z = base_rgb.z + gate * amplitude_max * tanhf(raw.z);
+    out.x = base_rgb.x + output_gate * amplitude_max * tanhf(raw.x);
+    out.y = base_rgb.y + output_gate * amplitude_max * tanhf(raw.y);
+    out.z = base_rgb.z + output_gate * amplitude_max * tanhf(raw.z);
     return out;
 }
 
@@ -690,7 +692,7 @@ __global__ void rasterize_forward_igaf(
                 igaf_coeffs,
                 g,
                 basis,
-                igaf_gate[g],
+                igaf_gate,
                 igaf_amplitude_max
             );
             float3 exp_obj;

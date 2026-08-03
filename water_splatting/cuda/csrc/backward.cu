@@ -47,7 +47,7 @@ __device__ __forceinline__ float3 igaf_rgb_and_raw_bwd(
     const float3* __restrict__ igaf_coeffs,
     const int32_t gaussian_id,
     const float* __restrict__ basis,
-    const float gate,
+    const float* __restrict__ igaf_gate,
     const float amplitude_max,
     float3& raw
 ) {
@@ -55,14 +55,16 @@ __device__ __forceinline__ float3 igaf_rgb_and_raw_bwd(
     #pragma unroll
     for (int k = 0; k < 4; ++k) {
         const float3 coeff = igaf_coeffs[gaussian_id * 4 + k];
-        raw.x += coeff.x * basis[k];
-        raw.y += coeff.y * basis[k];
-        raw.z += coeff.z * basis[k];
+        const float gated_basis = igaf_gate[gaussian_id * 5 + 1 + k] * basis[k];
+        raw.x += coeff.x * gated_basis;
+        raw.y += coeff.y * gated_basis;
+        raw.z += coeff.z * gated_basis;
     }
+    const float output_gate = igaf_gate[gaussian_id * 5];
     float3 out;
-    out.x = base_rgb.x + gate * amplitude_max * tanhf(raw.x);
-    out.y = base_rgb.y + gate * amplitude_max * tanhf(raw.y);
-    out.z = base_rgb.z + gate * amplitude_max * tanhf(raw.z);
+    out.x = base_rgb.x + output_gate * amplitude_max * tanhf(raw.x);
+    out.y = base_rgb.y + output_gate * amplitude_max * tanhf(raw.y);
+    out.z = base_rgb.z + output_gate * amplitude_max * tanhf(raw.z);
     return out;
 }
 
@@ -689,7 +691,7 @@ __global__ void rasterize_backward_kernel_igaf(
                     igaf_coeffs,
                     g,
                     basis,
-                    igaf_gate[g],
+                    igaf_gate,
                     igaf_amplitude_max,
                     raw
                 );
@@ -700,7 +702,7 @@ __global__ void rasterize_backward_kernel_igaf(
                 v_rgb_local = {v_out.x * exp_attn_fac.x, v_out.y * exp_attn_fac.y, v_out.z * exp_attn_fac.z};
                 float3 v_exp_attn_local = {v_rgb_local.x * rgb.x, v_rgb_local.y * rgb.y, v_rgb_local.z * rgb.z};
 
-                const float gate_amp = igaf_gate[g] * igaf_amplitude_max;
+                const float gate_amp = igaf_gate[5*g] * igaf_amplitude_max;
                 const float3 sech2 = {
                     1.f - tanhf(raw.x) * tanhf(raw.x),
                     1.f - tanhf(raw.y) * tanhf(raw.y),
@@ -708,9 +710,10 @@ __global__ void rasterize_backward_kernel_igaf(
                 };
                 #pragma unroll
                 for (int k = 0; k < 4; ++k) {
-                    v_coeff_local[k].x = v_rgb_local.x * gate_amp * sech2.x * basis[k];
-                    v_coeff_local[k].y = v_rgb_local.y * gate_amp * sech2.y * basis[k];
-                    v_coeff_local[k].z = v_rgb_local.z * gate_amp * sech2.z * basis[k];
+                    const float gated_basis = igaf_gate[5*g + 1 + k] * basis[k];
+                    v_coeff_local[k].x = v_rgb_local.x * gate_amp * sech2.x * gated_basis;
+                    v_coeff_local[k].y = v_rgb_local.y * gate_amp * sech2.y * gated_basis;
+                    v_coeff_local[k].z = v_rgb_local.z * gate_amp * sech2.z * gated_basis;
                 }
 
                 v_medium_attn_pix_local.x += -v_exp_attn_local.x * depth;

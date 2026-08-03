@@ -398,6 +398,19 @@ rasterize_forward_tensor(
     img_size_dim3.y = std::get<1>(img_size);
     img_size_dim3.z = std::get<2>(img_size);
 
+    if (colors.ndimension() != 2 || colors.size(1) != 3) {
+        AT_ERROR("colors must have dimensions (num_points, 3)");
+    }
+    if (igaf_coeffs.ndimension() != 3 || igaf_coeffs.size(1) != 4 || igaf_coeffs.size(2) != 3) {
+        AT_ERROR("igaf_coeffs must have dimensions (num_points, 4, 3)");
+    }
+    if (igaf_screen_to_uv.ndimension() != 2 || igaf_screen_to_uv.size(1) != 4) {
+        AT_ERROR("igaf_screen_to_uv must have dimensions (num_points, 4)");
+    }
+    if (igaf_gate.ndimension() != 2 || igaf_gate.size(1) != 5) {
+        AT_ERROR("igaf_gate must have dimensions (num_points, 5)");
+    }
+
     const int channels = colors.size(1);
     const int img_width = img_size_dim3.x;
     const int img_height = img_size_dim3.y;
@@ -870,6 +883,12 @@ std::
 
     if (igaf_coeffs.ndimension() != 3 || igaf_coeffs.size(1) != 4 || igaf_coeffs.size(2) != 3) {
         AT_ERROR("igaf_coeffs must have dimensions (num_points, 4, 3)");
+    }
+    if (igaf_screen_to_uv.ndimension() != 2 || igaf_screen_to_uv.size(1) != 4) {
+        AT_ERROR("igaf_screen_to_uv must have dimensions (num_points, 4)");
+    }
+    if (igaf_gate.ndimension() != 2 || igaf_gate.size(1) != 5) {
+        AT_ERROR("igaf_gate must have dimensions (num_points, 5)");
     }
 
     const int num_points = xys.size(0);

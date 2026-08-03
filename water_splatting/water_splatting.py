@@ -670,12 +670,20 @@ class WaterSplattingModelConfig(ModelConfig):
     """First step where IGAF local texture residual can affect rendering."""
     igaf_ramp_steps: int = 1000
     """Linear ramp length for IGAF local texture residual."""
+    igaf_stop_step: int = -1
+    """Optional step where IGAF starts shutting off; negative keeps IGAF on after ramp-up."""
+    igaf_ramp_down_steps: int = 0
+    """Linear ramp-down length before igaf_stop_step for training-time preconditioner runs."""
+    igaf_inference_enabled: bool = True
+    """If False, disable IGAF during evaluation/inference while preserving trained base Gaussians."""
     igaf_frequency: float = 1.5
     """Fixed IGAF harmonic frequency for V0."""
     igaf_amplitude_max: float = 0.10
     """Bounded maximum local RGB residual amplitude."""
     igaf_coordinate_mode: Literal["canonical", "screen"] = "canonical"
     """IGAF coordinate frame: canonical 3D tangent frame or screen-space control."""
+    igaf_axis_mode: Literal["dynamic", "locked"] = "dynamic"
+    """Canonical tangent axis policy; locked stores axis IDs to avoid scale-order swaps."""
     igaf_planarity_ratio: float = 2.0
     """Scale ratio sigma2/sigma3 where planarity gate reaches its midpoint."""
     igaf_planarity_temperature: float = 0.25
@@ -686,8 +694,12 @@ class WaterSplattingModelConfig(ModelConfig):
     """Temperature for projection-condition attenuation."""
     igaf_mip_enabled: bool = True
     """If True, attenuate IGAF local texture by projected pixel footprint."""
+    igaf_mip_mode: Literal["legacy", "variance"] = "legacy"
+    """Mip attenuation mode: legacy scalar gate or per-basis pixel-variance correction."""
     igaf_coordinate_clamp: float = 3.0
     """Clamp local IGAF coordinates to this absolute value."""
+    igaf_reset_split_coeffs: bool = True
+    """If True, split children start with zero IGAF coefficients; duplicates still inherit."""
     lambda_igaf_amplitude: float = 0.0
     """Optional weak IGAF coefficient energy regularization."""
     igaf_log_path: Optional[str] = None
@@ -926,6 +938,11 @@ class WaterSplattingModel(Model):
             torch.arange(num_points, dtype=torch.long, device=means.device),
             persistent=True,
         )
+        self.register_buffer(
+            "igaf_axis_order",
+            torch.full((num_points, 2), -1, dtype=torch.long, device=means.device),
+            persistent=True,
+        )
         self.register_buffer("mvgar_weight_sum", torch.zeros(num_points, dtype=torch.float32, device=means.device), persistent=True)
         self.register_buffer("mvgar_detail_sum", torch.zeros(num_points, dtype=torch.float32, device=means.device), persistent=True)
         self.register_buffer(
@@ -1124,6 +1141,11 @@ class WaterSplattingModel(Model):
             dict["gaussian_lineage_ids"] = torch.arange(newp, dtype=torch.long)
         if tuple(self.gaussian_lineage_ids.shape) != (newp,):
             self.gaussian_lineage_ids.data = torch.zeros(newp, device=self.device, dtype=torch.long)
+        default_axis_order = torch.argsort(dict["gauss_params.scales"].detach().exp(), dim=-1, descending=True)[:, :2].long()
+        if "igaf_axis_order" not in dict or tuple(dict["igaf_axis_order"].shape) != (newp, 2):
+            dict["igaf_axis_order"] = default_axis_order
+        if tuple(self.igaf_axis_order.shape) != (newp, 2):
+            self.igaf_axis_order.data = default_axis_order.to(device=self.device, dtype=torch.long)
         mvgar_defaults = {
             "mvgar_weight_sum": torch.zeros(newp, dtype=torch.float32),
             "mvgar_detail_sum": torch.zeros(newp, dtype=torch.float32),
@@ -1150,7 +1172,8 @@ class WaterSplattingModel(Model):
             "givar_view_count": torch.zeros(newp, dtype=torch.float32),
             "givar_last_camera_id": torch.full((newp,), -1, dtype=torch.long),
         }
-        per_gaussian_defaults = {**mvgar_defaults, **mcgr_defaults, **givar_defaults}
+        igaf_defaults = {"igaf_axis_order": default_axis_order}
+        per_gaussian_defaults = {**mvgar_defaults, **mcgr_defaults, **givar_defaults, **igaf_defaults}
         for key, default in per_gaussian_defaults.items():
             if key not in dict or tuple(dict[key].shape) != tuple(default.shape):
                 dict[key] = default
@@ -1435,6 +1458,7 @@ class WaterSplattingModel(Model):
                 dups &= high_grads
 
                 dup_params = self.dup_gaussians(dups)
+                self._sync_igaf_axis_order_for_densification(splits, dups, nsamps)
                 for name, param in self.gauss_params.items():
                     self.gauss_params[name] = torch.nn.Parameter(
                         torch.cat([param.detach(), split_params[name], dup_params[name]], dim=0)
@@ -1627,6 +1651,7 @@ class WaterSplattingModel(Model):
                 toobigs = toobigs | (self.max_2Dsize > self.config.cull_screen_size).squeeze()
             culls = culls | toobigs
             toobigs_count = torch.sum(toobigs).item()
+        self._sync_igaf_axis_order_for_cull(culls)
         for name, param in self.gauss_params.items():
             self.gauss_params[name] = torch.nn.Parameter(param[~culls])
         self._sync_gaussian_lineage_ids_for_cull(culls)
@@ -1678,7 +1703,10 @@ class WaterSplattingModel(Model):
         for name, param in self.gauss_params.items():
             if name not in out:
                 repeat_dims = (samps,) + tuple(1 for _ in range(param.dim() - 1))
-                out[name] = param[split_mask].repeat(*repeat_dims)
+                inherited = param[split_mask].repeat(*repeat_dims)
+                if name == "igaf_coeffs" and bool(getattr(self.config, "igaf_reset_split_coeffs", True)):
+                    inherited = torch.zeros_like(inherited)
+                out[name] = inherited
         return out
 
     def dup_gaussians(self, dup_mask):
@@ -1810,6 +1838,45 @@ class WaterSplattingModel(Model):
         if ramp <= 0:
             return float(weight)
         return float(weight) * min((self.step - start) / max(float(ramp), 1.0), 1.0)
+
+    def _ensure_igaf_axis_order(self, *, reset_on_mismatch: bool = True) -> bool:
+        n = int(self.num_points)
+        ok = hasattr(self, "igaf_axis_order") and tuple(self.igaf_axis_order.shape) == (n, 2)
+        if ok:
+            return True
+        if not reset_on_mismatch:
+            return False
+        with torch.no_grad():
+            order = torch.argsort(self.scales.detach().exp(), dim=-1, descending=True)[:, :2].long()
+            self.igaf_axis_order = order.to(device=self.device)
+        CONSOLE.log("[yellow]IGAF axis-order buffer shape mismatch; reset from current Gaussian scales.[/yellow]")
+        return True
+
+    def _sync_igaf_axis_order_for_densification(self, splits: torch.Tensor, dups: torch.Tensor, nsamps: int) -> None:
+        splits = splits.reshape(-1).to(device=self.device)
+        dups = dups.reshape(-1).to(device=self.device)
+        if not self._ensure_igaf_axis_order(reset_on_mismatch=True):
+            return
+        if self.igaf_axis_order.shape[0] != splits.numel() or self.igaf_axis_order.shape[0] != dups.numel():
+            self._ensure_igaf_axis_order(reset_on_mismatch=True)
+            return
+        split_extra = torch.full(
+            (int(nsamps * splits.sum().item()), 2),
+            -1,
+            dtype=torch.long,
+            device=self.device,
+        )
+        dup_extra = self.igaf_axis_order[dups].detach().clone()
+        self.igaf_axis_order = torch.cat([self.igaf_axis_order.detach(), split_extra, dup_extra], dim=0)
+
+    def _sync_igaf_axis_order_for_cull(self, culls: torch.Tensor) -> None:
+        culls = culls.reshape(-1).to(device=self.device)
+        if not self._ensure_igaf_axis_order(reset_on_mismatch=True):
+            return
+        if self.igaf_axis_order.shape[0] != culls.numel():
+            self._ensure_igaf_axis_order(reset_on_mismatch=True)
+            return
+        self.igaf_axis_order = self.igaf_axis_order[(~culls)].detach()
 
     def _mvgar_requested(self) -> bool:
         return bool(
@@ -2190,13 +2257,30 @@ class WaterSplattingModel(Model):
     def _igaf_ramp_weight(self) -> float:
         if not self._igaf_requested():
             return 0.0
+        if not self.training and not bool(getattr(self.config, "igaf_inference_enabled", True)):
+            return 0.0
         start = int(getattr(self.config, "igaf_start_step", 10000))
         ramp_steps = int(getattr(self.config, "igaf_ramp_steps", 1000))
-        if int(self.step) < start:
+        step = int(self.step)
+        if step < start:
             return 0.0
         if ramp_steps <= 0:
-            return 1.0
-        return float(min(max((int(self.step) - start) / float(ramp_steps), 0.0), 1.0))
+            up = 1.0
+        else:
+            up = float(min(max((step - start) / float(ramp_steps), 0.0), 1.0))
+        stop = int(getattr(self.config, "igaf_stop_step", -1))
+        if stop < 0:
+            return up
+        ramp_down = int(getattr(self.config, "igaf_ramp_down_steps", 0))
+        if ramp_down <= 0:
+            return 0.0 if step >= stop else up
+        if step >= stop:
+            return 0.0
+        down_start = max(start, stop - ramp_down)
+        if step <= down_start:
+            return up
+        down = float(min(max((stop - step) / float(ramp_down), 0.0), 1.0))
+        return up * down
 
     @torch.no_grad()
     def _build_igaf_inputs(
@@ -2228,10 +2312,30 @@ class WaterSplattingModel(Model):
 
         order = torch.argsort(scales_d, dim=-1, descending=True)
         sorted_scales = torch.gather(scales_d, 1, order)
+        current_axis_order = order[:, :2].long()
+        axis_mode = str(getattr(self.config, "igaf_axis_mode", "dynamic"))
+        axis_permutation_change_fraction = 0.0
+        if self._ensure_igaf_axis_order(reset_on_mismatch=True):
+            stored_axis_order = self.igaf_axis_order.to(device=scales_d.device, dtype=torch.long)
+            valid_axis_order = stored_axis_order.ge(0).all(dim=-1)
+            changed = valid_axis_order & (stored_axis_order != current_axis_order).any(dim=-1)
+            axis_permutation_change_fraction = float(changed.float().mean().item()) if changed.numel() else 0.0
+            if axis_mode == "locked":
+                missing = ~valid_axis_order
+                if missing.any():
+                    stored_axis_order[missing] = current_axis_order[missing]
+                    self.igaf_axis_order[missing] = current_axis_order[missing].to(device=self.igaf_axis_order.device)
+                axis_order = stored_axis_order.clamp(0, 2)
+            else:
+                axis_order = current_axis_order
+                self.igaf_axis_order = current_axis_order.detach().to(device=self.device)
+        else:
+            axis_order = current_axis_order
         rot = quat_to_rotmat(quats_d)
-        gather_idx = order[:, None, :2].expand(-1, 3, -1)
+        gather_idx = axis_order[:, None, :].expand(-1, 3, -1)
         axes = torch.gather(rot, 2, gather_idx)
-        tangents = axes * sorted_scales[:, None, :2]
+        axis_scales = torch.gather(scales_d, 1, axis_order)
+        tangents = axes * axis_scales[:, None, :]
         p1 = means_d + tangents[:, :, 0]
         p2 = means_d + tangents[:, :, 1]
 
@@ -2288,16 +2392,30 @@ class WaterSplattingModel(Model):
 
         freq = float(getattr(self.config, "igaf_frequency", 1.5))
         if bool(getattr(self.config, "igaf_mip_enabled", True)):
-            col0_norm = torch.sqrt(screen_to_uv[:, 0].square() + screen_to_uv[:, 2].square())
-            col1_norm = torch.sqrt(screen_to_uv[:, 1].square() + screen_to_uv[:, 3].square())
-            pix_scale = 0.5 * (col0_norm + col1_norm)
-            mip_gate = torch.exp(-0.5 * (freq**2) * pix_scale.square())
+            mip_mode = str(getattr(self.config, "igaf_mip_mode", "legacy"))
+            if mip_mode == "variance":
+                var_u = (screen_to_uv[:, 0].square() + screen_to_uv[:, 1].square()) / 12.0
+                var_v = (screen_to_uv[:, 2].square() + screen_to_uv[:, 3].square()) / 12.0
+                attn_u = torch.exp(-0.5 * (freq**2) * var_u)
+                attn_v = torch.exp(-0.5 * (freq**2) * var_v)
+                mip_gate = torch.stack([attn_u, attn_u, attn_v, attn_v], dim=-1)
+                pix_scale = torch.sqrt(0.5 * (var_u + var_v).clamp_min(0.0))
+                scalar_mip_gate = torch.ones_like(condition)
+            else:
+                col0_norm = torch.sqrt(screen_to_uv[:, 0].square() + screen_to_uv[:, 2].square())
+                col1_norm = torch.sqrt(screen_to_uv[:, 1].square() + screen_to_uv[:, 3].square())
+                pix_scale = 0.5 * (col0_norm + col1_norm)
+                scalar_mip_gate = torch.exp(-0.5 * (freq**2) * pix_scale.square())
+                mip_gate = torch.ones(scales_d.shape[0], 4, device=scales_d.device, dtype=scales_d.dtype)
         else:
             pix_scale = torch.zeros_like(condition)
-            mip_gate = torch.ones_like(condition)
+            mip_gate = torch.ones(scales_d.shape[0], 4, device=scales_d.device, dtype=scales_d.dtype)
+            scalar_mip_gate = torch.ones_like(condition)
 
-        gate = (float(ramp) * plane_gate * cond_gate * mip_gate).float()
-        gate = torch.where(visible, gate, torch.zeros_like(gate))
+        base_gate = (float(ramp) * plane_gate * cond_gate).float()
+        output_gate = (base_gate * scalar_mip_gate.float()).float()
+        gate = torch.cat([output_gate[:, None], mip_gate.float()], dim=-1).contiguous()
+        gate = torch.where(visible[:, None], gate, torch.zeros_like(gate))
         screen_to_uv = torch.where(
             visible[:, None],
             screen_to_uv.float(),
@@ -2305,24 +2423,41 @@ class WaterSplattingModel(Model):
         )
 
         finite_gate = gate[torch.isfinite(gate)]
-        active = finite_gate > 1e-4
+        per_gaussian_gate = gate[:, 0]
+        active_gate = per_gaussian_gate[torch.isfinite(per_gaussian_gate)]
+        active = active_gate > 1e-4
         coeff = self.igaf_coeffs.detach().reshape(self.igaf_coeffs.shape[0], -1)
         coeff_norm = coeff.norm(dim=-1)
+        if coeff.shape[0] == per_gaussian_gate.shape[0]:
+            effective_rgb_abs = (
+                per_gaussian_gate.detach().abs()
+                * float(getattr(self.config, "igaf_amplitude_max", 0.10))
+                * coeff.detach().abs().mean(dim=-1)
+            )
+        else:
+            effective_rgb_abs = torch.zeros_like(per_gaussian_gate)
         stats: Dict[str, object] = {
             "event": "igaf",
             "step": int(self.step),
             "camera_index": camera_index,
             "coordinate_mode": coordinate_mode,
-            "total_gaussians": int(gate.numel()),
+            "axis_mode": axis_mode,
+            "mip_mode": str(getattr(self.config, "igaf_mip_mode", "legacy")),
+            "total_gaussians": int(per_gaussian_gate.numel()),
             "ramp": float(ramp),
             "active_texture_gaussian_fraction": float(active.float().mean().item()) if active.numel() else 0.0,
             "gate": tensor_stats(finite_gate),
+            "output_gate": tensor_stats(per_gaussian_gate[visible]),
+            "base_gate": tensor_stats(base_gate[visible]),
             "planarity_gate": tensor_stats(plane_gate[visible]),
             "condition": tensor_stats(condition[visible]),
             "mip_gate": tensor_stats(mip_gate[visible]),
             "pixel_local_scale": tensor_stats(pix_scale[visible]),
+            "axis_permutation_change_fraction": axis_permutation_change_fraction,
+            "tangent_scale_ratio": tensor_stats((sorted_scales[:, 1] / sorted_scales[:, 0].clamp_min(1e-8))[visible]),
             "coefficient_norm": tensor_stats(coeff_norm),
             "coefficient_saturation_fraction": float((coeff_norm > 0.95).float().mean().item()) if coeff_norm.numel() else 0.0,
+            "effective_local_rgb_abs": tensor_stats(effective_rgb_abs[visible]),
         }
         self._igaf_last_stats = stats
         if self.training and getattr(self.config, "igaf_log_path", None) and int(self.step) % 500 == 0:

@@ -28,7 +28,7 @@ def rasterize_gaussians(
     block_width: int,
     igaf_coeffs: Optional[Float[Tensor, "*batch 4 3"]] = None,
     igaf_screen_to_uv: Optional[Float[Tensor, "*batch 4"]] = None,
-    igaf_gate: Optional[Float[Tensor, "*batch"]] = None,
+    igaf_gate: Optional[Float[Tensor, "*batch 5"]] = None,
     igaf_frequency: float = 1.5,
     igaf_amplitude_max: float = 0.10,
     igaf_coordinate_clamp: float = 3.0,
@@ -110,7 +110,7 @@ def rasterize_gaussians(
     else:
         igaf_coeffs = colors.new_empty((0, 4, 3))
         igaf_screen_to_uv = colors.new_empty((0, 4))
-        igaf_gate = colors.new_empty((0,))
+        igaf_gate = colors.new_empty((0, 5))
 
     return _RasterizeGaussians.apply(
         xys.contiguous(),
@@ -157,7 +157,7 @@ class _RasterizeGaussians(Function):
         colors: Float[Tensor, "*batch channels"],
         igaf_coeffs: Float[Tensor, "*batch 4 3"],
         igaf_screen_to_uv: Float[Tensor, "*batch 4"],
-        igaf_gate: Float[Tensor, "*batch"],
+        igaf_gate: Float[Tensor, "*batch 5"],
         igaf_frequency: float,
         igaf_amplitude_max: float,
         igaf_coordinate_clamp: float,
