@@ -53,6 +53,12 @@ from water_splatting.appearance import (
     givar_highpass_charbonnier_loss,
 )
 from water_splatting.cleanup import build_cleanup_candidate_mask, format_cleanup_stats, sample_pixel_map_at_gaussians
+from water_splatting.density_control import (
+    effective_gaussian_count,
+    mcmc_tensor_stats,
+    parent_sampling_entropy,
+    relocation_logits_and_log_scales,
+)
 from water_splatting.fields import (
     DirectionConditionedMediumField,
     compute_dual_gaussian_colors,
@@ -198,6 +204,36 @@ class WaterSplattingModelConfig(ModelConfig):
     """Clone-score threshold; non-positive falls back to densify_grad_thresh."""
     gdadc_log_path: Optional[str] = None
     """Optional JSONL path for GDADC density-control diagnostics."""
+    mcmc_enabled: bool = False
+    """Enable MCMC-style fixed-budget relocation instead of ADC split/duplicate/cull."""
+    mcmc_cap_max: int = -1
+    """Maximum Gaussian budget. Non-positive keeps the current count as the budget."""
+    mcmc_start_step: int = 500
+    """First training step where MCMC state transitions can run."""
+    mcmc_stop_step: int = 10000
+    """Stop MCMC state transitions at this step; non-positive means no stop."""
+    mcmc_interval: int = 100
+    """Run MCMC relocation/birth every this many steps."""
+    mcmc_dead_opacity_threshold: float = 0.005
+    """Opacity threshold defining dead Gaussians for relocation."""
+    mcmc_growth_rate: float = 0.05
+    """Maximum fractional budget growth per transition while below cap."""
+    mcmc_sgld_enabled: bool = True
+    """If True, apply opacity-gated SGLD noise to Gaussian means."""
+    mcmc_noise_scale: float = 1.0
+    """Multiplier on the MCMC SGLD position noise."""
+    mcmc_noise_lr: float = 1.6e-4
+    """Position learning-rate factor used by SGLD noise."""
+    mcmc_noise_opacity_mid: float = 0.995
+    """Opacity gate midpoint for SGLD; lower opacity gets stronger noise."""
+    mcmc_noise_opacity_temperature: float = 0.01
+    """Opacity gate temperature for SGLD."""
+    lambda_mcmc_opacity: float = 0.0
+    """Optional opacity regularization weight for MCMC experiments."""
+    lambda_mcmc_scale: float = 0.0
+    """Optional scale regularization weight for MCMC experiments."""
+    mcmc_log_path: Optional[str] = None
+    """Optional JSONL path for MCMC transition and SGLD diagnostics."""
     n_split_samples: int = 2
     """number of samples to split gaussians into"""
     sh_degree_interval: int = 1000
@@ -1289,6 +1325,350 @@ class WaterSplattingModel(Model):
         for group, param in param_groups.items():
             self.dup_in_optim(optimizers.optimizers[group], dup_mask, param, n)
 
+    def _mcmc_requested(self) -> bool:
+        return bool(getattr(self.config, "mcmc_enabled", False))
+
+    def _mcmc_in_window(self) -> bool:
+        start = int(getattr(self.config, "mcmc_start_step", 500))
+        stop = int(getattr(self.config, "mcmc_stop_step", 10000))
+        return self.step >= start and (stop <= 0 or self.step < stop)
+
+    def _mcmc_transition_due(self) -> bool:
+        if not self._mcmc_requested() or not self._mcmc_in_window():
+            return False
+        interval = max(int(getattr(self.config, "mcmc_interval", 100)), 1)
+        return int(self.step) % interval == 0
+
+    def _mcmc_cap(self) -> int:
+        cap = int(getattr(self.config, "mcmc_cap_max", -1))
+        return cap if cap > 0 else int(self.num_points)
+
+    def _write_mcmc_log(self, payload: Dict[str, object]) -> None:
+        log_path = getattr(self.config, "mcmc_log_path", None)
+        if not log_path:
+            return
+        try:
+            path = Path(log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf8") as f:
+                f.write(json.dumps(payload) + "\n")
+        except Exception as exc:
+            CONSOLE.log(f"[yellow]Failed to write MCMC log: {exc}[/yellow]")
+
+    def _mcmc_reset_optimizer_rows(self, optimizers: Optimizers, indices: torch.Tensor) -> None:
+        indices = indices.detach().reshape(-1).to(device=self.device, dtype=torch.long)
+        if indices.numel() == 0:
+            return
+        indices = torch.unique(indices)
+        gaussian_groups = self.get_gaussian_param_groups()
+        for group in gaussian_groups:
+            optimizer = optimizers.optimizers.get(group)
+            if optimizer is None or not optimizer.param_groups or not optimizer.param_groups[0]["params"]:
+                continue
+            param = optimizer.param_groups[0]["params"][0]
+            state = optimizer.state.get(param)
+            if not state:
+                continue
+            for key in ("exp_avg", "exp_avg_sq"):
+                value = state.get(key)
+                if torch.is_tensor(value) and value.shape[0] >= self.num_points:
+                    value[indices] = 0
+
+    def _mcmc_append_optimizer_rows(self, optimizers: Optimizers, append_count: int) -> None:
+        if append_count <= 0:
+            return
+        gaussian_groups = self.get_gaussian_param_groups()
+        for group, new_params in gaussian_groups.items():
+            optimizer = optimizers.optimizers.get(group)
+            if optimizer is None or not optimizer.param_groups or not optimizer.param_groups[0]["params"]:
+                continue
+            old_param = optimizer.param_groups[0]["params"][0]
+            new_param = new_params[0]
+            state = optimizer.state.pop(old_param, {})
+            if "exp_avg" in state and torch.is_tensor(state["exp_avg"]):
+                tail_shape = (append_count,) + tuple(state["exp_avg"].shape[1:])
+                zeros = torch.zeros(tail_shape, device=state["exp_avg"].device, dtype=state["exp_avg"].dtype)
+                state["exp_avg"] = torch.cat([state["exp_avg"], zeros], dim=0)
+            if "exp_avg_sq" in state and torch.is_tensor(state["exp_avg_sq"]):
+                tail_shape = (append_count,) + tuple(state["exp_avg_sq"].shape[1:])
+                zeros = torch.zeros(tail_shape, device=state["exp_avg_sq"].device, dtype=state["exp_avg_sq"].dtype)
+                state["exp_avg_sq"] = torch.cat([state["exp_avg_sq"], zeros], dim=0)
+            optimizer.param_groups[0]["params"] = new_params
+            optimizer.state[new_param] = state
+
+    def _mcmc_sync_buffers(
+        self,
+        *,
+        old_n: int,
+        dead_indices: torch.Tensor,
+        dead_parents: torch.Tensor,
+        birth_parents: torch.Tensor,
+    ) -> None:
+        old_n = int(old_n)
+        birth_count = int(birth_parents.numel())
+        device = self.device
+        dead_indices = dead_indices.to(device=device, dtype=torch.long)
+        dead_parents = dead_parents.to(device=device, dtype=torch.long)
+        birth_parents = birth_parents.to(device=device, dtype=torch.long)
+
+        if hasattr(self, "gaussian_lineage_ids") and self.gaussian_lineage_ids.shape[0] >= old_n:
+            ids = self.gaussian_lineage_ids.reshape(-1).to(device=device)
+            if dead_indices.numel() > 0:
+                ids[dead_indices] = ids[dead_parents]
+            if birth_count > 0:
+                ids = torch.cat([ids, ids[birth_parents].detach().clone()], dim=0)
+            self.gaussian_lineage_ids = ids.detach().long()
+
+        if hasattr(self, "igaf_axis_order") and self.igaf_axis_order.shape[0] >= old_n:
+            axis = self.igaf_axis_order.to(device=device)
+            if dead_indices.numel() > 0:
+                axis[dead_indices] = axis[dead_parents]
+            if birth_count > 0:
+                axis = torch.cat([axis, axis[birth_parents].detach().clone()], dim=0)
+            self.igaf_axis_order = axis.detach().long()
+
+        if self._background_candidate_mask is not None and self._background_candidate_mask.numel() >= old_n:
+            mask = self._background_candidate_mask.reshape(-1).to(device=device)
+            if dead_indices.numel() > 0:
+                mask[dead_indices] = mask[dead_parents]
+            if birth_count > 0:
+                mask = torch.cat([mask, mask[birth_parents].detach().clone()], dim=0)
+            self._background_candidate_mask = mask.detach().bool()
+            self._background_candidate_num_points = int(mask.numel())
+
+        float_buffers = [
+            "mvgar_weight_sum",
+            "mvgar_detail_sum",
+            "mvgar_depth_error_sum",
+            "mvgar_depth_error_sq_sum",
+            "mvgar_view_count",
+            "mcgr_weight_sum",
+            "mcgr_persistent_sum",
+            "mcgr_view_count",
+            "mcgr_grad_weight_sum",
+            "givar_dc_weight_sum",
+            "givar_dc_magnitude_sum",
+            "givar_detail_sum",
+            "givar_reliability_sum",
+            "givar_view_count",
+        ]
+        vector_buffers = [
+            "mcgr_grad_direction_sum",
+            "givar_dc_direction_sum",
+            "givar_view_direction_sum",
+        ]
+        long_buffers = ["mvgar_last_camera_id", "mcgr_last_camera_id", "givar_last_camera_id"]
+        for name in float_buffers:
+            if hasattr(self, name):
+                buf = getattr(self, name)
+                if torch.is_tensor(buf) and buf.shape[0] >= old_n:
+                    if dead_indices.numel() > 0:
+                        buf[dead_indices] = 0
+                    if birth_count > 0:
+                        buf = torch.cat([buf, torch.zeros(birth_count, device=device, dtype=buf.dtype)], dim=0)
+                    setattr(self, name, buf.detach())
+        for name in vector_buffers:
+            if hasattr(self, name):
+                buf = getattr(self, name)
+                if torch.is_tensor(buf) and buf.shape[0] >= old_n:
+                    if dead_indices.numel() > 0:
+                        buf[dead_indices] = 0
+                    if birth_count > 0:
+                        zeros = torch.zeros((birth_count,) + tuple(buf.shape[1:]), device=device, dtype=buf.dtype)
+                        buf = torch.cat([buf, zeros], dim=0)
+                    setattr(self, name, buf.detach())
+        for name in long_buffers:
+            if hasattr(self, name):
+                buf = getattr(self, name)
+                if torch.is_tensor(buf) and buf.shape[0] >= old_n:
+                    if dead_indices.numel() > 0:
+                        buf[dead_indices] = -1
+                    if birth_count > 0:
+                        fill = torch.full((birth_count,), -1, device=device, dtype=buf.dtype)
+                        buf = torch.cat([buf, fill], dim=0)
+                    setattr(self, name, buf.detach())
+
+    def _mcmc_state_transition(self, optimizers: Optimizers) -> None:
+        if not self._mcmc_transition_due():
+            return
+        old_n = int(self.num_points)
+        cap = self._mcmc_cap()
+        alpha = torch.sigmoid(self.opacities.detach()).reshape(-1)
+        dead = alpha <= float(getattr(self.config, "mcmc_dead_opacity_threshold", 0.005))
+        alive = ~dead
+        dead_indices = torch.where(dead)[0]
+        alive_indices = torch.where(alive)[0]
+        if alive_indices.numel() == 0:
+            self._write_mcmc_log(
+                {
+                    "event": "transition",
+                    "step": int(self.step),
+                    "total_gaussians_before": old_n,
+                    "mcmc_valid": False,
+                    "reason": "no_alive_gaussians",
+                }
+            )
+            return
+
+        growth_rate = max(float(getattr(self.config, "mcmc_growth_rate", 0.05)), 0.0)
+        birth_target = old_n
+        if old_n < cap and growth_rate > 0.0:
+            birth_target = min(cap, max(old_n + 1, int(math.floor(old_n * (1.0 + growth_rate)))))
+        birth_count = max(int(birth_target - old_n), 0)
+        relocate_count = int(dead_indices.numel())
+
+        parent_probs = alpha[alive_indices].float().clamp_min(0.0)
+        parent_probs = parent_probs / parent_probs.sum().clamp_min(1e-12)
+        total_children = relocate_count + birth_count
+        if total_children > 0:
+            sampled_alive_offsets = torch.multinomial(parent_probs, total_children, replacement=True)
+            sampled_parents = alive_indices[sampled_alive_offsets]
+        else:
+            sampled_parents = torch.zeros(0, device=self.device, dtype=torch.long)
+        dead_parents = sampled_parents[:relocate_count]
+        birth_parents = sampled_parents[relocate_count:]
+
+        unique_parents = torch.zeros(0, device=self.device, dtype=torch.long)
+        inverse = torch.zeros(0, device=self.device, dtype=torch.long)
+        child_counts = torch.zeros(0, device=self.device, dtype=torch.long)
+        child_opacity_logits = torch.zeros(0, 1, device=self.device, dtype=self.opacities.dtype)
+        parent_opacity_before = torch.zeros(0, 1, device=self.device, dtype=self.opacities.dtype)
+        parent_scale_before = torch.zeros(0, 3, device=self.device, dtype=self.scales.dtype)
+        child_scale_logits = torch.zeros(0, 3, device=self.device, dtype=self.scales.dtype)
+        if total_children > 0:
+            unique_parents, inverse = torch.unique(sampled_parents, sorted=False, return_inverse=True)
+            child_counts = torch.bincount(inverse, minlength=int(unique_parents.numel()))
+            parent_opacity_before = self.opacities.detach()[unique_parents].clone()
+            parent_scale_before = self.scales.detach()[unique_parents].clone()
+            parent_split_logits, parent_split_scale_logits = relocation_logits_and_log_scales(
+                parent_opacity_before,
+                parent_scale_before,
+                child_counts,
+                min_output_alpha=float(getattr(self.config, "mcmc_dead_opacity_threshold", 0.005)),
+            )
+            child_opacity_logits = parent_split_logits.reshape(-1, 1)[inverse.reshape(-1)].to(
+                device=self.device,
+                dtype=self.opacities.dtype,
+            )
+            child_scale_logits = parent_split_scale_logits.reshape(-1, 3)[inverse.reshape(-1)].to(
+                device=self.device,
+                dtype=self.scales.dtype,
+            )
+            self.opacities.data[unique_parents] = parent_split_logits.to(
+                device=self.device,
+                dtype=self.opacities.dtype,
+            )
+            self.scales.data[unique_parents] = parent_split_scale_logits.to(
+                device=self.device,
+                dtype=self.scales.dtype,
+            )
+
+        child_values: Dict[str, torch.Tensor] = {}
+        if total_children > 0:
+            for name, param in self.gauss_params.items():
+                values = param.detach()[sampled_parents].clone()
+                if name == "opacities":
+                    values = child_opacity_logits.clone()
+                elif name == "scales":
+                    values = child_scale_logits.clone()
+                child_values[name] = values
+            if relocate_count > 0:
+                for name, param in self.gauss_params.items():
+                    param.data[dead_indices] = child_values[name][:relocate_count].to(
+                        device=param.device,
+                        dtype=param.dtype,
+                    )
+            if birth_count > 0:
+                for name, param in self.gauss_params.items():
+                    appended = child_values[name][relocate_count:].to(device=param.device, dtype=param.dtype)
+                    self.gauss_params[name] = torch.nn.Parameter(torch.cat([param.detach(), appended], dim=0))
+                self._mcmc_append_optimizer_rows(optimizers, birth_count)
+
+        self._mcmc_sync_buffers(
+            old_n=old_n,
+            dead_indices=dead_indices,
+            dead_parents=dead_parents,
+            birth_parents=birth_parents,
+        )
+        reset_indices = [unique_parents, dead_indices]
+        if birth_count > 0:
+            reset_indices.append(torch.arange(old_n, old_n + birth_count, device=self.device, dtype=torch.long))
+        reset_indices = torch.cat([idx.reshape(-1) for idx in reset_indices if idx.numel() > 0]) if reset_indices else torch.zeros(0, device=self.device, dtype=torch.long)
+        self._mcmc_reset_optimizer_rows(optimizers, reset_indices)
+
+        new_alpha = torch.sigmoid(self.opacities.detach()).reshape(-1)
+        max_scale = self.scales.detach().exp().max(dim=-1).values.reshape(-1)
+        mean_scale = self.scales.detach().exp().mean(dim=-1).reshape(-1)
+        parent_unique_count = int(unique_parents.numel())
+        payload: Dict[str, object] = {
+            "event": "transition",
+            "step": int(self.step),
+            "mcmc_valid": True,
+            "total_gaussians_before": old_n,
+            "total_gaussians_after": int(self.num_points),
+            "mcmc_cap_max": int(cap),
+            "budget_utilization": float(self.num_points / max(float(cap), 1.0)),
+            "dead_gaussian_count": relocate_count,
+            "relocated_count": relocate_count,
+            "newborn_count": birth_count,
+            "parent_unique_count": parent_unique_count,
+            "parent_sampling_entropy": parent_sampling_entropy(sampled_parents, int(alive_indices.numel())),
+            "effective_gaussian_count": effective_gaussian_count(new_alpha),
+            "opacity": mcmc_tensor_stats(new_alpha),
+            "scale_max": mcmc_tensor_stats(max_scale),
+            "scale_mean": mcmc_tensor_stats(mean_scale),
+        }
+        if parent_unique_count > 0:
+            parent_opacity_after = self.opacities.detach()[unique_parents].clone()
+            parent_scale_after = self.scales.detach()[unique_parents].clone()
+            payload.update(
+                {
+                    "parent_opacity_before": mcmc_tensor_stats(torch.sigmoid(parent_opacity_before)),
+                    "parent_opacity_after": mcmc_tensor_stats(torch.sigmoid(parent_opacity_after)),
+                    "child_opacity": mcmc_tensor_stats(torch.sigmoid(child_opacity_logits)),
+                    "parent_scale_before": mcmc_tensor_stats(parent_scale_before.exp()),
+                    "parent_scale_after": mcmc_tensor_stats(parent_scale_after.exp()),
+                    "child_scale": mcmc_tensor_stats(child_values["scales"].exp() if child_values else torch.zeros(0, device=self.device)),
+                }
+            )
+        self._write_mcmc_log(payload)
+
+    def _mcmc_apply_sgld(self) -> None:
+        if not self._mcmc_requested() or not self._mcmc_in_window():
+            return
+        if not bool(getattr(self.config, "mcmc_sgld_enabled", True)):
+            return
+        noise_scale = float(getattr(self.config, "mcmc_noise_scale", 1.0))
+        noise_lr = float(getattr(self.config, "mcmc_noise_lr", 1.6e-4))
+        if noise_scale <= 0.0 or noise_lr <= 0.0:
+            return
+        alpha = torch.sigmoid(self.opacities.detach()).reshape(-1, 1)
+        mid = float(getattr(self.config, "mcmc_noise_opacity_mid", 0.995))
+        temp = max(float(getattr(self.config, "mcmc_noise_opacity_temperature", 0.01)), 1e-6)
+        gate = torch.sigmoid(((1.0 - alpha) - mid) / temp)
+        scales = self.scales.detach().exp().clamp_min(1e-8)
+        quats = self.quats.detach()
+        quats = quats / quats.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        rot = quat_to_rotmat(quats)
+        covariance = rot @ torch.diag_embed(scales.square()) @ rot.transpose(1, 2)
+        base_noise = torch.randn_like(self.means) * gate * (noise_scale * noise_lr)
+        noise = torch.bmm(covariance, base_noise.unsqueeze(-1)).squeeze(-1)
+        self.means.data.add_(noise.to(device=self.means.device, dtype=self.means.dtype))
+        interval = max(int(getattr(self.config, "mcmc_interval", 100)), 1)
+        if int(self.step) % interval == 0:
+            ratio = noise.detach().norm(dim=-1) / scales.max(dim=-1).values.square().clamp_min(1e-8)
+            self._write_mcmc_log(
+                {
+                    "event": "sgld",
+                    "step": int(self.step),
+                    "total_gaussians": int(self.num_points),
+                    "noise_scale": noise_scale,
+                    "noise_lr": noise_lr,
+                    "noise_ratio_to_scale": mcmc_tensor_stats(ratio),
+                    "noise_gate": mcmc_tensor_stats(gate),
+                }
+            )
+
     def after_train(self, step: int):
         assert step == self.step
         if getattr(self.config, "igaf_freeze_base_gaussians", False):
@@ -1389,6 +1769,7 @@ class WaterSplattingModel(Model):
                         "xys_grad_norm_p95": grad_p95,
                     }
                 )
+            self._mcmc_apply_sgld()
 
     def set_crop(self, crop_box: Optional[OrientedBox]):
         self.crop_box = crop_box
@@ -1404,6 +1785,22 @@ class WaterSplattingModel(Model):
         if getattr(self.config, "dual_color_enabled", False) and getattr(self.config, "dual_color_freeze_geometry", True):
             return
         if self.step <= self.config.warmup_length:
+            return
+        if self._mcmc_requested():
+            with torch.no_grad():
+                self._mcmc_state_transition(optimizers)
+                self.xys_grad_norm = None
+                self.xys_grad_signed_sum = None
+                self.xys_grad_abs_sum = None
+                self.gdadc_view_count = None
+                self.vis_counts = None
+                self.depths_accum = None
+                self.max_2Dsize = None
+                self._reset_cleanup_accumulators()
+                if self._mvgar_requested():
+                    self._reset_mvgar_accumulators()
+                if self._mcgr_requested():
+                    self._reset_mcgr_accumulators()
             return
         with torch.no_grad():
             # Offset all the opacity reset logic by refine_every so that we don't
@@ -4937,6 +5334,13 @@ class WaterSplattingModel(Model):
                 ssim_metric=self.ssim,
             ),
         }
+        if self.training and self._mcmc_requested():
+            mcmc_opacity_weight = float(getattr(self.config, "lambda_mcmc_opacity", 0.0))
+            if mcmc_opacity_weight > 0.0:
+                loss_dict["mcmc_opacity_loss"] = mcmc_opacity_weight * torch.sigmoid(self.opacities).mean()
+            mcmc_scale_weight = float(getattr(self.config, "lambda_mcmc_scale", 0.0))
+            if mcmc_scale_weight > 0.0:
+                loss_dict["mcmc_scale_loss"] = mcmc_scale_weight * self.scales.exp().mean()
         igaf_amp_weight = float(getattr(self.config, "lambda_igaf_amplitude", 0.0))
         if self.training and self._igaf_requested() and igaf_amp_weight > 0.0 and self._igaf_ramp_weight() > 0.0:
             freq = float(getattr(self.config, "igaf_frequency", 1.5))
