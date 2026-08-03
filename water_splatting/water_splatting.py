@@ -303,6 +303,8 @@ class WaterSplattingModelConfig(ModelConfig):
     """Weight for log-domain medium attenuation/backscatter range consistency."""
     lambda_gmvc_binf: float = 0.0
     """Weight for weak B_inf/medium_rgb scene-center consistency."""
+    lambda_gmvc_intrinsic: float = 0.0
+    """Weight for renderer intrinsic Gaussian color consistency against detached track consensus."""
     gmvc_max_tracks_per_step: int = 4096
     """Maximum detached track observations sampled for the current camera per step."""
     gmvc_eps: float = 1e-4

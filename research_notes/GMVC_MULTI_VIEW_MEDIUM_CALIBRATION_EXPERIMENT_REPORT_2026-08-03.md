@@ -1302,3 +1302,91 @@ renders/gmvc_phase_b_identifiability_20260803/japanesegradens_c3/gmvc_identifiab
 - 方案 A：改成 current-batch / current-bank 的 online track variance loss，让同一 track 的当前多视角 \(\widehat J\) 互相一致，而不是只贴近 M1 step-10000 的 detached consensus；
 - 方案 B：新增 renderer-consistent intrinsic appearance term，将 `outputs["J_gaussian_raw"]` 或 clear-proxy Gaussian intrinsic render 与 track consensus 对齐，使 C4 对 `features_dc` 有真实 GMVC 梯度；
 - 方案 C：保留 geometry freeze 作为独立后处理消融，但不要把其 PSNR 增益归因于 GMVC。
+
+### 18.7 C4 renderer-consistent intrinsic DC refinement 复核
+
+为确认 C4 是否只是 `features_dc` unfreeze，本轮按上节方案 B 做了最小机制修改：在 `compute_gmvc_training_terms()` 中新增 `gmvc_intrinsic_loss`，从 `outputs["J_gaussian_raw"]`、`outputs["J_raw"]` 或 `outputs["J"]` 采样当前 intrinsic Gaussian render，并与 track bank 中 detached `j_consensus` 做 Charbonnier 对齐。该项由新增默认关闭参数 `lambda_gmvc_intrinsic` 控制，使用与 GMVC 其他项一致的 start/stop/ramp。
+
+代码改动：
+
+```text
+water_splatting/water_splatting.py
+  lambda_gmvc_intrinsic: float = 0.0
+
+water_splatting/medium_calibration/gmvc_training.py
+  gmvc_intrinsic_loss = Charbonnier(sample(J_gaussian_raw/J_raw/J) - detach(j_consensus))
+
+scripts/experiments/gmvc_phase_b_common.sh
+scripts/experiments/backscatter_consistent_binf_iui3_redsea.sh
+  透传 LAMBDA_GMVC_INTRINSIC / --pipeline.model.lambda-gmvc-intrinsic
+
+scripts/experiments/gmvc_c4_intrinsic_dc_japanesegradens_10k_to_15k.sh
+  GMVC enabled, geometry frozen, features_dc trainable, features_rest frozen
+```
+
+Smoke：
+
+```bash
+GPU=6 \
+STAMP=20260803_gmvc_c4_intrinsic_smoke \
+MAX_NUM_ITERATIONS=2 \
+RUN_EVAL=0 \
+RUN_CLOSURE_DIAG=0 \
+GMVC_TRACK_BANK_PATH=/mnt/new/home_old/ycy/water-splatting-refactor/renders/gmvc_track_banks_smoke/japanesegradens_m1_step10000/gmvc_track_bank.pt \
+scripts/experiments/gmvc_c4_intrinsic_dc_japanesegradens_10k_to_15k.sh
+```
+
+结果：训练启动正常，track bank 加载正常，`lambda_gmvc_intrinsic=0.01` 配置写入正常，`features_dc=True` / `features_rest=False` 路径无 CUDA 或 autograd 错误。
+
+正式命令：
+
+```bash
+GPU=6 STAMP=20260803_gmvc_phase_b_jg_c1_freeze_dc RUN_EVAL=1 RUN_CLOSURE_DIAG=0 \
+GMVC_VARIANT=c1_diag_freeze_dc GMVC_ENABLED=False GMVC_DIAGNOSTIC_ONLY=True \
+GMVC_FREEZE_GEOMETRY=True GMVC_TRAIN_FEATURES_DC=True GMVC_TRAIN_FEATURES_REST=False \
+LAMBDA_GMVC_INTRINSIC=0.0 \
+scripts/experiments/gmvc_phase_b_common.sh
+
+GPU=6 STAMP=20260803_gmvc_phase_b_jg_c4_intrinsic001 RUN_EVAL=1 RUN_CLOSURE_DIAG=0 \
+LAMBDA_GMVC_INTRINSIC=0.01 \
+scripts/experiments/gmvc_c4_intrinsic_dc_japanesegradens_10k_to_15k.sh
+
+GPU=6 STAMP=20260803_gmvc_phase_b_jg_c4_intrinsic010 RUN_EVAL=1 RUN_CLOSURE_DIAG=0 \
+LAMBDA_GMVC_INTRINSIC=0.10 \
+scripts/experiments/gmvc_c4_intrinsic_dc_japanesegradens_10k_to_15k.sh
+```
+
+质量与物理诊断结果：
+
+| Variant | PSNR | SSIM | LPIPS | Final tracks | T valid | \(E_J\) | corr \(\Delta\beta^D,\Delta B_\infty\) | corr \(\Delta\beta^B,\Delta B_\infty\) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| C0 M1 continuation | 24.7551 | 0.8995 | 0.1200 | 53,204 | 0.9981 | 0.05434 | -0.2054 | -0.1500 |
+| C1 freeze | 24.8648 | 0.8963 | 0.1251 | 53,401 | 0.9832 | 0.06065 | -0.2908 | -0.2493 |
+| C1 freeze + DC unfreeze | 24.8637 | 0.8972 | 0.1240 | 53,647 | 0.9870 | 0.05892 | -0.2487 | -0.1496 |
+| C4 intrinsic, \(\lambda=0.01\) | 24.8648 | 0.8972 | 0.1240 | 53,554 | 0.9873 | 0.05898 | -0.2572 | -0.1471 |
+| C4 intrinsic, \(\lambda=0.10\) | 24.8649 | 0.8972 | 0.1240 | 53,536 | 0.9877 | 0.05895 | -0.2474 | -0.1452 |
+
+C4 output JSONs：
+
+```text
+renders/gmvc_c1_diag_freeze_dc_japanesegradens_redsea_seed42_step10000_to_15000_20260803_gmvc_phase_b_jg_c1_freeze_dc/output.json
+renders/gmvc_c4_intrinsic_dc_japanesegradens_redsea_seed42_step10000_to_15000_20260803_gmvc_phase_b_jg_c4_intrinsic001/output.json
+renders/gmvc_c4_intrinsic_dc_japanesegradens_redsea_seed42_step10000_to_15000_20260803_gmvc_phase_b_jg_c4_intrinsic010/output.json
+```
+
+C4 identifiability JSONs：
+
+```text
+renders/gmvc_phase_b_identifiability_20260803/japanesegradens_c1_freeze_dc/gmvc_identifiability.json
+renders/gmvc_phase_b_identifiability_20260803/japanesegradens_c4_intrinsic001/gmvc_identifiability.json
+renders/gmvc_phase_b_identifiability_20260803/japanesegradens_c4_intrinsic010/gmvc_identifiability.json
+```
+
+结论：
+
+- `features_dc` unfreeze 可以相对 freeze-only 改善 SSIM/LPIPS，但仍明显差于 C0 M1 continuation。
+- C4 \(\lambda=0.01\) 和 \(\lambda=0.10\) 与 C1 freeze + DC unfreeze control 几乎完全重合，说明 intrinsic GMVC loss 没有形成可观测的额外收益。
+- C4 的 \(E_J\) 约为 0.05895，仍比 C0 的 0.05434 差约 8.5%，不满足 GMVC 的物理一致性 gate。
+- 因为 JapaneseGradens 主场景已经失败，本轮不进入 IUI3 / Curasao / Panama，也不进入四场景 15k。
+
+当前判断：GMVC 在现有 detached track-consensus formulation 下不能证明能缓解 M1 的 medium/Gaussian 不可辨识性。若继续研究，应优先改成 online track variance 或 scene-level parameter prior，而不是继续加大 `lambda_gmvc_intrinsic` 或扩展场景。

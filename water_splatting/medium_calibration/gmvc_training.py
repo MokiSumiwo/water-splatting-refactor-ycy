@@ -152,17 +152,38 @@ def compute_gmvc_training_terms(
     b_inf_residual = charbonnier_loss(b_inf - b_inf_center, eps=huber_eps)
     b_inf_loss = _weighted_mean(b_inf_residual, weight, eps)
 
+    intrinsic_source = outputs.get("J_gaussian_raw", outputs.get("J_raw", outputs.get("J")))
+    if intrinsic_source is None:
+        intrinsic_loss = zero
+    else:
+        intrinsic_sample = _sample_hwc(intrinsic_source, xy)
+        valid_intrinsic = torch.isfinite(intrinsic_sample).all(dim=-1)
+        intrinsic_weight = torch.where(valid_intrinsic, weight, torch.zeros_like(weight))
+        if intrinsic_weight.sum() <= 0:
+            intrinsic_loss = zero
+        else:
+            intrinsic_residual = charbonnier_loss(intrinsic_sample - j_consensus.detach(), eps=huber_eps)
+            intrinsic_loss = _weighted_mean(intrinsic_residual, intrinsic_weight, eps)
+
     start = int(getattr(config, "gmvc_start_step", 10000))
     stop = int(getattr(config, "gmvc_stop_step", 15000))
     ramp = int(getattr(config, "gmvc_ramp_steps", 500))
     lambda_j = _ramped_weight(float(getattr(config, "lambda_gmvc_j", 0.0)), step, start, ramp, stop)
     lambda_range = _ramped_weight(float(getattr(config, "lambda_gmvc_range", 0.0)), step, start, ramp, stop)
     lambda_binf = _ramped_weight(float(getattr(config, "lambda_gmvc_binf", 0.0)), step, start, ramp, stop)
+    lambda_intrinsic = _ramped_weight(
+        float(getattr(config, "lambda_gmvc_intrinsic", 0.0)),
+        step,
+        start,
+        ramp,
+        stop,
+    )
 
     losses = {
         "gmvc_j_consistency_loss": j_loss * lambda_j,
         "gmvc_range_loss": range_loss * lambda_range,
         "gmvc_binf_loss": b_inf_loss * lambda_binf,
+        "gmvc_intrinsic_loss": intrinsic_loss * lambda_intrinsic,
     }
     metrics = {
         "gmvc_available_tracks": gt_img.new_tensor(float(count)),
@@ -172,8 +193,10 @@ def compute_gmvc_training_terms(
         "gmvc_j_consistency_raw": j_loss.detach(),
         "gmvc_range_raw": range_loss.detach(),
         "gmvc_binf_raw": b_inf_loss.detach(),
+        "gmvc_intrinsic_raw": intrinsic_loss.detach(),
         "gmvc_lambda_j": gt_img.new_tensor(float(lambda_j)),
         "gmvc_lambda_range": gt_img.new_tensor(float(lambda_range)),
         "gmvc_lambda_binf": gt_img.new_tensor(float(lambda_binf)),
+        "gmvc_lambda_intrinsic": gt_img.new_tensor(float(lambda_intrinsic)),
     }
     return losses, metrics
