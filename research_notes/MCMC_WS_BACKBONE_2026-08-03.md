@@ -152,10 +152,10 @@ JapaneseGradens first. IUI3 and 15k are gated on JapaneseGradens.
 
 | Variant | Description | Status | PSNR | SSIM | LPIPS | Gaussian Count | Notes |
 | --- | --- | --- | ---: | ---: | ---: | ---: | --- |
-| M0 | M1 control with original ADC | pending | | | | | |
-| M1 | MCMC relocation + controlled birth, no reg, no SGLD | pending | | | | | |
-| M2 | M1 + opacity/scale reg at 0.001 | pending | | | | | |
-| M3 | M2 + SGLD | pending | | | | | |
+| M0 | M1 control with original ADC | complete | 22.7855 | 0.8015 | 0.2398 | 654,089 | Control |
+| M1 | MCMC relocation + controlled birth, no reg, no SGLD | complete | 23.6342 | 0.8321 | 0.2501 | 180,825 | PSNR/SSIM up, LPIPS worse |
+| M2 | M1 + opacity/scale reg at 0.001 | complete | 23.4753 | 0.8312 | 0.2527 | 180,825 | Worse than M1 |
+| M3 | M2 + SGLD | complete | 23.5251 | 0.8315 | 0.2520 | 180,825 | SGLD does not recover LPIPS |
 
 Gate:
 
@@ -166,4 +166,101 @@ Gate:
 
 ## Current Decision
 
-Implementation smoke is passed. Proceed to JapaneseGradens M0-M3 5k screening from shared step-500 checkpoint.
+Implementation smoke passed. JapaneseGradens M0-M3 5k screening from the shared step-500 checkpoint is complete.
+
+## 5k Commands
+
+Parallel launch:
+
+```bash
+RUN_STAMP="20260803_mcmc5k_jg"
+GPU=6 STAMP="${RUN_STAMP}" RUN_EVAL=1 RUN_CLOSURE_DIAG=0 scripts/experiments/mcmc_ws_m0_adc_japanesegradens_5k.sh
+GPU=7 STAMP="${RUN_STAMP}" RUN_EVAL=1 RUN_CLOSURE_DIAG=0 scripts/experiments/mcmc_ws_m1_reloc_birth_japanesegradens_5k.sh
+GPU=8 STAMP="${RUN_STAMP}" RUN_EVAL=1 RUN_CLOSURE_DIAG=0 scripts/experiments/mcmc_ws_m2_reg_japanesegradens_5k.sh
+GPU=9 STAMP="${RUN_STAMP}" RUN_EVAL=1 RUN_CLOSURE_DIAG=0 scripts/experiments/mcmc_ws_m3_sgld_japanesegradens_5k.sh
+```
+
+All four jobs completed successfully.
+
+## 5k Outputs
+
+Metrics JSON:
+
+```text
+renders/mcmc_ws_m0_adc_japanesegradens_seed42_5000_20260803_mcmc5k_jg/output.json
+renders/mcmc_ws_m1_reloc_birth_japanesegradens_seed42_5000_20260803_mcmc5k_jg/output.json
+renders/mcmc_ws_m2_reg_japanesegradens_seed42_5000_20260803_mcmc5k_jg/output.json
+renders/mcmc_ws_m3_sgld_japanesegradens_seed42_5000_20260803_mcmc5k_jg/output.json
+```
+
+Contact sheet:
+
+```text
+renders/mcmc_ws_japanesegradens_5k_contact_20260803_mcmc5k_jg.png
+```
+
+Checkpoints:
+
+```text
+outputs/mcmc_ws_m0_adc_japanesegradens_seed42_5000/water-splatting/mcmc_ws_m0_adc_japanesegradens_seed42_5000_20260803_mcmc5k_jg/nerfstudio_models/step-000004999.ckpt
+outputs/mcmc_ws_m1_reloc_birth_japanesegradens_seed42_5000/water-splatting/mcmc_ws_m1_reloc_birth_japanesegradens_seed42_5000_20260803_mcmc5k_jg/nerfstudio_models/step-000004999.ckpt
+outputs/mcmc_ws_m2_reg_japanesegradens_seed42_5000/water-splatting/mcmc_ws_m2_reg_japanesegradens_seed42_5000_20260803_mcmc5k_jg/nerfstudio_models/step-000004999.ckpt
+outputs/mcmc_ws_m3_sgld_japanesegradens_seed42_5000/water-splatting/mcmc_ws_m3_sgld_japanesegradens_seed42_5000_20260803_mcmc5k_jg/nerfstudio_models/step-000004999.ckpt
+```
+
+MCMC logs:
+
+```text
+logs/mcmc_ws_m1_reloc_birth_japanesegradens_seed42_5000_20260803_mcmc5k_jg/mcmc.jsonl
+logs/mcmc_ws_m2_reg_japanesegradens_seed42_5000_20260803_mcmc5k_jg/mcmc.jsonl
+logs/mcmc_ws_m3_sgld_japanesegradens_seed42_5000_20260803_mcmc5k_jg/mcmc.jsonl
+```
+
+## 5k Deltas vs M0
+
+| Variant | dPSNR | dSSIM | dLPIPS | Count Change vs M0 | Train Iter Time |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| M1 | +0.8487 | +0.0305 | +0.0104 | -72.4% | 0.0126s |
+| M2 | +0.6898 | +0.0296 | +0.0129 | -72.4% | 0.0129s |
+| M3 | +0.7397 | +0.0300 | +0.0122 | -72.4% | 0.0130s |
+
+M0 train iteration time: `0.0139s`.
+
+## MCMC Diagnostics
+
+M1:
+
+- Transitions: 44
+- First transition step: 600
+- First transition Gaussian count: `21,140 -> 22,197`
+- Last transition step: 4900
+- Last transition Gaussian count: `172,215 -> 180,825`
+- Last effective Gaussian count: `126,499`
+
+M2:
+
+- Transitions: 44
+- Last transition Gaussian count: `172,215 -> 180,825`
+- Last effective Gaussian count: `120,796`
+
+M3:
+
+- Transitions: 44
+- SGLD events: 45
+- Last transition Gaussian count: `172,215 -> 180,825`
+- Last effective Gaussian count: `121,064`
+
+## Gate Decision
+
+The JapaneseGradens 5k gate fails.
+
+- PSNR and SSIM improve substantially for all MCMC variants.
+- LPIPS worsens for all MCMC variants, by `+0.0104` to `+0.0129`, while the gate requires LPIPS improvement of at least `-0.0015`.
+- Gaussian count is much lower than M0, so the count-increase constraint is not the blocker.
+- Training iteration time is not worse than M0 in this run.
+
+Do not run IUI3 or 15k from this MCMC-WS configuration.
+
+Best JapaneseGradens candidate by PSNR/SSIM is M1, but it is not a passing candidate because LPIPS regresses.
+
+Current conclusion: MCMC relocation/birth changes the optimization trajectory enough to recover PSNR/SSIM under a much smaller Gaussian budget, but it does not improve perceptual reconstruction quality at 5k. This does not confirm that M1's JapaneseGradens gap is mainly caused by original ADC density-control instability.
