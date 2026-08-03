@@ -1554,3 +1554,129 @@ Active `J_proxy_raw` 修复了旧 C4 的梯度路径问题，并且 λ=0.03/0.05
 > offline detached M1 consensus formulation 即使使用 active DC proxy，也主要是旧 M1 分解的自蒸馏，不能改善 medium/Gaussian 不可辨识性。
 
 本轮不应继续把 active-proxy offline intrinsic target 拉到 15k 或扩展四场景。下一步若继续 GMVC，应转向 GPT 建议的 online multi-view degradation closure / scene-level bounded medium variation，或者先做低维物理 oracle 验证场景级 medium 参数假设是否成立。
+
+---
+
+## 19. Phase O：低维物理 Oracle
+
+### 19.1 目的
+
+根据最新分析，本阶段不直接编写 GMVC-V2 训练模块，而是先验证一个更低风险的问题：
+
+> 在固定 M1 geometry/depth 和多视图对应关系后，全局水体参数或“全局中心 + 每相机有界残差”是否能解释 track 上的 GT RGB，并改善 held-out cross-view transfer。
+
+该 oracle 不使用旧 M1 detached intrinsic consensus 作为监督目标。它只使用：
+
+- track 的 GT RGB；
+- M1 渲染深度与几何投影对应；
+- alpha、depth error、depth std、transmission 等 track 可靠性权重；
+- 每条 track 的 latent intrinsic color \(J_p\)；
+- 低维水体参数。
+
+### 19.2 新增代码
+
+新增：
+
+```text
+scripts/diagnostics/fit_gmvc_lowdim_oracle.py
+scripts/experiments/gmvc_phase_o_lowdim_oracle.sh
+```
+
+`fit_gmvc_lowdim_oracle.py` 支持：
+
+- `--load-config`
+- `--load-step`
+- `--test-mode`
+- `--split`
+- `--max-images`
+- `--samples-per-view`
+- `--target-neighbor-window`
+- `--max-tracks`
+- `--models O0,O1`
+- `--output-dir`
+
+实现的 oracle：
+
+- **O0:** 全场景统一 \( \beta^D, \beta^B, B_\infty \)，共 9 个水体参数，加每条 track 的 \(J_p\)。
+- **O1:** 场景中心 + 每相机 bounded residual，其中 `log_beta` residual scale 为 `0.15`，`B_inf` logit residual scale 为 `0.10`。
+
+暂未实现 O2。原因是 O2 需要把 residual 从 per-camera 扩展到 `dir_xy_camera` 函数形式，并引入 ray/xy 条件网络；当前 Phase O 的目标是先验证低维 hypothesis，而不是提前写训练框架。
+
+### 19.3 指标定义
+
+主要指标：
+
+- **held-out transfer L1:** 从视角 \(i\) 反演出的 \(J_i\) 通过视角 \(j\) 的 fitted water/depth 预测 \(I_j\)。
+- **held-out normalized closure L1:** 使用无除法闭合式 \((I_i-B_i)T_j - (I_j-B_j)T_i\) 的归一化残差。
+- **held-out object \(J\) variance:** 同一 track 在不同视角反演出的 \(J_i\) 方差。
+- **consensus-J recon L1:** 固定 fitted water 后，用 held-out track 自身的 online \(J\)-center 重建各 view。
+- **residual saturation:** O1 中 `abs(tanh(delta)) > 0.95` 的比例，用于判断有界残差是否碰到上限。
+
+### 19.4 实验命令
+
+复现实验脚本：
+
+```bash
+SCENE=all scripts/experiments/gmvc_phase_o_lowdim_oracle.sh
+```
+
+本轮实际运行配置：
+
+```text
+SAMPLES_PER_VIEW=4096
+MAX_TRACKS=30000
+ITERS=500
+LR=0.03
+MODELS=O0,O1
+TRAIN_FRACTION=0.80
+```
+
+场景与 checkpoint：
+
+| Scene | Config | Step |
+|---|---|---:|
+| JapaneseGradens | `outputs/cross_scene_japanesegradens_redsea_m1_seed42_15000/.../config.yml` | 10000 |
+| IUI3 | `outputs/m1_dir_xy_camera_iui3_redsea_15000/.../config.yml` | 14999 |
+| Curasao | `outputs/cross_scene_curasao_m1_seed42_15000/.../config.yml` | 10000 |
+| Panama | `outputs/cross_scene_panama_m1_seed42_15000/.../config.yml` | 10000 |
+
+IUI3 的该 M1 run 不存在 step-10000 checkpoint，实际使用已有 `step-000014999.ckpt`。
+
+### 19.5 输出文件
+
+```text
+renders/gmvc_oracle_phase_o_20260803/japanesegradens_m1_step10000_train_s4096/gmvc_lowdim_oracle.json
+renders/gmvc_oracle_phase_o_20260803/iui3_m1_step14999_train_s4096/gmvc_lowdim_oracle.json
+renders/gmvc_oracle_phase_o_20260803/curasao_m1_step10000_train_s4096/gmvc_lowdim_oracle.json
+renders/gmvc_oracle_phase_o_20260803/panama_m1_step10000_train_s4096/gmvc_lowdim_oracle.json
+```
+
+### 19.6 四场景结果
+
+| Scene | Tracks | O0 transfer | O1 transfer | Δ | O0 J-var | O1 J-var | Δ | O0 closure-norm | O1 closure-norm | Δ | O1 saturation |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| JapaneseGradens | 30,000 | 0.04593 | 0.04336 | -5.6% | 0.00830 | 0.00718 | -13.4% | 0.26634 | 0.30414 | +14.2% | 28.1% |
+| IUI3 | 30,000 | 0.03435 | 0.03182 | -7.4% | 0.00650 | 0.00469 | -27.8% | 0.10845 | 0.15379 | +41.8% | 28.0% |
+| Curasao | 30,000 | 0.03184 | 0.02134 | -33.0% | 0.00411 | 0.00209 | -49.1% | 0.27770 | 0.23782 | -14.4% | 40.7% |
+| Panama | 30,000 | 0.02731 | 0.02535 | -7.2% | 0.00350 | 0.00273 | -22.0% | 0.28238 | 0.22880 | -19.0% | 8.9% |
+
+Consensus-J reconstruction:
+
+| Scene | O0 held-out consensus recon | O1 held-out consensus recon | Δ |
+|---|---:|---:|---:|
+| JapaneseGradens | 0.03206 | 0.02986 | -6.9% |
+| IUI3 | 0.02576 | 0.02369 | -8.0% |
+| Curasao | 0.02261 | 0.01504 | -33.5% |
+| Panama | 0.01733 | 0.01624 | -6.3% |
+
+### 19.7 Phase O 结论
+
+1. **GMVC 不应在当前结果处停止。** O1 在四个场景中都降低了 held-out transfer error 和 object \(J\) variance，说明“场景公共水体中心 + 有限视角变化”确实有可用信号。
+
+2. **O1 不是无条件胜利。** JapaneseGradens 和 IUI3 的 normalized closure 变差，且 O1 residual saturation 约 28%；Curasao transfer 改善最大，但 saturation 达 40.7%。这说明 per-camera residual 在 oracle 中很容易碰到边界，未来训练版必须加入 residual budget 监控和更稳的 closure 权重。
+
+3. **Panama 是最干净的正例。** O1 同时改善 transfer、closure、J variance，且 saturation 只有 8.9%，表明 bounded residual 假设在部分场景中可以稳定工作。
+
+4. **JapaneseGradens 的结论更谨慎。** O1 transfer 下降 5.6%，J variance 下降 13.4%，consensus-J recon 下降 6.9%，但 closure-norm 上升 14.2%。这支持继续做 GMVC-V2，但不支持直接把 O1 形式无正则地塞进训练。
+
+5. **下一步应进入 V1，而不是回到 offline consensus。** 建议先实现 medium-only online cross-view closure，附带 scene-centered bounded medium parameterization 和 residual saturation 日志；只有 V1 能降低 held-out closure/transfer 后，再接回 active DC proxy 做 V2 alternating object-medium calibration。
