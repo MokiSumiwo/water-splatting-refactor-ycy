@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import math
 import json
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Type, Union
@@ -663,6 +664,10 @@ class WaterSplattingModelConfig(ModelConfig):
     """Number of steps in the GIVAR rolling diagnostic window before reset."""
     givar_log_path: Optional[str] = None
     """Optional JSONL path for GIVAR evidence, gate, and loss diagnostics."""
+    deterministic_audit_log_path: Optional[str] = None
+    """Optional JSONL path for deterministic replay diagnostics."""
+    deterministic_audit_log_every: int = 100
+    """Interval for deterministic replay loss/gradient diagnostics."""
     clear_proxy_enabled: bool = False
     """Enable an auxiliary zero-medium black-background clear proxy render."""
     clear_proxy_appearance_only: bool = False
@@ -1003,6 +1008,8 @@ class WaterSplattingModel(Model):
         self._givar_window_start_step = 0
         self._warned_givar_shape_reset = False
         self._warned_givar_sh = False
+        self._deterministic_current_camera_id: Optional[int] = None
+        self._deterministic_last_loss_value: Optional[float] = None
 
         self.crop_box: Optional[OrientedBox] = None
         if self.config.background_color == "random":
@@ -1265,6 +1272,24 @@ class WaterSplattingModel(Model):
             self._accumulate_mcgr_gradient_coherence(visible_mask)
             self._accumulate_givar_gradient_coherence(visible_mask)
             self._maybe_log_and_reset_givar_window()
+            if self._deterministic_should_log_step():
+                finite_grads = weighted_grads.detach().float().reshape(-1)
+                finite_grads = finite_grads[torch.isfinite(finite_grads)]
+                grad_mean = float(finite_grads.mean().item()) if finite_grads.numel() else 0.0
+                grad_p95 = float(torch.quantile(finite_grads, 0.95).item()) if finite_grads.numel() else 0.0
+                self._write_deterministic_audit_log(
+                    {
+                        "event": "grad",
+                        "step": int(self.step),
+                        "camera_index": self._deterministic_current_camera_id,
+                        "total_gaussians": int(self.num_points),
+                        "active_sh_degree": int(getattr(self, "last_active_sh_degree", 0)),
+                        "last_loss": self._deterministic_last_loss_value,
+                        "visible_count": int(visible_mask.sum().item()),
+                        "xys_grad_norm_mean": grad_mean,
+                        "xys_grad_norm_p95": grad_p95,
+                    }
+                )
 
     def set_crop(self, crop_box: Optional[OrientedBox]):
         self.crop_box = crop_box
@@ -1290,6 +1315,7 @@ class WaterSplattingModel(Model):
                 and (self.step % reset_interval > self.num_train_data + self.config.refine_every)
             )
             cleanup_cull_mask = self._compute_cleanup_candidate_mask()
+            audit_refinement_payload: Optional[Dict[str, object]] = None
             if do_densification:
                 # then we densify
                 assert self.xys_grad_norm is not None and self.vis_counts is not None and self.max_2Dsize is not None
@@ -1427,6 +1453,25 @@ class WaterSplattingModel(Model):
                     )
                 )                
                 deleted_mask = self.cull_gaussians(splits_mask)
+                if self._deterministic_audit_requested():
+                    audit_refinement_payload = {
+                        "event": "refinement",
+                        "step": int(self.step),
+                        "camera_index": self._deterministic_current_camera_id,
+                        "total_gaussians_before": int(base_high_grads.numel()),
+                        "total_gaussians_after_append": int(splits_mask.numel()),
+                        "total_gaussians_after_cull": int(self.num_points),
+                        "base_high_grad_count": int(base_high_grads.sum().item()),
+                        "high_grads_count": int(high_grads.sum().item()),
+                        "split_count": int(splits.sum().item()),
+                        "duplicate_count": int(dups.sum().item()),
+                        "cull_count": int(deleted_mask.sum().item()) if deleted_mask is not None else 0,
+                        "opacity_reset_event": False,
+                        "high_grads_hash": self._hash_bool_mask(high_grads),
+                        "split_mask_hash": self._hash_bool_mask(splits),
+                        "duplicate_mask_hash": self._hash_bool_mask(dups),
+                        "cull_mask_hash": self._hash_bool_mask(deleted_mask),
+                    }
                 if self._mvgar_requested():
                     mvgar_payload["total_gaussians_after_cull"] = int(self.num_points)
                     self._mvgar_last_refinement_stats = mvgar_payload
@@ -1442,6 +1487,28 @@ class WaterSplattingModel(Model):
             else:
                 # if we donot allow culling post refinement, no more gaussians will be pruned.
                 deleted_mask = None
+
+            if audit_refinement_payload is None and self._deterministic_audit_requested():
+                audit_refinement_payload = {
+                    "event": "refinement",
+                    "step": int(self.step),
+                    "camera_index": self._deterministic_current_camera_id,
+                    "total_gaussians_before": int(self.num_points + int(deleted_mask.sum().item()) if deleted_mask is not None else self.num_points),
+                    "total_gaussians_after_append": int(self.num_points + int(deleted_mask.sum().item()) if deleted_mask is not None else self.num_points),
+                    "total_gaussians_after_cull": int(self.num_points),
+                    "base_high_grad_count": 0,
+                    "high_grads_count": 0,
+                    "split_count": 0,
+                    "duplicate_count": 0,
+                    "cull_count": int(deleted_mask.sum().item()) if deleted_mask is not None else 0,
+                    "opacity_reset_event": False,
+                    "high_grads_hash": None,
+                    "split_mask_hash": None,
+                    "duplicate_mask_hash": None,
+                    "cull_mask_hash": self._hash_bool_mask(deleted_mask),
+                }
+            if audit_refinement_payload is not None:
+                self._write_deterministic_audit_log(audit_refinement_payload)
     
             if deleted_mask is not None:
                 self.remove_from_all_optim(optimizers, deleted_mask)
@@ -1469,6 +1536,16 @@ class WaterSplattingModel(Model):
                 param_state = optim.state[param]
                 param_state["exp_avg"] = torch.zeros_like(param_state["exp_avg"])
                 param_state["exp_avg_sq"] = torch.zeros_like(param_state["exp_avg_sq"])
+                if self._deterministic_audit_requested():
+                    self._write_deterministic_audit_log(
+                        {
+                            "event": "opacity_reset",
+                            "step": int(self.step),
+                            "camera_index": self._deterministic_current_camera_id,
+                            "total_gaussians": int(self.num_points),
+                            "reset_value": float(reset_value),
+                        }
+                    )
             
             self.xys_grad_norm = None
             self.vis_counts = None
@@ -2027,6 +2104,33 @@ class WaterSplattingModel(Model):
                 f.write(json.dumps(payload) + "\n")
         except Exception as exc:
             CONSOLE.log(f"[yellow]Failed to write MCGR log: {exc}[/yellow]")
+
+    def _deterministic_audit_requested(self) -> bool:
+        return bool(getattr(self.config, "deterministic_audit_log_path", None))
+
+    def _deterministic_should_log_step(self) -> bool:
+        if not self._deterministic_audit_requested():
+            return False
+        interval = max(int(getattr(self.config, "deterministic_audit_log_every", 100)), 1)
+        return int(self.step) % interval == 0
+
+    def _hash_bool_mask(self, mask: Optional[torch.Tensor]) -> Optional[str]:
+        if mask is None:
+            return None
+        data = mask.detach().reshape(-1).to(device="cpu", dtype=torch.uint8).numpy().tobytes()
+        return hashlib.sha1(data).hexdigest()
+
+    def _write_deterministic_audit_log(self, payload: Dict[str, object]) -> None:
+        log_path = getattr(self.config, "deterministic_audit_log_path", None)
+        if not log_path:
+            return
+        try:
+            path = Path(log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf8") as f:
+                f.write(json.dumps(payload) + "\n")
+        except Exception as exc:
+            CONSOLE.log(f"[yellow]Failed to write deterministic audit log: {exc}[/yellow]")
 
     def _givar_requested(self) -> bool:
         return bool(getattr(self.config, "givar_enabled", False))
@@ -3153,6 +3257,7 @@ class WaterSplattingModel(Model):
                 camera_index = int(camera_index_value.detach().cpu().reshape(-1)[0].item())
             else:
                 camera_index = int(camera_index_value)
+        self._deterministic_current_camera_id = camera_index
         if self._cleanup_enabled() and self.training:
             self.cleanup_current_alpha = None
             self.cleanup_current_ownership = None
@@ -4902,6 +5007,31 @@ class WaterSplattingModel(Model):
                         beta=self.config.medium_attenuation_order_beta,
                     )
                 )
+
+        if self.training and self._deterministic_should_log_step():
+            loss_terms = {
+                key: float(value.detach().item())
+                for key, value in loss_dict.items()
+                if torch.is_tensor(value) and value.detach().numel() == 1
+            }
+            total_loss = float(sum(loss_terms.values())) if loss_terms else 0.0
+            self._deterministic_last_loss_value = total_loss
+            camera_tensor = outputs.get("camera_index")
+            camera_index = None
+            if torch.is_tensor(camera_tensor):
+                camera_index = int(camera_tensor.detach().cpu().reshape(-1)[0].item())
+            self._write_deterministic_audit_log(
+                {
+                    "event": "loss",
+                    "step": int(self.step),
+                    "camera_index": camera_index,
+                    "total_gaussians": int(self.num_points),
+                    "active_sh_degree": int(getattr(self, "last_active_sh_degree", 0)),
+                    "main_loss": float(loss_terms.get("main_loss", 0.0)),
+                    "total_loss": total_loss,
+                    "loss_terms": loss_terms,
+                }
+            )
 
         return loss_dict
 

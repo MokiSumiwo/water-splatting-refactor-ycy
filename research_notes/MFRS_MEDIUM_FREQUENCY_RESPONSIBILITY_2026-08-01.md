@@ -34,7 +34,7 @@ No BLMF model flags or medium-field architecture changes were added because the 
 
 The exact requested Phase -1 requires resuming N0/N1/N2 from the same M1 step-3000 checkpoint with model, optimizer, datamanager sampler, Python, NumPy, Torch CPU, and Torch CUDA RNG states restored.
 
-No `step-000003000.ckpt` is currently available in `outputs/`, so the exact resume audit could not be run yet. As a lower-bound noise check, I summarized the already completed JapaneseGradens A0 M1 and A1 GIVAR diagnostic-only 5k runs.
+No `step-000003000.ckpt` is currently available in `outputs/`, so the exact resume audit could not be run yet. As an observed trajectory discrepancy check, I summarized the already completed JapaneseGradens A0 M1 and A1 GIVAR diagnostic-only 5k runs. These two runs were not resumed from the same checkpoint, so this result should not be described as a strict random-noise lower bound.
 
 Command:
 
@@ -52,11 +52,11 @@ Command:
 
 Result:
 
-| Comparison | PSNR Range | SSIM Range | LPIPS Range | Gaussian Count Range | Gaussian Count Range % | Noise Gate |
+| Comparison | PSNR Range | SSIM Range | LPIPS Range | Gaussian Count Range | Gaussian Count Range % | Strict Noise Gate |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | A0 M1 vs A1 diagnostic-only | 0.00047 | 0.00102 | 0.00507 | 3,024 | 0.421% | Fail |
 
-The observed LPIPS and Gaussian-count range exceed the proposed noise thresholds. This confirms that 5k gates must be interpreted cautiously until a true resume-based deterministic audit is run.
+The observed LPIPS and Gaussian-count range exceed the proposed thresholds. This indicates that adding a diagnostic-only execution path can change the from-scratch training trajectory enough to enter densification/culling history. It does not establish a strict stochastic noise range; that still requires R0/R1 replay from a shared checkpoint.
 
 ## Phase 0 Frequency Responsibility Audit
 
@@ -176,4 +176,3 @@ The exact deterministic resume audit still requires creating or locating a share
 1. Train M1 to step 3000 with `save_only_latest_checkpoint=False` or `steps_per_save=3000`.
 2. Resume N0/N1/N2 from the same checkpoint to step 5000.
 3. Compare metrics and Gaussian counts with `summarize_deterministic_noise_audit.py`.
-
