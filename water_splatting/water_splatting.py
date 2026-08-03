@@ -60,6 +60,7 @@ from water_splatting.losses import (
     reconstruction_loss,
     sh_residual_mean_anchor_loss,
 )
+from water_splatting.medium_calibration import compute_gmvc_training_terms, load_gmvc_training_bank
 from water_splatting.ownership import compute_infinite_water_ownership
 from water_splatting.rendering import UnderwaterRasterizer
 from water_splatting._torch_impl import quat_to_rotmat
@@ -284,6 +285,46 @@ class WaterSplattingModelConfig(ModelConfig):
     """Reserved base-residual medium context regularization weight. Off by default."""
     medium_predictor_mode: Literal["single", "base_residual"] = "single"
     """Medium predictor structure flag. single preserves the current M1/M2 predictor."""
+    gmvc_enabled: bool = False
+    """Enable Geometry-Anchored Multi-View Medium Calibration training terms."""
+    gmvc_diagnostic_only: bool = False
+    """If True, compute GMVC diagnostics but do not add GMVC losses to training."""
+    gmvc_track_bank_path: Optional[str] = None
+    """Path to a detached GMVC training track bank built from an M1 checkpoint."""
+    gmvc_start_step: int = 10000
+    """First step where GMVC losses can ramp in."""
+    gmvc_stop_step: int = 15000
+    """First step where GMVC losses are disabled."""
+    gmvc_ramp_steps: int = 500
+    """Linear ramp length for GMVC auxiliary losses."""
+    lambda_gmvc_j: float = 0.0
+    """Weight for inverse-radiance consistency against detached track consensus."""
+    lambda_gmvc_range: float = 0.0
+    """Weight for log-domain medium attenuation/backscatter range consistency."""
+    lambda_gmvc_binf: float = 0.0
+    """Weight for weak B_inf/medium_rgb scene-center consistency."""
+    gmvc_max_tracks_per_step: int = 4096
+    """Maximum detached track observations sampled for the current camera per step."""
+    gmvc_eps: float = 1e-4
+    """Numerical epsilon for simplified inverse-radiance calculations."""
+    gmvc_charbonnier_eps: float = 1e-6
+    """Charbonnier epsilon for GMVC robust losses."""
+    gmvc_j_clamp_min: float = -0.25
+    """Minimum valid inverse-radiance value before an observation is ignored."""
+    gmvc_j_clamp_max: float = 1.25
+    """Maximum valid inverse-radiance value before an observation is ignored."""
+    gmvc_range_log_scale: float = 0.25
+    """Scale used to normalize log betaD/betaB deviations from track centers."""
+    gmvc_detach_depth: bool = True
+    """Detach rendered depth inside GMVC losses so geometry is only a correspondence source."""
+    gmvc_seed: int = 42
+    """Seed for deterministic per-step GMVC track subsampling."""
+    gmvc_freeze_geometry: bool = False
+    """Freeze means/scales/quats/opacities for GMVC continuation variants."""
+    gmvc_train_features_dc: bool = False
+    """Allow features_dc optimization while GMVC geometry freeze is active."""
+    gmvc_train_features_rest: bool = False
+    """Allow features_rest optimization while GMVC geometry freeze is active."""
     backscatter_region_mask_dir: Optional[str] = None
     """Directory containing view_XXXX_regions.pt masks with water/object/boundary keys."""
     background_water_mask_key: str = "water"
@@ -753,6 +794,9 @@ class WaterSplattingModel(Model):
         self._background_gradient_hook_param_id = None
         self._background_gradient_surgery_last_log_step = -1
         self._warned_background_clear_gaussian_dead_grad = False
+        self._gmvc_training_bank = None
+        self._gmvc_training_bank_path = None
+        self._gmvc_warned_missing_bank = False
 
         self.crop_box: Optional[OrientedBox] = None
         if self.config.background_color == "random":
@@ -1217,7 +1261,12 @@ class WaterSplattingModel(Model):
         # Here we explicitly use the means, scales as parameters so that the user can override this function and
         # specify more if they want to add more optimizable params to gaussians.
         names = ["means", "scales", "quats", "features_dc", "features_rest", "opacities"]
-        if getattr(self.config, "dual_color_enabled", False) and getattr(self.config, "dual_color_freeze_geometry", True):
+        if self._gmvc_requested() and getattr(self.config, "gmvc_freeze_geometry", False):
+            for name in ["means", "scales", "quats", "opacities"]:
+                self.gauss_params[name].requires_grad_(False)
+            self.gauss_params["features_dc"].requires_grad_(bool(getattr(self.config, "gmvc_train_features_dc", False)))
+            self.gauss_params["features_rest"].requires_grad_(bool(getattr(self.config, "gmvc_train_features_rest", False)))
+        elif getattr(self.config, "dual_color_enabled", False) and getattr(self.config, "dual_color_freeze_geometry", True):
             for name in ["means", "scales", "quats", "opacities"]:
                 self.gauss_params[name].requires_grad_(False)
             for name in ["features_dc", "features_rest"]:
@@ -1279,6 +1328,28 @@ class WaterSplattingModel(Model):
 
     def _b_inf_requires_head(self) -> bool:
         return self._effective_b_inf_mode() in {"bounded_residual", "independent"}
+
+    def _gmvc_requested(self) -> bool:
+        return bool(getattr(self.config, "gmvc_enabled", False) or getattr(self.config, "gmvc_diagnostic_only", False))
+
+    def _load_gmvc_training_bank(self):
+        path = getattr(self.config, "gmvc_track_bank_path", None)
+        if not path:
+            if self._gmvc_requested() and not self._gmvc_warned_missing_bank:
+                CONSOLE.log("[yellow]GMVC requested but gmvc_track_bank_path is empty; skipping GMVC terms.[/yellow]")
+                self._gmvc_warned_missing_bank = True
+            return None
+        if self._gmvc_training_bank is not None and self._gmvc_training_bank_path == path:
+            return self._gmvc_training_bank
+        self._gmvc_training_bank = load_gmvc_training_bank(path)
+        self._gmvc_training_bank_path = path
+        metadata = self._gmvc_training_bank.get("metadata", {})
+        counts = metadata.get("per_camera_counts", {})
+        CONSOLE.log(
+            f"[cyan]Loaded GMVC track bank[/cyan] path={path} "
+            f"cameras={len(counts)} observations={sum(int(v) for v in counts.values())}"
+        )
+        return self._gmvc_training_bank
 
     def _backscatter_ramp_weight(self, weight: float) -> float:
         if weight <= 0.0:
@@ -3156,6 +3227,26 @@ class WaterSplattingModel(Model):
                 ssim_metric=self.ssim,
             ),
         }
+
+        if self._gmvc_requested():
+            gmvc_bank = self._load_gmvc_training_bank()
+            if gmvc_bank is not None:
+                gmvc_losses, gmvc_metrics = compute_gmvc_training_terms(
+                    outputs=outputs,
+                    gt_img=gt_img,
+                    bank=gmvc_bank,
+                    step=int(self.step),
+                    config=self.config,
+                )
+                if metrics_dict is not None:
+                    for name, value in gmvc_metrics.items():
+                        metrics_dict[name] = value
+                if bool(getattr(self.config, "gmvc_enabled", False)) and not bool(
+                    getattr(self.config, "gmvc_diagnostic_only", False)
+                ):
+                    for name, value in gmvc_losses.items():
+                        if value.requires_grad or float(value.detach().item()) != 0.0:
+                            loss_dict[name] = value
 
         medium_weight = self._ramped_weight(
             float(getattr(self.config, "lambda_medium_explainability", 0.0)),
