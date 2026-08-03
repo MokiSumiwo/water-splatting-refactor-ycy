@@ -99,6 +99,7 @@ def rasterize_gaussians(
         and igaf_coeffs is not None
         and igaf_screen_to_uv is not None
         and igaf_gate is not None
+        and abs(float(igaf_amplitude_max)) > 0.0
     )
     if use_igaf:
         assert igaf_coeffs is not None

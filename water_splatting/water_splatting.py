@@ -178,6 +178,26 @@ class WaterSplattingModelConfig(ModelConfig):
     """threshold of positional gradient norm for densifying gaussians (0.0004, 0.0008)"""
     densify_size_thresh: float = 0.001
     """below this size, gaussians are *duplicated*, otherwise split"""
+    gdadc_enabled: bool = False
+    """Enable Gradient-Direction-Aware Density Control diagnostics or candidate selection."""
+    gdadc_diagnostic_only: bool = True
+    """If True, log GDADC candidate statistics without changing densification."""
+    gdadc_weight_base: float = 0.8
+    """Base weight for GDADC conflict amplification."""
+    gdadc_weight_scale: float = 25.0
+    """Scale for GDADC low-consistency split amplification."""
+    gdadc_weight_power: float = 15.0
+    """Power for GDADC low-consistency split amplification."""
+    gdadc_split_enabled: bool = True
+    """If True and not diagnostic-only, use GDADC split score for large Gaussians."""
+    gdadc_clone_enabled: bool = True
+    """If True and not diagnostic-only, use GDADC clone score for small Gaussians."""
+    gdadc_split_grad_thresh: float = 0.0
+    """Split-score threshold; non-positive falls back to densify_grad_thresh."""
+    gdadc_clone_grad_thresh: float = 0.0
+    """Clone-score threshold; non-positive falls back to densify_grad_thresh."""
+    gdadc_log_path: Optional[str] = None
+    """Optional JSONL path for GDADC density-control diagnostics."""
     n_split_samples: int = 2
     """number of samples to split gaussians into"""
     sh_degree_interval: int = 1000
@@ -891,6 +911,9 @@ class WaterSplattingModel(Model):
         else:
             means = torch.nn.Parameter((torch.rand((self.config.num_random, 3)) - 0.5) * self.config.random_scale)
         self.xys_grad_norm = None
+        self.xys_grad_signed_sum = None
+        self.xys_grad_abs_sum = None
+        self.gdadc_view_count = None
         self.max_2Dsize = None
         distances, _ = self.k_nearest_sklearn(means.data, 3)
         distances = torch.from_numpy(distances)
@@ -1290,6 +1313,16 @@ class WaterSplattingModel(Model):
             else:
                 assert self.xys.grad is not None
                 grads = self.xys.grad.detach().norm(dim=-1)
+            if self._gdadc_requested():
+                assert self.xys.grad is not None
+                assert self.xys_grad_abs is not None
+                signed_grads_for_gdadc = self.xys.grad.detach().norm(dim=-1)
+                abs_grads_for_gdadc = self.xys_grad_abs.detach().norm(dim=-1)
+                self._accumulate_gdadc_gradients(
+                    signed_grads=signed_grads_for_gdadc,
+                    abs_grads=abs_grads_for_gdadc,
+                    visible_mask=visible_mask,
+                )
             weighted_grads = grads
             if (
                 getattr(self.config, "background_densification_enabled", False)
@@ -1395,6 +1428,9 @@ class WaterSplattingModel(Model):
                 mvgar_payload: Dict[str, object] = {}
                 mcgr_candidates = torch.zeros_like(high_grads, dtype=torch.bool)
                 mcgr_payload: Dict[str, object] = {}
+                gdadc_payload: Dict[str, object] = {}
+                gdadc_split_candidates: Optional[torch.Tensor] = None
+                gdadc_clone_candidates: Optional[torch.Tensor] = None
                 if (
                     self._mvgar_requested()
                     and self._mvgar_in_window()
@@ -1446,16 +1482,31 @@ class WaterSplattingModel(Model):
                     ):
                         high_grads = high_grads | mcgr_candidates
 
-                splits = (self.scales.exp().max(dim=-1).values > self.config.densify_size_thresh).squeeze()
+                large_gaussians = (self.scales.exp().max(dim=-1).values > self.config.densify_size_thresh).squeeze()
                 if self.step < self.config.stop_screen_size_at:
-                    splits |= (self.max_2Dsize > self.config.split_screen_size).squeeze()
-                splits &= high_grads
+                    large_gaussians |= (self.max_2Dsize > self.config.split_screen_size).squeeze()
+                small_gaussians = ~large_gaussians
+                split_gate = high_grads
+                duplicate_gate = high_grads
+                if self._gdadc_requested():
+                    gdadc_split_candidates, gdadc_clone_candidates, gdadc_payload = self._compute_gdadc_candidates(
+                        large_gaussians=large_gaussians,
+                        small_gaussians=small_gaussians,
+                        baseline_high_grads=high_grads,
+                    )
+                    if not bool(getattr(self.config, "gdadc_diagnostic_only", True)):
+                        if bool(getattr(self.config, "gdadc_split_enabled", True)):
+                            split_gate = gdadc_split_candidates
+                        if bool(getattr(self.config, "gdadc_clone_enabled", True)):
+                            duplicate_gate = gdadc_clone_candidates
+
+                splits = large_gaussians & split_gate
 
                 nsamps = self.config.n_split_samples
                 split_params = self.split_gaussians(splits, nsamps)
 
-                dups = (self.scales.exp().max(dim=-1).values <= self.config.densify_size_thresh).squeeze()
-                dups &= high_grads
+                dups = small_gaussians & duplicate_gate
+                high_grads_for_audit = splits | dups
 
                 dup_params = self.dup_gaussians(dups)
                 self._sync_igaf_axis_order_for_densification(splits, dups, nsamps)
@@ -1492,6 +1543,25 @@ class WaterSplattingModel(Model):
                         }
                     )
                     mcgr_payload.update(self._mcgr_buffer_stats())
+                if self._gdadc_requested():
+                    gdadc_payload.update(
+                        {
+                            "event": "refinement",
+                            "step": int(self.step),
+                            "total_gaussians_before": int(base_high_grads.numel()),
+                            "total_gaussians_after_append": int(self.num_points),
+                            "gdadc_diagnostic_only": bool(getattr(self.config, "gdadc_diagnostic_only", True)),
+                            "gdadc_split_enabled": bool(getattr(self.config, "gdadc_split_enabled", True)),
+                            "gdadc_clone_enabled": bool(getattr(self.config, "gdadc_clone_enabled", True)),
+                            "baseline_high_grad_count": int(base_high_grads.sum().item()),
+                            "baseline_split_count": int((base_high_grads & large_gaussians).sum().item()),
+                            "baseline_duplicate_count": int((base_high_grads & small_gaussians).sum().item()),
+                            "gdadc_split_applied_count": int(splits.sum().item()),
+                            "gdadc_duplicate_applied_count": int(dups.sum().item()),
+                            "gdadc_split_candidates_hash": self._hash_bool_mask(gdadc_split_candidates),
+                            "gdadc_clone_candidates_hash": self._hash_bool_mask(gdadc_clone_candidates),
+                        }
+                    )
 
                 # append zeros to the max_2Dsize tensor
                 self.max_2Dsize = torch.cat(
@@ -1531,12 +1601,12 @@ class WaterSplattingModel(Model):
                         "total_gaussians_after_append": int(splits_mask.numel()),
                         "total_gaussians_after_cull": int(self.num_points),
                         "base_high_grad_count": int(base_high_grads.sum().item()),
-                        "high_grads_count": int(high_grads.sum().item()),
+                        "high_grads_count": int(high_grads_for_audit.sum().item()),
                         "split_count": int(splits.sum().item()),
                         "duplicate_count": int(dups.sum().item()),
                         "cull_count": int(deleted_mask.sum().item()) if deleted_mask is not None else 0,
                         "opacity_reset_event": False,
-                        "high_grads_hash": self._hash_bool_mask(high_grads),
+                        "high_grads_hash": self._hash_bool_mask(high_grads_for_audit),
                         "split_mask_hash": self._hash_bool_mask(splits),
                         "duplicate_mask_hash": self._hash_bool_mask(dups),
                         "cull_mask_hash": self._hash_bool_mask(deleted_mask),
@@ -1549,6 +1619,9 @@ class WaterSplattingModel(Model):
                     mcgr_payload["total_gaussians_after_cull"] = int(self.num_points)
                     self._mcgr_last_refinement_stats = mcgr_payload
                     self._write_mcgr_log(mcgr_payload)
+                if self._gdadc_requested():
+                    gdadc_payload["total_gaussians_after_cull"] = int(self.num_points)
+                    self._write_gdadc_log(gdadc_payload)
             elif self.step >= self.config.stop_split_at and self.config.continue_cull_post_densification:
                 deleted_mask = self.cull_gaussians(cleanup_cull_mask)
             elif cleanup_cull_mask is not None:
@@ -1617,6 +1690,9 @@ class WaterSplattingModel(Model):
                     )
             
             self.xys_grad_norm = None
+            self.xys_grad_signed_sum = None
+            self.xys_grad_abs_sum = None
+            self.gdadc_view_count = None
             self.vis_counts = None
             self.depths_accum = None
             self.max_2Dsize = None
@@ -2238,6 +2314,186 @@ class WaterSplattingModel(Model):
             return None
         data = mask.detach().reshape(-1).to(device="cpu", dtype=torch.uint8).numpy().tobytes()
         return hashlib.sha1(data).hexdigest()
+
+    def _gdadc_requested(self) -> bool:
+        return bool(getattr(self.config, "gdadc_enabled", False))
+
+    def _gdadc_stat(self, values: torch.Tensor) -> Dict[str, float]:
+        values = values.detach().float().reshape(-1)
+        values = values[torch.isfinite(values)]
+        if values.numel() == 0:
+            return {"mean": 0.0, "p50": 0.0, "p90": 0.0, "p95": 0.0}
+        return {
+            "mean": float(values.mean().item()),
+            "p50": float(torch.quantile(values, 0.50).item()),
+            "p90": float(torch.quantile(values, 0.90).item()),
+            "p95": float(torch.quantile(values, 0.95).item()),
+        }
+
+    def _gdadc_threshold_for_count(self, scores: torch.Tensor, count: int) -> Optional[float]:
+        scores = scores.detach().float().reshape(-1)
+        scores = scores[torch.isfinite(scores)]
+        if scores.numel() == 0 or count <= 0:
+            return None
+        count = min(int(count), int(scores.numel()))
+        threshold = torch.topk(scores, k=count, largest=True, sorted=True).values[-1]
+        return float(threshold.item())
+
+    def _write_gdadc_log(self, payload: Dict[str, object]) -> None:
+        log_path = getattr(self.config, "gdadc_log_path", None)
+        if not log_path:
+            return
+        try:
+            path = Path(log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf8") as f:
+                f.write(json.dumps(payload) + "\n")
+        except Exception as exc:
+            CONSOLE.log(f"[yellow]Failed to write GDADC log: {exc}[/yellow]")
+
+    def _accumulate_gdadc_gradients(
+        self,
+        *,
+        signed_grads: torch.Tensor,
+        abs_grads: torch.Tensor,
+        visible_mask: torch.Tensor,
+    ) -> None:
+        n = int(self.num_points)
+        if signed_grads.numel() != n or abs_grads.numel() != n or visible_mask.numel() != n:
+            self.xys_grad_signed_sum = None
+            self.xys_grad_abs_sum = None
+            self.gdadc_view_count = None
+            return
+        if (
+            self.xys_grad_signed_sum is None
+            or self.xys_grad_abs_sum is None
+            or self.gdadc_view_count is None
+            or self.xys_grad_signed_sum.numel() != n
+            or self.xys_grad_abs_sum.numel() != n
+            or self.gdadc_view_count.numel() != n
+        ):
+            self.xys_grad_signed_sum = torch.zeros(n, device=self.device, dtype=torch.float32)
+            self.xys_grad_abs_sum = torch.zeros(n, device=self.device, dtype=torch.float32)
+            self.gdadc_view_count = torch.zeros(n, device=self.device, dtype=torch.float32)
+        visible = visible_mask.reshape(-1).to(device=self.device, dtype=torch.bool)
+        if not bool(visible.any().item()):
+            return
+        signed = signed_grads.detach().reshape(-1).to(device=self.device, dtype=torch.float32)
+        absolute = abs_grads.detach().reshape(-1).to(device=self.device, dtype=torch.float32)
+        keep = visible & torch.isfinite(signed) & torch.isfinite(absolute)
+        if not bool(keep.any().item()):
+            return
+        self.xys_grad_signed_sum[keep] += signed[keep]
+        self.xys_grad_abs_sum[keep] += absolute[keep]
+        self.gdadc_view_count[keep] += 1.0
+
+    def _compute_gdadc_candidates(
+        self,
+        *,
+        large_gaussians: torch.Tensor,
+        small_gaussians: torch.Tensor,
+        baseline_high_grads: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, object]]:
+        n = int(baseline_high_grads.numel())
+        baseline = baseline_high_grads.reshape(-1).to(device=self.device, dtype=torch.bool)
+        large = large_gaussians.reshape(-1).to(device=self.device, dtype=torch.bool)
+        small = small_gaussians.reshape(-1).to(device=self.device, dtype=torch.bool)
+        baseline_split = baseline & large
+        baseline_clone = baseline & small
+        fallback_payload: Dict[str, object] = {
+            "gdadc_valid": False,
+            "gdadc_reason": "missing_or_mismatched_gradient_buffers",
+            "gdadc_split_candidate_count": int(baseline_split.sum().item()),
+            "gdadc_clone_candidate_count": int(baseline_clone.sum().item()),
+        }
+        if (
+            self.xys_grad_signed_sum is None
+            or self.xys_grad_abs_sum is None
+            or self.gdadc_view_count is None
+            or self.xys_grad_signed_sum.numel() != n
+            or self.xys_grad_abs_sum.numel() != n
+            or self.gdadc_view_count.numel() != n
+        ):
+            return baseline_split, baseline_clone, fallback_payload
+
+        scale_factor = 0.5 * max(self.last_size[0], self.last_size[1])
+        view_count = self.gdadc_view_count.reshape(-1).float().clamp_min(1.0)
+        signed_mean = (self.xys_grad_signed_sum.reshape(-1).float() / view_count) * scale_factor
+        abs_mean = (self.xys_grad_abs_sum.reshape(-1).float() / view_count) * scale_factor
+        eps = 1e-12
+        consistency = ((signed_mean + eps) / (abs_mean + eps)).clamp(0.0, 1.0)
+        weight = float(getattr(self.config, "gdadc_weight_base", 0.8)) + float(
+            getattr(self.config, "gdadc_weight_scale", 25.0)
+        ) * (1.0 - consistency).pow(float(getattr(self.config, "gdadc_weight_power", 15.0)))
+        split_score = signed_mean * weight
+        clone_score = signed_mean / weight.clamp_min(eps)
+        split_thresh = float(getattr(self.config, "gdadc_split_grad_thresh", 0.0))
+        clone_thresh = float(getattr(self.config, "gdadc_clone_grad_thresh", 0.0))
+        if split_thresh <= 0.0:
+            split_thresh = float(self.config.densify_grad_thresh)
+        if clone_thresh <= 0.0:
+            clone_thresh = float(self.config.densify_grad_thresh)
+        valid = self.gdadc_view_count.reshape(-1) > 0
+        split_candidates = large & valid & (split_score > split_thresh)
+        clone_candidates = small & valid & (clone_score > clone_thresh)
+
+        low_consistency = valid & (consistency < 0.30)
+        max_scale = self.scales.detach().exp().max(dim=-1).values.reshape(-1)
+        min_scale = self.scales.detach().exp().min(dim=-1).values.reshape(-1).clamp_min(1e-12)
+        aspect = max_scale / min_scale
+        avg_depth = (
+            (self.depths_accum.reshape(-1).float() / view_count)
+            if self.depths_accum is not None and self.depths_accum.numel() == n
+            else torch.zeros_like(signed_mean)
+        )
+        radius = (
+            self.max_2Dsize.reshape(-1).float()
+            if self.max_2Dsize is not None and self.max_2Dsize.numel() == n
+            else torch.zeros_like(signed_mean)
+        )
+        opacity = torch.sigmoid(self.opacities.detach().reshape(-1).float())
+        payload: Dict[str, object] = {
+            "gdadc_valid": True,
+            "gdadc_split_threshold": float(split_thresh),
+            "gdadc_clone_threshold": float(clone_thresh),
+            "gdadc_split_threshold_for_baseline_count": self._gdadc_threshold_for_count(
+                split_score[large & valid],
+                int(baseline_split.sum().item()),
+            ),
+            "gdadc_clone_threshold_for_baseline_count": self._gdadc_threshold_for_count(
+                clone_score[small & valid],
+                int(baseline_clone.sum().item()),
+            ),
+            "gdadc_view_count": self._gdadc_stat(self.gdadc_view_count),
+            "gdadc_signed_grad": self._gdadc_stat(signed_mean[valid]),
+            "gdadc_abs_grad": self._gdadc_stat(abs_mean[valid]),
+            "gdadc_consistency": self._gdadc_stat(consistency[valid]),
+            "gdadc_weight": self._gdadc_stat(weight[valid]),
+            "gdadc_split_score": self._gdadc_stat(split_score[large & valid]),
+            "gdadc_clone_score": self._gdadc_stat(clone_score[small & valid]),
+            "gdadc_large_count": int(large.sum().item()),
+            "gdadc_small_count": int(small.sum().item()),
+            "gdadc_large_low_consistency_count": int((large & low_consistency).sum().item()),
+            "gdadc_large_low_consistency_ratio": float(
+                ((large & low_consistency).sum().float() / large.sum().clamp_min(1).float()).item()
+            ),
+            "gdadc_baseline_split_count": int(baseline_split.sum().item()),
+            "gdadc_baseline_clone_count": int(baseline_clone.sum().item()),
+            "gdadc_split_candidate_count": int(split_candidates.sum().item()),
+            "gdadc_clone_candidate_count": int(clone_candidates.sum().item()),
+            "gdadc_new_split_candidate_count": int((split_candidates & ~baseline_split).sum().item()),
+            "gdadc_suppressed_clone_candidate_count": int((baseline_clone & ~clone_candidates).sum().item()),
+            "gdadc_clone_reduction_ratio": float(
+                ((baseline_clone & ~clone_candidates).sum().float() / baseline_clone.sum().clamp_min(1).float()).item()
+            ),
+            "gdadc_scale": self._gdadc_stat(max_scale[valid]),
+            "gdadc_aspect_ratio": self._gdadc_stat(aspect[valid]),
+            "gdadc_low_consistency_large_scale": self._gdadc_stat(max_scale[large & low_consistency]),
+            "gdadc_radius": self._gdadc_stat(radius[valid]),
+            "gdadc_opacity": self._gdadc_stat(opacity[valid]),
+            "gdadc_depth": self._gdadc_stat(avg_depth[valid]),
+        }
+        return split_candidates, clone_candidates, payload
 
     def _write_deterministic_audit_log(self, payload: Dict[str, object]) -> None:
         log_path = getattr(self.config, "deterministic_audit_log_path", None)
