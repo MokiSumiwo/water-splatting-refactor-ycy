@@ -8,6 +8,51 @@
 
 namespace cg = cooperative_groups;
 
+__device__ __forceinline__ float igaf_clamp_coord(const float value, const float limit) {
+    return fminf(fmaxf(value, -limit), limit);
+}
+
+__device__ __forceinline__ void igaf_basis(
+    const float2& __restrict__ pixel_delta,
+    const float4& __restrict__ screen_to_uv,
+    const float frequency,
+    const float coordinate_clamp,
+    float* __restrict__ basis
+) {
+    const float u_raw = screen_to_uv.x * pixel_delta.x + screen_to_uv.y * pixel_delta.y;
+    const float v_raw = screen_to_uv.z * pixel_delta.x + screen_to_uv.w * pixel_delta.y;
+    const float u = igaf_clamp_coord(u_raw, coordinate_clamp);
+    const float v = igaf_clamp_coord(v_raw, coordinate_clamp);
+    const float mean_cos = __expf(-0.5f * frequency * frequency);
+    basis[0] = __cosf(frequency * u) - mean_cos;
+    basis[1] = __sinf(frequency * u);
+    basis[2] = __cosf(frequency * v) - mean_cos;
+    basis[3] = __sinf(frequency * v);
+}
+
+__device__ __forceinline__ float3 igaf_apply_rgb(
+    const float3& __restrict__ base_rgb,
+    const float3* __restrict__ igaf_coeffs,
+    const int32_t gaussian_id,
+    const float* __restrict__ basis,
+    const float gate,
+    const float amplitude_max
+) {
+    float3 raw = {0.f, 0.f, 0.f};
+    #pragma unroll
+    for (int k = 0; k < 4; ++k) {
+        const float3 coeff = igaf_coeffs[gaussian_id * 4 + k];
+        raw.x += coeff.x * basis[k];
+        raw.y += coeff.y * basis[k];
+        raw.z += coeff.z * basis[k];
+    }
+    float3 out;
+    out.x = base_rgb.x + gate * amplitude_max * tanhf(raw.x);
+    out.y = base_rgb.y + gate * amplitude_max * tanhf(raw.y);
+    out.z = base_rgb.z + gate * amplitude_max * tanhf(raw.z);
+    return out;
+}
+
 // kernel function for projecting each gaussian on device
 // each thread processes one gaussian
 __global__ void project_gaussians_forward_kernel(
@@ -495,6 +540,195 @@ __global__ void rasterize_forward(
         // add medium scattering
         float3 exp_bs;
         // const float depth = 10.f;
+        exp_bs.x = __expf(-medium_bs_pix.x * prev_depth);
+        exp_bs.y = __expf(-medium_bs_pix.y * prev_depth);
+        exp_bs.z = __expf(-medium_bs_pix.z * prev_depth);
+
+        final_medium.x = pix_medium.x + T * exp_bs.x * medium_rgb_pix.x;
+        final_medium.y = pix_medium.y + T * exp_bs.y * medium_rgb_pix.y;
+        final_medium.z = pix_medium.z + T * exp_bs.z * medium_rgb_pix.z;
+
+        out_img[pix_id] = pix_out;
+        out_clr[pix_id] = pix_clr;
+        out_med[pix_id] = final_medium;
+        depth_im[pix_id] = pix_depth;
+        depth2_im[pix_id] = pix_depth2;
+        first_depth_im[pix_id] = first_depth;
+        last_depth_im[pix_id] = prev_depth;
+    }
+}
+
+__global__ void rasterize_forward_igaf(
+    const dim3 tile_bounds,
+    const dim3 img_size,
+    const int32_t* __restrict__ gaussian_ids_sorted,
+    const int2* __restrict__ tile_bins,
+    const float2* __restrict__ xys,
+    const float3* __restrict__ conics,
+    const float3* __restrict__ colors,
+    const float3* __restrict__ igaf_coeffs,
+    const float4* __restrict__ igaf_screen_to_uv,
+    const float* __restrict__ igaf_gate,
+    const float igaf_frequency,
+    const float igaf_amplitude_max,
+    const float igaf_coordinate_clamp,
+    const float* __restrict__ opacities,
+    const float3* __restrict__ medium_rgb,
+    const float3* __restrict__ medium_bs,
+    const float3* __restrict__ medium_attn,
+    const float* __restrict__ depths,
+    float* __restrict__ final_Ts,
+    int* __restrict__ final_index,
+    int* __restrict__ first_index,
+    float3* __restrict__ out_img,
+    float3* __restrict__ out_clr,
+    float3* __restrict__ out_med,
+    float* __restrict__ depth_im,
+    float* __restrict__ depth2_im,
+    float* __restrict__ first_depth_im,
+    float* __restrict__ last_depth_im,
+    const float3& __restrict__ background
+) {
+    auto block = cg::this_thread_block();
+    int32_t tile_id =
+        block.group_index().y * tile_bounds.x + block.group_index().x;
+    unsigned i =
+        block.group_index().y * block.group_dim().y + block.thread_index().y;
+    unsigned j =
+        block.group_index().x * block.group_dim().x + block.thread_index().x;
+
+    float px = (float)j;
+    float py = (float)i;
+    int32_t pix_id = i * img_size.x + j;
+
+    bool inside = (i < img_size.y && j < img_size.x);
+    bool done = !inside;
+
+    int2 range = tile_bins[tile_id];
+    const int block_size = block.size();
+    int num_batches = (range.y - range.x + block_size - 1) / block_size;
+
+    __shared__ int32_t id_batch[MAX_BLOCK_SIZE];
+    __shared__ float3 xy_opacity_batch[MAX_BLOCK_SIZE];
+    __shared__ float3 conic_batch[MAX_BLOCK_SIZE];
+    __shared__ float depth_batch[MAX_BLOCK_SIZE];
+
+    float T = 1.f;
+    int cur_idx = 0;
+    int first_idx = 0;
+    float prev_depth = 0.f;
+
+    float3 medium_rgb_pix;
+    float3 medium_bs_pix;
+    float3 medium_attn_pix;
+    float min_medium_attn_pix;
+    if (inside) {
+        medium_rgb_pix = medium_rgb[pix_id];
+        medium_bs_pix = medium_bs[pix_id];
+        medium_attn_pix = medium_attn[pix_id];
+        prev_depth = 0.f;
+        min_medium_attn_pix = std::min(medium_attn_pix.x, std::min(medium_attn_pix.y, medium_attn_pix.z));
+        min_medium_attn_pix = std::min(0.f, min_medium_attn_pix);
+    }
+
+    int tr = block.thread_rank();
+    float3 pix_out = {0.f, 0.f, 0.f};
+    float3 pix_clr = {0.f, 0.f, 0.f};
+    float3 pix_medium = {0.f, 0.f, 0.f};
+    float pix_depth = 0.f;
+    float pix_depth2 = 0.f;
+    float first_depth = 0.f;
+    for (int b = 0; b < num_batches; ++b) {
+        if (__syncthreads_count(done) >= block_size) {
+            break;
+        }
+
+        int batch_start = range.x + block_size * b;
+        int idx = batch_start + tr;
+        if (idx < range.y) {
+            int32_t g_id = gaussian_ids_sorted[idx];
+            id_batch[tr] = g_id;
+            const float2 xy = xys[g_id];
+            const float opac = opacities[g_id];
+            xy_opacity_batch[tr] = {xy.x, xy.y, opac};
+            conic_batch[tr] = conics[g_id];
+            depth_batch[tr] = depths[g_id];
+        }
+
+        block.sync();
+
+        int batch_size = min(block_size, range.y - batch_start);
+        for (int t = 0; (t < batch_size) && !done; ++t) {
+            const float3 conic = conic_batch[t];
+            const float3 xy_opac = xy_opacity_batch[t];
+            const float depth = depth_batch[t];
+            const float opac = xy_opac.z;
+            const float2 delta = {xy_opac.x - px, xy_opac.y - py};
+            const float sigma = 0.5f * (conic.x * delta.x * delta.x +
+                                        conic.z * delta.y * delta.y) +
+                                conic.y * delta.x * delta.y;
+            const float alpha = min(0.999f, opac * __expf(-sigma));
+
+            if (sigma < 0.f || alpha * __expf(-min_medium_attn_pix * depth) < 1.f / 255.f) {
+                continue;
+            }
+
+            const float next_T = T * (1.f - alpha);
+            if (next_T <= 1e-4f) {
+                done = true;
+                break;
+            }
+
+            int32_t g = id_batch[t];
+            const float vis = alpha * T;
+            const float3 base_c = colors[g];
+            const float2 pixel_delta = {px - xy_opac.x, py - xy_opac.y};
+            float basis[4];
+            igaf_basis(pixel_delta, igaf_screen_to_uv[g], igaf_frequency, igaf_coordinate_clamp, basis);
+            const float3 c = igaf_apply_rgb(
+                base_c,
+                igaf_coeffs,
+                g,
+                basis,
+                igaf_gate[g],
+                igaf_amplitude_max
+            );
+            float3 exp_obj;
+            exp_obj.x = __expf(-medium_attn_pix.x * depth);
+            exp_obj.y = __expf(-medium_attn_pix.y * depth);
+            exp_obj.z = __expf(-medium_attn_pix.z * depth);
+            const float3 c_out = {vis * c.x, vis * c.y, vis * c.z};
+            pix_clr.x = pix_clr.x + c_out.x;
+            pix_clr.y = pix_clr.y + c_out.y;
+            pix_clr.z = pix_clr.z + c_out.z;
+            pix_out.x = pix_out.x + exp_obj.x * c_out.x;
+            pix_out.y = pix_out.y + exp_obj.y * c_out.y;
+            pix_out.z = pix_out.z + exp_obj.z * c_out.z;
+            pix_depth = pix_depth + vis * depth;
+            pix_depth2 = pix_depth2 + vis * depth * depth;
+            if (cur_idx == 0) {
+                first_idx = batch_start + t;
+                first_depth = depth;
+            }
+            float3 exp_bs;
+            exp_bs.x = __expf(-medium_bs_pix.x * prev_depth) - __expf(-medium_bs_pix.x * depth);
+            exp_bs.y = __expf(-medium_bs_pix.y * prev_depth) - __expf(-medium_bs_pix.y * depth);
+            exp_bs.z = __expf(-medium_bs_pix.z * prev_depth) - __expf(-medium_bs_pix.z * depth);
+            pix_medium.x = pix_medium.x + T * exp_bs.x * medium_rgb_pix.x;
+            pix_medium.y = pix_medium.y + T * exp_bs.y * medium_rgb_pix.y;
+            pix_medium.z = pix_medium.z + T * exp_bs.z * medium_rgb_pix.z;
+            prev_depth = depth;
+            T = next_T;
+            cur_idx = batch_start + t;
+        }
+    }
+
+    if (inside) {
+        final_Ts[pix_id] = T;
+        final_index[pix_id] = cur_idx;
+        first_index[pix_id] = first_idx;
+        float3 final_medium;
+        float3 exp_bs;
         exp_bs.x = __expf(-medium_bs_pix.x * prev_depth);
         exp_bs.y = __expf(-medium_bs_pix.y * prev_depth);
         exp_bs.z = __expf(-medium_bs_pix.z * prev_depth);

@@ -141,6 +141,40 @@ std::tuple<
     torch::Tensor,
     torch::Tensor,
     torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor
+> rasterize_forward_igaf_tensor(
+    const std::tuple<int, int, int> tile_bounds,
+    const std::tuple<int, int, int> block,
+    const std::tuple<int, int, int> img_size,
+    const torch::Tensor &gaussian_ids_sorted,
+    const torch::Tensor &tile_bins,
+    const torch::Tensor &xys,
+    const torch::Tensor &conics,
+    const torch::Tensor &colors,
+    const torch::Tensor &igaf_coeffs,
+    const torch::Tensor &igaf_screen_to_uv,
+    const torch::Tensor &igaf_gate,
+    const float igaf_frequency,
+    const float igaf_amplitude_max,
+    const float igaf_coordinate_clamp,
+    const torch::Tensor &opacities,
+    const torch::Tensor &medium_rgb,
+    const torch::Tensor &medium_bs,
+    const torch::Tensor &medium_attn,
+    const torch::Tensor &depths,
+    const torch::Tensor &background
+);
+
+std::tuple<
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
     torch::Tensor
 > nd_rasterize_forward_tensor(
     const std::tuple<int, int, int> tile_bounds,
@@ -222,6 +256,47 @@ std::
         const torch::Tensor &final_idx,
         const torch::Tensor &first_idx,
         const torch::Tensor &v_output, // dL_dout_color
+        const torch::Tensor &v_out_medium,
+        const torch::Tensor &v_output_alpha
+    );
+
+std::
+    tuple<
+        torch::Tensor, // dL_dxy
+        torch::Tensor, // dL_dconic
+        torch::Tensor, // dL_dcolors
+        torch::Tensor, // dL_digaf_coeffs
+        torch::Tensor, // dL_dopacity
+        torch::Tensor, // dL_dmedium_rgb
+        torch::Tensor, // dL_dmedium_bs
+        torch::Tensor  // dL_dmedium_attn
+        >
+    rasterize_backward_igaf_tensor(
+        const unsigned img_height,
+        const unsigned img_width,
+        const unsigned block_width,
+        const torch::Tensor &gaussians_ids_sorted,
+        const torch::Tensor &tile_bins,
+        const torch::Tensor &xys,
+        torch::Tensor &xys_grad_abs,
+        const torch::Tensor &conics,
+        const torch::Tensor &colors,
+        const torch::Tensor &igaf_coeffs,
+        const torch::Tensor &igaf_screen_to_uv,
+        const torch::Tensor &igaf_gate,
+        const float igaf_frequency,
+        const float igaf_amplitude_max,
+        const float igaf_coordinate_clamp,
+        const torch::Tensor &opacities,
+        const torch::Tensor &medium_rgb,
+        const torch::Tensor &medium_bs,
+        const torch::Tensor &medium_attn,
+        const torch::Tensor &depths,
+        const torch::Tensor &background,
+        const torch::Tensor &final_Ts,
+        const torch::Tensor &final_idx,
+        const torch::Tensor &first_idx,
+        const torch::Tensor &v_output,
         const torch::Tensor &v_out_medium,
         const torch::Tensor &v_output_alpha
     );

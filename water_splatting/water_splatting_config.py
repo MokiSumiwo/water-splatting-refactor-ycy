@@ -52,6 +52,13 @@ water_splatting_method = MethodSpecification(
                     max_steps=NUM_STEPS,
                 ),
             },
+            "igaf_coeffs": {
+                "optimizer": AdamOptimizerConfig(lr=0.0025 / 20, eps=1e-15),
+                "scheduler": ExponentialDecaySchedulerConfig(
+                    lr_final=0.0025 / 20,
+                    max_steps=NUM_STEPS,
+                ),
+            },
             "opacities": {
                 "optimizer": AdamOptimizerConfig(lr=0.05, eps=1e-15),
                 "scheduler": ExponentialDecaySchedulerConfig(
@@ -126,6 +133,10 @@ water_splatting_method_big = MethodSpecification(
                 "scheduler": None,
             },
             "features_rest": {
+                "optimizer": AdamOptimizerConfig(lr=0.0025 / 20, eps=1e-15),
+                "scheduler": None,
+            },
+            "igaf_coeffs": {
                 "optimizer": AdamOptimizerConfig(lr=0.0025 / 20, eps=1e-15),
                 "scheduler": None,
             },

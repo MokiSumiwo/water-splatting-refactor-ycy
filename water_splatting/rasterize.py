@@ -26,6 +26,12 @@ def rasterize_gaussians(
     img_height: int,
     img_width: int,
     block_width: int,
+    igaf_coeffs: Optional[Float[Tensor, "*batch 4 3"]] = None,
+    igaf_screen_to_uv: Optional[Float[Tensor, "*batch 4"]] = None,
+    igaf_gate: Optional[Float[Tensor, "*batch"]] = None,
+    igaf_frequency: float = 1.5,
+    igaf_amplitude_max: float = 0.10,
+    igaf_coordinate_clamp: float = 3.0,
     background: Optional[Float[Tensor, "channels"]] = None,
     return_alpha: Optional[bool] = False,
     step: Optional[int] = None,
@@ -88,6 +94,24 @@ def rasterize_gaussians(
     if colors.ndimension() != 2:
         raise ValueError("colors must have dimensions (N, D)")
 
+    use_igaf = (
+        colors.shape[-1] == 3
+        and igaf_coeffs is not None
+        and igaf_screen_to_uv is not None
+        and igaf_gate is not None
+    )
+    if use_igaf:
+        assert igaf_coeffs is not None
+        assert igaf_screen_to_uv is not None
+        assert igaf_gate is not None
+        igaf_coeffs = igaf_coeffs.to(device=colors.device, dtype=torch.float32).contiguous()
+        igaf_screen_to_uv = igaf_screen_to_uv.to(device=colors.device, dtype=torch.float32).contiguous()
+        igaf_gate = igaf_gate.to(device=colors.device, dtype=torch.float32).contiguous()
+    else:
+        igaf_coeffs = colors.new_empty((0, 4, 3))
+        igaf_screen_to_uv = colors.new_empty((0, 4))
+        igaf_gate = colors.new_empty((0,))
+
     return _RasterizeGaussians.apply(
         xys.contiguous(),
         xys_grad_abs.contiguous(),
@@ -96,6 +120,13 @@ def rasterize_gaussians(
         conics.contiguous(),
         num_tiles_hit.contiguous(),
         colors.contiguous(),
+        igaf_coeffs,
+        igaf_screen_to_uv,
+        igaf_gate,
+        float(igaf_frequency),
+        float(igaf_amplitude_max),
+        float(igaf_coordinate_clamp),
+        bool(use_igaf),
         opacity.contiguous(),
         medium_rgb.contiguous(),
         medium_bs.contiguous(),
@@ -124,6 +155,13 @@ class _RasterizeGaussians(Function):
         conics: Float[Tensor, "*batch 3"],
         num_tiles_hit: Int[Tensor, "*batch 1"],
         colors: Float[Tensor, "*batch channels"],
+        igaf_coeffs: Float[Tensor, "*batch 4 3"],
+        igaf_screen_to_uv: Float[Tensor, "*batch 4"],
+        igaf_gate: Float[Tensor, "*batch"],
+        igaf_frequency: float,
+        igaf_amplitude_max: float,
+        igaf_coordinate_clamp: float,
+        use_igaf: bool,
         opacity: Float[Tensor, "*batch 1"],
         medium_rgb: Float[Tensor, "*height width channels"],
         medium_bs: Float[Tensor, "*height width channels"],
@@ -181,27 +219,53 @@ class _RasterizeGaussians(Function):
                 tile_bounds,
                 block_width,
             )
-            if colors.shape[-1] == 3:
+            if use_igaf and colors.shape[-1] == 3:
+                rasterize_fn = _C.rasterize_forward_igaf
+            elif colors.shape[-1] == 3:
                 rasterize_fn = _C.rasterize_forward
             else:
                 rasterize_fn = _C.nd_rasterize_forward
 
-            rasterized = rasterize_fn(
-                tile_bounds,
-                block,
-                img_size,
-                gaussian_ids_sorted,
-                tile_bins,
-                xys,
-                conics,
-                colors,
-                opacity,
-                medium_rgb,
-                medium_bs,
-                medium_attn,
-                depths,
-                background,
-            )
+            if use_igaf and colors.shape[-1] == 3:
+                rasterized = rasterize_fn(
+                    tile_bounds,
+                    block,
+                    img_size,
+                    gaussian_ids_sorted,
+                    tile_bins,
+                    xys,
+                    conics,
+                    colors,
+                    igaf_coeffs,
+                    igaf_screen_to_uv,
+                    igaf_gate,
+                    float(igaf_frequency),
+                    float(igaf_amplitude_max),
+                    float(igaf_coordinate_clamp),
+                    opacity,
+                    medium_rgb,
+                    medium_bs,
+                    medium_attn,
+                    depths,
+                    background,
+                )
+            else:
+                rasterized = rasterize_fn(
+                    tile_bounds,
+                    block,
+                    img_size,
+                    gaussian_ids_sorted,
+                    tile_bins,
+                    xys,
+                    conics,
+                    colors,
+                    opacity,
+                    medium_rgb,
+                    medium_bs,
+                    medium_attn,
+                    depths,
+                    background,
+                )
             if colors.shape[-1] == 3:
                 (
                     out_img,
@@ -228,6 +292,10 @@ class _RasterizeGaussians(Function):
         ctx.img_height = img_height
         ctx.num_intersects = num_intersects
         ctx.block_width = block_width
+        ctx.use_igaf = bool(use_igaf)
+        ctx.igaf_frequency = float(igaf_frequency)
+        ctx.igaf_amplitude_max = float(igaf_amplitude_max)
+        ctx.igaf_coordinate_clamp = float(igaf_coordinate_clamp)
         ctx.save_for_backward(
             gaussian_ids_sorted,
             tile_bins,
@@ -235,6 +303,9 @@ class _RasterizeGaussians(Function):
             xys_grad_abs,
             conics,
             colors,
+            igaf_coeffs,
+            igaf_screen_to_uv,
+            igaf_gate,
             opacity,
             medium_rgb,
             medium_bs,
@@ -293,6 +364,9 @@ class _RasterizeGaussians(Function):
             xys_grad_abs,
             conics,
             colors,
+            igaf_coeffs,
+            igaf_screen_to_uv,
+            igaf_gate,
             opacity,
             medium_rgb,
             medium_bs,
@@ -308,39 +382,83 @@ class _RasterizeGaussians(Function):
             v_xy = torch.zeros_like(xys)
             v_conic = torch.zeros_like(conics)
             v_colors = torch.zeros_like(colors)
+            v_igaf_coeffs = torch.zeros_like(igaf_coeffs)
             v_opacity = torch.zeros_like(opacity)
             v_medium_rgb = torch.zeros_like(medium_rgb)
             v_medium_bs = torch.zeros_like(medium_bs)
             v_medium_attn = torch.zeros_like(medium_attn)
 
         else:
-            if colors.shape[-1] == 3:
+            if ctx.use_igaf and colors.shape[-1] == 3:
+                rasterize_fn = _C.rasterize_backward_igaf
+            elif colors.shape[-1] == 3:
                 rasterize_fn = _C.rasterize_backward
             else:
                 rasterize_fn = _C.nd_rasterize_backward
-            v_xy, v_conic, v_colors, v_opacity, v_medium_rgb, v_medium_bs, v_medium_attn = rasterize_fn(
-                img_height,
-                img_width,
-                ctx.block_width,
-                gaussian_ids_sorted,
-                tile_bins,
-                xys,
-                xys_grad_abs,
-                conics,
-                colors,
-                opacity,
-                medium_rgb,
-                medium_bs,
-                medium_attn,
-                depths,
-                background,
-                final_Ts,
-                final_idx,
-                first_idx,
-                v_out_img,
-                v_out_medium,
-                v_out_alpha,
-            )
+            if ctx.use_igaf and colors.shape[-1] == 3:
+                (
+                    v_xy,
+                    v_conic,
+                    v_colors,
+                    v_igaf_coeffs,
+                    v_opacity,
+                    v_medium_rgb,
+                    v_medium_bs,
+                    v_medium_attn,
+                ) = rasterize_fn(
+                    img_height,
+                    img_width,
+                    ctx.block_width,
+                    gaussian_ids_sorted,
+                    tile_bins,
+                    xys,
+                    xys_grad_abs,
+                    conics,
+                    colors,
+                    igaf_coeffs,
+                    igaf_screen_to_uv,
+                    igaf_gate,
+                    ctx.igaf_frequency,
+                    ctx.igaf_amplitude_max,
+                    ctx.igaf_coordinate_clamp,
+                    opacity,
+                    medium_rgb,
+                    medium_bs,
+                    medium_attn,
+                    depths,
+                    background,
+                    final_Ts,
+                    final_idx,
+                    first_idx,
+                    v_out_img,
+                    v_out_medium,
+                    v_out_alpha,
+                )
+            else:
+                v_igaf_coeffs = torch.zeros_like(igaf_coeffs)
+                v_xy, v_conic, v_colors, v_opacity, v_medium_rgb, v_medium_bs, v_medium_attn = rasterize_fn(
+                    img_height,
+                    img_width,
+                    ctx.block_width,
+                    gaussian_ids_sorted,
+                    tile_bins,
+                    xys,
+                    xys_grad_abs,
+                    conics,
+                    colors,
+                    opacity,
+                    medium_rgb,
+                    medium_bs,
+                    medium_attn,
+                    depths,
+                    background,
+                    final_Ts,
+                    final_idx,
+                    first_idx,
+                    v_out_img,
+                    v_out_medium,
+                    v_out_alpha,
+                )
             
         return (
             v_xy,  # xys
@@ -350,6 +468,13 @@ class _RasterizeGaussians(Function):
             v_conic,  # conics
             None,  # num_tiles_hit
             v_colors,  # colors
+            v_igaf_coeffs,  # igaf_coeffs
+            None,  # igaf_screen_to_uv
+            None,  # igaf_gate
+            None,  # igaf_frequency
+            None,  # igaf_amplitude_max
+            None,  # igaf_coordinate_clamp
+            None,  # use_igaf
             v_opacity,  # opacity
             v_medium_rgb,  # medium_rgb
             v_medium_bs,  # medium_bs

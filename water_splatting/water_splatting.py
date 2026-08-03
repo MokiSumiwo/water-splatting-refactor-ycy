@@ -664,6 +664,38 @@ class WaterSplattingModelConfig(ModelConfig):
     """Number of steps in the GIVAR rolling diagnostic window before reset."""
     givar_log_path: Optional[str] = None
     """Optional JSONL path for GIVAR evidence, gate, and loss diagnostics."""
+    igaf_enabled: bool = False
+    """Enable IGAF intra-Gaussian adaptive frequency appearance."""
+    igaf_start_step: int = 10000
+    """First step where IGAF local texture residual can affect rendering."""
+    igaf_ramp_steps: int = 1000
+    """Linear ramp length for IGAF local texture residual."""
+    igaf_frequency: float = 1.5
+    """Fixed IGAF harmonic frequency for V0."""
+    igaf_amplitude_max: float = 0.10
+    """Bounded maximum local RGB residual amplitude."""
+    igaf_coordinate_mode: Literal["canonical", "screen"] = "canonical"
+    """IGAF coordinate frame: canonical 3D tangent frame or screen-space control."""
+    igaf_planarity_ratio: float = 2.0
+    """Scale ratio sigma2/sigma3 where planarity gate reaches its midpoint."""
+    igaf_planarity_temperature: float = 0.25
+    """Temperature for the IGAF planarity gate in log-ratio space."""
+    igaf_condition_threshold: float = 5.0
+    """Projection condition number where IGAF condition attenuation begins."""
+    igaf_condition_temperature: float = 5.0
+    """Temperature for projection-condition attenuation."""
+    igaf_mip_enabled: bool = True
+    """If True, attenuate IGAF local texture by projected pixel footprint."""
+    igaf_coordinate_clamp: float = 3.0
+    """Clamp local IGAF coordinates to this absolute value."""
+    lambda_igaf_amplitude: float = 0.0
+    """Optional weak IGAF coefficient energy regularization."""
+    igaf_log_path: Optional[str] = None
+    """Optional JSONL path for IGAF usage diagnostics."""
+    igaf_freeze_base_gaussians: bool = False
+    """Freeze base Gaussian geometry/SH/opacity so only IGAF coefficients update for oracle runs."""
+    igaf_freeze_medium: bool = False
+    """Freeze medium MLP and direction encoding for IGAF coefficient-only oracle runs."""
     deterministic_audit_log_path: Optional[str] = None
     """Optional JSONL path for deterministic replay diagnostics."""
     deterministic_audit_log_every: int = 100
@@ -877,6 +909,7 @@ class WaterSplattingModel(Model):
             features_rest = torch.nn.Parameter(torch.zeros((num_points, dim_sh - 1, 3)))
 
         opacities = torch.nn.Parameter(torch.logit(0.1 * torch.ones(num_points, 1)))
+        igaf_coeffs = torch.nn.Parameter(torch.zeros(num_points, 4, 3, device=means.device, dtype=means.dtype))
         self.gauss_params = torch.nn.ParameterDict(
             {
                 "means": means,
@@ -885,6 +918,7 @@ class WaterSplattingModel(Model):
                 "features_dc": features_dc,
                 "features_rest": features_rest,
                 "opacities": opacities,
+                "igaf_coeffs": igaf_coeffs,
             }
         )
         self.register_buffer(
@@ -1010,6 +1044,7 @@ class WaterSplattingModel(Model):
         self._warned_givar_sh = False
         self._deterministic_current_camera_id: Optional[int] = None
         self._deterministic_last_loss_value: Optional[float] = None
+        self._igaf_last_stats: Optional[Dict[str, object]] = None
 
         self.crop_box: Optional[OrientedBox] = None
         if self.config.background_color == "random":
@@ -1061,6 +1096,10 @@ class WaterSplattingModel(Model):
     @property
     def opacities(self):
         return self.gauss_params["opacities"]
+
+    @property
+    def igaf_coeffs(self):
+        return self.gauss_params["igaf_coeffs"]
     
     @property
     def medium_mlp(self):
@@ -1079,6 +1118,8 @@ class WaterSplattingModel(Model):
             for p in ["means", "scales", "quats", "features_dc", "features_rest", "opacities"]:
                 dict[f"gauss_params.{p}"] = dict[p]
         newp = dict["gauss_params.means"].shape[0]
+        if "gauss_params.igaf_coeffs" not in dict or tuple(dict["gauss_params.igaf_coeffs"].shape) != (newp, 4, 3):
+            dict["gauss_params.igaf_coeffs"] = torch.zeros(newp, 4, 3, dtype=dict["gauss_params.features_dc"].dtype)
         if "gaussian_lineage_ids" not in dict:
             dict["gaussian_lineage_ids"] = torch.arange(newp, dtype=torch.long)
         if tuple(self.gaussian_lineage_ids.shape) != (newp,):
@@ -1204,6 +1245,8 @@ class WaterSplattingModel(Model):
 
     def after_train(self, step: int):
         assert step == self.step
+        if getattr(self.config, "igaf_freeze_base_gaussians", False):
+            return
         if getattr(self.config, "dual_color_enabled", False) and getattr(self.config, "dual_color_freeze_geometry", True):
             return
         # to save some training time, we no longer need to update those stats post refinement
@@ -1300,6 +1343,8 @@ class WaterSplattingModel(Model):
 
     def refinement_after(self, optimizers: Optimizers, step):
         assert step == self.step
+        if getattr(self.config, "igaf_freeze_base_gaussians", False):
+            return
         if getattr(self.config, "dual_color_enabled", False) and getattr(self.config, "dual_color_freeze_geometry", True):
             return
         if self.step <= self.config.warmup_length:
@@ -1632,7 +1677,8 @@ class WaterSplattingModel(Model):
         }
         for name, param in self.gauss_params.items():
             if name not in out:
-                out[name] = param[split_mask].repeat(samps, 1)
+                repeat_dims = (samps,) + tuple(1 for _ in range(param.dim() - 1))
+                out[name] = param[split_mask].repeat(*repeat_dims)
         return out
 
     def dup_gaussians(self, dup_mask):
@@ -1675,15 +1721,20 @@ class WaterSplattingModel(Model):
     def get_gaussian_param_groups(self) -> Dict[str, List[Parameter]]:
         # Here we explicitly use the means, scales as parameters so that the user can override this function and
         # specify more if they want to add more optimizable params to gaussians.
-        names = ["means", "scales", "quats", "features_dc", "features_rest", "opacities"]
-        if getattr(self.config, "dual_color_enabled", False) and getattr(self.config, "dual_color_freeze_geometry", True):
+        names = ["means", "scales", "quats", "features_dc", "features_rest", "opacities", "igaf_coeffs"]
+        if getattr(self.config, "igaf_freeze_base_gaussians", False):
+            for name in ["means", "scales", "quats", "features_dc", "features_rest", "opacities"]:
+                self.gauss_params[name].requires_grad_(False)
+            self.gauss_params["igaf_coeffs"].requires_grad_(bool(getattr(self.config, "igaf_enabled", False)))
+        elif getattr(self.config, "dual_color_enabled", False) and getattr(self.config, "dual_color_freeze_geometry", True):
             for name in ["means", "scales", "quats", "opacities"]:
                 self.gauss_params[name].requires_grad_(False)
             for name in ["features_dc", "features_rest"]:
                 self.gauss_params[name].requires_grad_(True)
+            self.gauss_params["igaf_coeffs"].requires_grad_(bool(getattr(self.config, "igaf_enabled", False)))
         else:
             for name in names:
-                self.gauss_params[name].requires_grad_(True)
+                self.gauss_params[name].requires_grad_(name != "igaf_coeffs" or bool(getattr(self.config, "igaf_enabled", False)))
         return {name: [self.gauss_params[name]] for name in names}
 
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
@@ -1693,8 +1744,9 @@ class WaterSplattingModel(Model):
             Mapping of different parameter groups
         """
         gps = self.get_gaussian_param_groups()
-        freeze_medium = getattr(self.config, "dual_color_enabled", False) and getattr(
-            self.config, "dual_color_freeze_medium", True
+        freeze_medium = bool(getattr(self.config, "igaf_freeze_medium", False)) or (
+            getattr(self.config, "dual_color_enabled", False)
+            and getattr(self.config, "dual_color_freeze_medium", True)
         )
         for param in self.medium_mlp.parameters():
             param.requires_grad_(not freeze_medium)
@@ -2131,6 +2183,163 @@ class WaterSplattingModel(Model):
                 f.write(json.dumps(payload) + "\n")
         except Exception as exc:
             CONSOLE.log(f"[yellow]Failed to write deterministic audit log: {exc}[/yellow]")
+
+    def _igaf_requested(self) -> bool:
+        return bool(getattr(self.config, "igaf_enabled", False))
+
+    def _igaf_ramp_weight(self) -> float:
+        if not self._igaf_requested():
+            return 0.0
+        start = int(getattr(self.config, "igaf_start_step", 10000))
+        ramp_steps = int(getattr(self.config, "igaf_ramp_steps", 1000))
+        if int(self.step) < start:
+            return 0.0
+        if ramp_steps <= 0:
+            return 1.0
+        return float(min(max((int(self.step) - start) / float(ramp_steps), 0.0), 1.0))
+
+    @torch.no_grad()
+    def _build_igaf_inputs(
+        self,
+        *,
+        means: torch.Tensor,
+        scales: torch.Tensor,
+        quats: torch.Tensor,
+        xys: torch.Tensor,
+        radii: torch.Tensor,
+        viewmat: torch.Tensor,
+        fx: float,
+        fy: float,
+        cx: float,
+        cy: float,
+        camera_index: Optional[int],
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        ramp = self._igaf_ramp_weight()
+        if ramp <= 0.0:
+            self._igaf_last_stats = None
+            return None
+
+        means_d = means.detach()
+        scales_d = scales.detach().exp()
+        quats_d = quats.detach()
+        quats_d = quats_d / quats_d.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        xys_d = xys.detach()
+        visible = (radii.detach().reshape(-1) > 0)
+
+        order = torch.argsort(scales_d, dim=-1, descending=True)
+        sorted_scales = torch.gather(scales_d, 1, order)
+        rot = quat_to_rotmat(quats_d)
+        gather_idx = order[:, None, :2].expand(-1, 3, -1)
+        axes = torch.gather(rot, 2, gather_idx)
+        tangents = axes * sorted_scales[:, None, :2]
+        p1 = means_d + tangents[:, :, 0]
+        p2 = means_d + tangents[:, :, 1]
+
+        vm = viewmat.detach()
+
+        def _project(points: torch.Tensor) -> torch.Tensor:
+            cam = points @ vm[:3, :3].T + vm[:3, 3]
+            z = cam[:, 2].clamp_min(1e-6)
+            px = float(fx) * (cam[:, 0] / z) + float(cx)
+            py = float(fy) * (cam[:, 1] / z) + float(cy)
+            return torch.stack([px, py], dim=-1)
+
+        b1 = _project(p1) - xys_d
+        b2 = _project(p2) - xys_d
+        a = (b1 * b1).sum(dim=-1) + 1e-4
+        b = (b1 * b2).sum(dim=-1)
+        d = (b2 * b2).sum(dim=-1) + 1e-4
+        det = (a * d - b * b).clamp_min(1e-8)
+        inv00 = d / det
+        inv01 = -b / det
+        inv11 = a / det
+        row0 = inv00[:, None] * b1 + inv01[:, None] * b2
+        row1 = inv01[:, None] * b1 + inv11[:, None] * b2
+        screen_to_uv = torch.stack([row0[:, 0], row0[:, 1], row1[:, 0], row1[:, 1]], dim=-1).contiguous()
+
+        trace = a + d
+        eig_delta = torch.sqrt(torch.clamp((a - d).square() + 4.0 * b.square(), min=0.0))
+        eig_max = 0.5 * (trace + eig_delta)
+        eig_min = 0.5 * (trace - eig_delta).clamp_min(1e-8)
+        condition = torch.sqrt((eig_max / eig_min).clamp_min(1.0))
+
+        coordinate_mode = str(getattr(self.config, "igaf_coordinate_mode", "canonical"))
+        if coordinate_mode == "screen":
+            radius_scale = radii.detach().reshape(-1).float().clamp_min(1.0).reciprocal()
+            screen_to_uv = torch.stack(
+                [
+                    radius_scale,
+                    torch.zeros_like(radius_scale),
+                    torch.zeros_like(radius_scale),
+                    radius_scale,
+                ],
+                dim=-1,
+            ).contiguous()
+            condition = torch.ones_like(radius_scale)
+
+        plane_ratio = torch.log(sorted_scales[:, 1] / sorted_scales[:, 2].clamp_min(1e-8))
+        plane_mid = math.log(max(float(getattr(self.config, "igaf_planarity_ratio", 2.0)), 1.000001))
+        plane_temp = max(float(getattr(self.config, "igaf_planarity_temperature", 0.25)), 1e-6)
+        plane_gate = torch.sigmoid((plane_ratio - plane_mid) / plane_temp)
+
+        cond_thr = float(getattr(self.config, "igaf_condition_threshold", 5.0))
+        cond_temp = max(float(getattr(self.config, "igaf_condition_temperature", 5.0)), 1e-6)
+        cond_gate = torch.exp(-torch.relu(condition - cond_thr) / cond_temp)
+
+        freq = float(getattr(self.config, "igaf_frequency", 1.5))
+        if bool(getattr(self.config, "igaf_mip_enabled", True)):
+            col0_norm = torch.sqrt(screen_to_uv[:, 0].square() + screen_to_uv[:, 2].square())
+            col1_norm = torch.sqrt(screen_to_uv[:, 1].square() + screen_to_uv[:, 3].square())
+            pix_scale = 0.5 * (col0_norm + col1_norm)
+            mip_gate = torch.exp(-0.5 * (freq**2) * pix_scale.square())
+        else:
+            pix_scale = torch.zeros_like(condition)
+            mip_gate = torch.ones_like(condition)
+
+        gate = (float(ramp) * plane_gate * cond_gate * mip_gate).float()
+        gate = torch.where(visible, gate, torch.zeros_like(gate))
+        screen_to_uv = torch.where(
+            visible[:, None],
+            screen_to_uv.float(),
+            torch.zeros_like(screen_to_uv.float()),
+        )
+
+        finite_gate = gate[torch.isfinite(gate)]
+        active = finite_gate > 1e-4
+        coeff = self.igaf_coeffs.detach().reshape(self.igaf_coeffs.shape[0], -1)
+        coeff_norm = coeff.norm(dim=-1)
+        stats: Dict[str, object] = {
+            "event": "igaf",
+            "step": int(self.step),
+            "camera_index": camera_index,
+            "coordinate_mode": coordinate_mode,
+            "total_gaussians": int(gate.numel()),
+            "ramp": float(ramp),
+            "active_texture_gaussian_fraction": float(active.float().mean().item()) if active.numel() else 0.0,
+            "gate": tensor_stats(finite_gate),
+            "planarity_gate": tensor_stats(plane_gate[visible]),
+            "condition": tensor_stats(condition[visible]),
+            "mip_gate": tensor_stats(mip_gate[visible]),
+            "pixel_local_scale": tensor_stats(pix_scale[visible]),
+            "coefficient_norm": tensor_stats(coeff_norm),
+            "coefficient_saturation_fraction": float((coeff_norm > 0.95).float().mean().item()) if coeff_norm.numel() else 0.0,
+        }
+        self._igaf_last_stats = stats
+        if self.training and getattr(self.config, "igaf_log_path", None) and int(self.step) % 500 == 0:
+            self._write_igaf_log(stats)
+        return screen_to_uv.detach(), gate.detach()
+
+    def _write_igaf_log(self, payload: Dict[str, object]) -> None:
+        log_path = getattr(self.config, "igaf_log_path", None)
+        if not log_path:
+            return
+        try:
+            path = Path(log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf8") as f:
+                f.write(json.dumps(payload) + "\n")
+        except Exception as exc:
+            CONSOLE.log(f"[yellow]Failed to write IGAF log: {exc}[/yellow]")
 
     def _givar_requested(self) -> bool:
         return bool(getattr(self.config, "givar_enabled", False))
@@ -3366,6 +3575,7 @@ class WaterSplattingModel(Model):
             features_rest_crop = self.features_rest[crop_ids]
             scales_crop = self.scales[crop_ids]
             quats_crop = self.quats[crop_ids]
+            igaf_coeffs_crop = self.igaf_coeffs[crop_ids]
         else:
             opacities_crop = self.opacities
             means_crop = self.means
@@ -3373,6 +3583,7 @@ class WaterSplattingModel(Model):
             features_rest_crop = self.features_rest
             scales_crop = self.scales
             quats_crop = self.quats
+            igaf_coeffs_crop = self.igaf_coeffs
 
         self.xys, depths, self.radii, conics, comp, num_tiles_hit, cov3d = self.underwater_rasterizer.project(  # type: ignore
             means=means_crop,
@@ -3482,6 +3693,22 @@ class WaterSplattingModel(Model):
             medium_bs = medium.bs
             medium_attn = medium.attn
 
+        igaf_render_inputs = self._build_igaf_inputs(
+            means=means_crop,
+            scales=scales_crop,
+            quats=quats_crop,
+            xys=self.xys,
+            radii=self.radii,
+            viewmat=viewmat,
+            fx=self.last_fx,
+            fy=self.last_fy,
+            cx=cx,
+            cy=cy,
+            camera_index=camera_index,
+        )
+        igaf_screen_to_uv = igaf_render_inputs[0] if igaf_render_inputs is not None else None
+        igaf_gate = igaf_render_inputs[1] if igaf_render_inputs is not None else None
+
         render = self.underwater_rasterizer.rasterize(  # type: ignore
             xys=self.xys,
             xys_grad_abs=self.xys_grad_abs,
@@ -3490,6 +3717,12 @@ class WaterSplattingModel(Model):
             conics=conics,
             num_tiles_hit=num_tiles_hit,
             colors=rgbs,
+            igaf_coeffs=igaf_coeffs_crop if igaf_render_inputs is not None else None,
+            igaf_screen_to_uv=igaf_screen_to_uv,
+            igaf_gate=igaf_gate,
+            igaf_frequency=float(getattr(self.config, "igaf_frequency", 1.5)),
+            igaf_amplitude_max=float(getattr(self.config, "igaf_amplitude_max", 0.10)),
+            igaf_coordinate_clamp=float(getattr(self.config, "igaf_coordinate_clamp", 3.0)),
             opacities=opacities,
             medium_rgb=medium_rgb,
             medium_bs=medium_bs,
@@ -4148,6 +4381,14 @@ class WaterSplattingModel(Model):
             for key, value in self._givar_last_stats.items():
                 if isinstance(value, (int, float)):
                     metrics_dict[key] = torch.tensor(float(value), device=self.device)
+        if self._igaf_last_stats is not None:
+            for key, value in self._igaf_last_stats.items():
+                if isinstance(value, (int, float)):
+                    metrics_dict[f"igaf_{key}"] = torch.tensor(float(value), device=self.device)
+                elif isinstance(value, dict):
+                    for stat_key, stat_value in value.items():
+                        if isinstance(stat_value, (int, float)):
+                            metrics_dict[f"igaf_{key}_{stat_key}"] = torch.tensor(float(stat_value), device=self.device)
         return metrics_dict
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None) -> Dict[str, torch.Tensor]:
@@ -4305,6 +4546,10 @@ class WaterSplattingModel(Model):
                 ssim_metric=self.ssim,
             ),
         }
+        igaf_amp_weight = float(getattr(self.config, "lambda_igaf_amplitude", 0.0))
+        if self.training and self._igaf_requested() and igaf_amp_weight > 0.0 and self._igaf_ramp_weight() > 0.0:
+            freq = float(getattr(self.config, "igaf_frequency", 1.5))
+            loss_dict["igaf_amplitude_loss"] = igaf_amp_weight * (freq**2) * self.igaf_coeffs.square().mean()
 
         if self.training and self._givar_requested() and "camera_index" in outputs and "givar_camera_position" in outputs:
             camera_index = int(outputs["camera_index"].detach().cpu().reshape(-1)[0].item())

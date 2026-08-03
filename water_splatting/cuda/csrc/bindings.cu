@@ -473,6 +473,151 @@ rasterize_forward_tensor(
     );
 }
 
+std::tuple<
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor>
+rasterize_forward_igaf_tensor(
+    const std::tuple<int, int, int> tile_bounds,
+    const std::tuple<int, int, int> block,
+    const std::tuple<int, int, int> img_size,
+    const torch::Tensor &gaussian_ids_sorted,
+    const torch::Tensor &tile_bins,
+    const torch::Tensor &xys,
+    const torch::Tensor &conics,
+    const torch::Tensor &colors,
+    const torch::Tensor &igaf_coeffs,
+    const torch::Tensor &igaf_screen_to_uv,
+    const torch::Tensor &igaf_gate,
+    const float igaf_frequency,
+    const float igaf_amplitude_max,
+    const float igaf_coordinate_clamp,
+    const torch::Tensor &opacities,
+    const torch::Tensor &medium_rgb,
+    const torch::Tensor &medium_bs,
+    const torch::Tensor &medium_attn,
+    const torch::Tensor &depths,
+    const torch::Tensor &background
+) {
+    DEVICE_GUARD(xys);
+    CHECK_INPUT(gaussian_ids_sorted);
+    CHECK_INPUT(tile_bins);
+    CHECK_INPUT(xys);
+    CHECK_INPUT(conics);
+    CHECK_INPUT(colors);
+    CHECK_INPUT(igaf_coeffs);
+    CHECK_INPUT(igaf_screen_to_uv);
+    CHECK_INPUT(igaf_gate);
+    CHECK_INPUT(opacities);
+    CHECK_INPUT(medium_rgb);
+    CHECK_INPUT(medium_bs);
+    CHECK_INPUT(medium_attn);
+    CHECK_INPUT(depths);
+    CHECK_INPUT(background);
+
+    dim3 tile_bounds_dim3;
+    tile_bounds_dim3.x = std::get<0>(tile_bounds);
+    tile_bounds_dim3.y = std::get<1>(tile_bounds);
+    tile_bounds_dim3.z = std::get<2>(tile_bounds);
+
+    dim3 block_dim3;
+    block_dim3.x = std::get<0>(block);
+    block_dim3.y = std::get<1>(block);
+    block_dim3.z = std::get<2>(block);
+
+    dim3 img_size_dim3;
+    img_size_dim3.x = std::get<0>(img_size);
+    img_size_dim3.y = std::get<1>(img_size);
+    img_size_dim3.z = std::get<2>(img_size);
+
+    const int channels = colors.size(1);
+    const int img_width = img_size_dim3.x;
+    const int img_height = img_size_dim3.y;
+
+    torch::Tensor out_img = torch::zeros(
+        {img_height, img_width, channels}, xys.options().dtype(torch::kFloat32)
+    );
+    torch::Tensor out_clr = torch::zeros(
+        {img_height, img_width, channels}, xys.options().dtype(torch::kFloat32)
+    );
+    torch::Tensor out_med = torch::zeros(
+        {img_height, img_width, channels}, xys.options().dtype(torch::kFloat32)
+    );
+    torch::Tensor depth_im = torch::zeros(
+        {img_height, img_width}, xys.options().dtype(torch::kFloat32)
+    );
+    torch::Tensor depth2_im = torch::zeros(
+        {img_height, img_width}, xys.options().dtype(torch::kFloat32)
+    );
+    torch::Tensor first_depth_im = torch::zeros(
+        {img_height, img_width}, xys.options().dtype(torch::kFloat32)
+    );
+    torch::Tensor last_depth_im = torch::zeros(
+        {img_height, img_width}, xys.options().dtype(torch::kFloat32)
+    );
+    torch::Tensor final_Ts = torch::zeros(
+        {img_height, img_width}, xys.options().dtype(torch::kFloat32)
+    );
+    torch::Tensor final_idx = torch::zeros(
+        {img_height, img_width}, xys.options().dtype(torch::kInt32)
+    );
+    torch::Tensor first_idx = torch::zeros(
+        {img_height, img_width}, xys.options().dtype(torch::kInt32)
+    );
+
+    rasterize_forward_igaf<<<tile_bounds_dim3, block_dim3>>>(
+        tile_bounds_dim3,
+        img_size_dim3,
+        gaussian_ids_sorted.contiguous().data_ptr<int32_t>(),
+        (int2 *)tile_bins.contiguous().data_ptr<int>(),
+        (float2 *)xys.contiguous().data_ptr<float>(),
+        (float3 *)conics.contiguous().data_ptr<float>(),
+        (float3 *)colors.contiguous().data_ptr<float>(),
+        (float3 *)igaf_coeffs.contiguous().data_ptr<float>(),
+        (float4 *)igaf_screen_to_uv.contiguous().data_ptr<float>(),
+        igaf_gate.contiguous().data_ptr<float>(),
+        igaf_frequency,
+        igaf_amplitude_max,
+        igaf_coordinate_clamp,
+        opacities.contiguous().data_ptr<float>(),
+        (float3 *)medium_rgb.contiguous().data_ptr<float>(),
+        (float3 *)medium_bs.contiguous().data_ptr<float>(),
+        (float3 *)medium_attn.contiguous().data_ptr<float>(),
+        depths.contiguous().data_ptr<float>(),
+        final_Ts.contiguous().data_ptr<float>(),
+        final_idx.contiguous().data_ptr<int>(),
+        first_idx.contiguous().data_ptr<int>(),
+        (float3 *)out_img.contiguous().data_ptr<float>(),
+        (float3 *)out_clr.contiguous().data_ptr<float>(),
+        (float3 *)out_med.contiguous().data_ptr<float>(),
+        depth_im.contiguous().data_ptr<float>(),
+        depth2_im.contiguous().data_ptr<float>(),
+        first_depth_im.contiguous().data_ptr<float>(),
+        last_depth_im.contiguous().data_ptr<float>(),
+        *(float3 *)background.contiguous().data_ptr<float>()
+    );
+
+    return std::make_tuple(
+        out_img,
+        out_clr,
+        out_med,
+        depth_im,
+        final_Ts,
+        final_idx,
+        first_idx,
+        depth2_im,
+        first_depth_im,
+        last_depth_im
+    );
+}
+
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 nd_rasterize_forward_tensor(
@@ -665,6 +810,134 @@ std::
     );
 
     return std::make_tuple(v_xy, v_conic, v_colors, v_opacity, v_medium_rgb, v_medium_bs, v_medium_attn);
+}
+
+std::
+    tuple<
+        torch::Tensor, // dL_dxy
+        torch::Tensor, // dL_dconic
+        torch::Tensor, // dL_dcolors
+        torch::Tensor, // dL_digaf_coeffs
+        torch::Tensor, // dL_dopacity
+        torch::Tensor, // dL_dmedium_rgb
+        torch::Tensor, // dL_dmedium_bs
+        torch::Tensor  // dL_dmedium_attn
+        >
+    rasterize_backward_igaf_tensor(
+        const unsigned img_height,
+        const unsigned img_width,
+        const unsigned block_width,
+        const torch::Tensor &gaussians_ids_sorted,
+        const torch::Tensor &tile_bins,
+        const torch::Tensor &xys,
+        torch::Tensor &xys_grad_abs,
+        const torch::Tensor &conics,
+        const torch::Tensor &colors,
+        const torch::Tensor &igaf_coeffs,
+        const torch::Tensor &igaf_screen_to_uv,
+        const torch::Tensor &igaf_gate,
+        const float igaf_frequency,
+        const float igaf_amplitude_max,
+        const float igaf_coordinate_clamp,
+        const torch::Tensor &opacities,
+        const torch::Tensor &medium_rgb,
+        const torch::Tensor &medium_bs,
+        const torch::Tensor &medium_attn,
+        const torch::Tensor &depths,
+        const torch::Tensor &background,
+        const torch::Tensor &final_Ts,
+        const torch::Tensor &final_idx,
+        const torch::Tensor &first_idx,
+        const torch::Tensor &v_output,
+        const torch::Tensor &v_out_medium,
+        const torch::Tensor &v_output_alpha
+    ) {
+    DEVICE_GUARD(xys);
+    CHECK_INPUT(xys_grad_abs);
+    CHECK_INPUT(xys);
+    CHECK_INPUT(colors);
+    CHECK_INPUT(igaf_coeffs);
+    CHECK_INPUT(igaf_screen_to_uv);
+    CHECK_INPUT(igaf_gate);
+
+    if (xys.ndimension() != 2 || xys.size(1) != 2) {
+        AT_ERROR("xys must have dimensions (num_points, 2)");
+    }
+
+    if (colors.ndimension() != 2 || colors.size(1) != 3) {
+        AT_ERROR("colors must have dimensions (num_points, 3)");
+    }
+
+    if (igaf_coeffs.ndimension() != 3 || igaf_coeffs.size(1) != 4 || igaf_coeffs.size(2) != 3) {
+        AT_ERROR("igaf_coeffs must have dimensions (num_points, 4, 3)");
+    }
+
+    const int num_points = xys.size(0);
+    const dim3 tile_bounds = {
+        (img_width + block_width - 1) / block_width,
+        (img_height + block_width - 1) / block_width,
+        1
+    };
+    const dim3 block(block_width, block_width, 1);
+    const dim3 img_size = {img_width, img_height, 1};
+    const int channels = colors.size(1);
+
+    torch::Tensor v_xy = torch::zeros({num_points, 2}, xys.options());
+    torch::Tensor v_conic = torch::zeros({num_points, 3}, xys.options());
+    torch::Tensor v_colors = torch::zeros({num_points, channels}, xys.options());
+    torch::Tensor v_igaf_coeffs = torch::zeros_like(igaf_coeffs);
+    torch::Tensor v_opacity = torch::zeros({num_points, 1}, xys.options());
+    torch::Tensor v_medium_rgb = torch::zeros({img_height, img_width, 3}, xys.options());
+    torch::Tensor v_medium_bs = torch::zeros({img_height, img_width, 3}, xys.options());
+    torch::Tensor v_medium_attn = torch::zeros({img_height, img_width, 3}, xys.options());
+
+    rasterize_backward_kernel_igaf<<<tile_bounds, block>>>(
+        tile_bounds,
+        img_size,
+        gaussians_ids_sorted.contiguous().data_ptr<int>(),
+        (int2 *)tile_bins.contiguous().data_ptr<int>(),
+        (float2 *)xys.contiguous().data_ptr<float>(),
+        (float2 *)xys_grad_abs.contiguous().data_ptr<float>(),
+        (float3 *)conics.contiguous().data_ptr<float>(),
+        (float3 *)colors.contiguous().data_ptr<float>(),
+        (float3 *)igaf_coeffs.contiguous().data_ptr<float>(),
+        (float4 *)igaf_screen_to_uv.contiguous().data_ptr<float>(),
+        igaf_gate.contiguous().data_ptr<float>(),
+        igaf_frequency,
+        igaf_amplitude_max,
+        igaf_coordinate_clamp,
+        opacities.contiguous().data_ptr<float>(),
+        (float3 *)medium_rgb.contiguous().data_ptr<float>(),
+        (float3 *)medium_bs.contiguous().data_ptr<float>(),
+        (float3 *)medium_attn.contiguous().data_ptr<float>(),
+        depths.contiguous().data_ptr<float>(),
+        *(float3 *)background.contiguous().data_ptr<float>(),
+        final_Ts.contiguous().data_ptr<float>(),
+        final_idx.contiguous().data_ptr<int>(),
+        first_idx.contiguous().data_ptr<int>(),
+        (float3 *)v_output.contiguous().data_ptr<float>(),
+        (float3 *)v_out_medium.contiguous().data_ptr<float>(),
+        v_output_alpha.contiguous().data_ptr<float>(),
+        (float2 *)v_xy.contiguous().data_ptr<float>(),
+        (float3 *)v_conic.contiguous().data_ptr<float>(),
+        (float3 *)v_colors.contiguous().data_ptr<float>(),
+        (float3 *)v_igaf_coeffs.contiguous().data_ptr<float>(),
+        v_opacity.contiguous().data_ptr<float>(),
+        (float3 *)v_medium_rgb.contiguous().data_ptr<float>(),
+        (float3 *)v_medium_bs.contiguous().data_ptr<float>(),
+        (float3 *)v_medium_attn.contiguous().data_ptr<float>()
+    );
+
+    return std::make_tuple(
+        v_xy,
+        v_conic,
+        v_colors,
+        v_igaf_coeffs,
+        v_opacity,
+        v_medium_rgb,
+        v_medium_bs,
+        v_medium_attn
+    );
 }
 
 std::

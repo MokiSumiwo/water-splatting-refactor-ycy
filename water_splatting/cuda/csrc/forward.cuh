@@ -51,6 +51,38 @@ __global__ void rasterize_forward(
     const float3& __restrict__ background
 );
 
+__global__ void rasterize_forward_igaf(
+    const dim3 tile_bounds,
+    const dim3 img_size,
+    const int32_t* __restrict__ gaussian_ids_sorted,
+    const int2* __restrict__ tile_bins,
+    const float2* __restrict__ xys,
+    const float3* __restrict__ conics,
+    const float3* __restrict__ colors,
+    const float3* __restrict__ igaf_coeffs,
+    const float4* __restrict__ igaf_screen_to_uv,
+    const float* __restrict__ igaf_gate,
+    const float igaf_frequency,
+    const float igaf_amplitude_max,
+    const float igaf_coordinate_clamp,
+    const float* __restrict__ opacities,
+    const float3* __restrict__ medium_rgb,
+    const float3* __restrict__ medium_bs,
+    const float3* __restrict__ medium_attn,
+    const float* __restrict__ depths,
+    float* __restrict__ final_Ts,
+    int* __restrict__ final_index,
+    int* __restrict__ first_index,
+    float3* __restrict__ out_img,
+    float3* __restrict__ out_clr,
+    float3* __restrict__ out_med,
+    float* __restrict__ depth_im,
+    float* __restrict__ depth2_im,
+    float* __restrict__ first_depth_im,
+    float* __restrict__ last_depth_im,
+    const float3& __restrict__ background
+);
+
 // compute output color image from binned and sorted gaussians
 __global__ void nd_rasterize_forward(
     const dim3 tile_bounds,

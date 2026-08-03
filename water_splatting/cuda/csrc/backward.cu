@@ -19,6 +19,53 @@ inline __device__ void warpSum2(float2& val, cg::thread_block_tile<32>& tile){
 inline __device__ void warpSum(float& val, cg::thread_block_tile<32>& tile){
     val = cg::reduce(tile, val, cg::plus<float>());
 }
+
+__device__ __forceinline__ float igaf_clamp_coord_bwd(const float value, const float limit) {
+    return fminf(fmaxf(value, -limit), limit);
+}
+
+__device__ __forceinline__ void igaf_basis_bwd(
+    const float2& __restrict__ pixel_delta,
+    const float4& __restrict__ screen_to_uv,
+    const float frequency,
+    const float coordinate_clamp,
+    float* __restrict__ basis
+) {
+    const float u_raw = screen_to_uv.x * pixel_delta.x + screen_to_uv.y * pixel_delta.y;
+    const float v_raw = screen_to_uv.z * pixel_delta.x + screen_to_uv.w * pixel_delta.y;
+    const float u = igaf_clamp_coord_bwd(u_raw, coordinate_clamp);
+    const float v = igaf_clamp_coord_bwd(v_raw, coordinate_clamp);
+    const float mean_cos = __expf(-0.5f * frequency * frequency);
+    basis[0] = __cosf(frequency * u) - mean_cos;
+    basis[1] = __sinf(frequency * u);
+    basis[2] = __cosf(frequency * v) - mean_cos;
+    basis[3] = __sinf(frequency * v);
+}
+
+__device__ __forceinline__ float3 igaf_rgb_and_raw_bwd(
+    const float3& __restrict__ base_rgb,
+    const float3* __restrict__ igaf_coeffs,
+    const int32_t gaussian_id,
+    const float* __restrict__ basis,
+    const float gate,
+    const float amplitude_max,
+    float3& raw
+) {
+    raw = {0.f, 0.f, 0.f};
+    #pragma unroll
+    for (int k = 0; k < 4; ++k) {
+        const float3 coeff = igaf_coeffs[gaussian_id * 4 + k];
+        raw.x += coeff.x * basis[k];
+        raw.y += coeff.y * basis[k];
+        raw.z += coeff.z * basis[k];
+    }
+    float3 out;
+    out.x = base_rgb.x + gate * amplitude_max * tanhf(raw.x);
+    out.y = base_rgb.y + gate * amplitude_max * tanhf(raw.y);
+    out.z = base_rgb.z + gate * amplitude_max * tanhf(raw.z);
+    return out;
+}
+
 __global__ void nd_rasterize_backward_kernel(
     const dim3 tile_bounds,
     const dim3 img_size,
@@ -448,6 +495,337 @@ __global__ void rasterize_backward_kernel(
         v_medium_bs_pix_local.x += v_exp_bs_local.x * latter_depth * latter_exp_bs.x;
         v_medium_bs_pix_local.y += v_exp_bs_local.y * latter_depth * latter_exp_bs.y;
         v_medium_bs_pix_local.z += v_exp_bs_local.z * latter_depth * latter_exp_bs.z;
+        float* v_medium_rgb_ptr = (float*)(v_medium_rgb);
+        atomicAdd(v_medium_rgb_ptr + 3*pix_id + 0, v_medium_rgb_pix_local.x);
+        atomicAdd(v_medium_rgb_ptr + 3*pix_id + 1, v_medium_rgb_pix_local.y);
+        atomicAdd(v_medium_rgb_ptr + 3*pix_id + 2, v_medium_rgb_pix_local.z);
+
+        float* v_medium_bs_ptr = (float*)(v_medium_bs);
+        atomicAdd(v_medium_bs_ptr + 3*pix_id + 0, v_medium_bs_pix_local.x);
+        atomicAdd(v_medium_bs_ptr + 3*pix_id + 1, v_medium_bs_pix_local.y);
+        atomicAdd(v_medium_bs_ptr + 3*pix_id + 2, v_medium_bs_pix_local.z);
+    }
+}
+
+__global__ void rasterize_backward_kernel_igaf(
+    const dim3 tile_bounds,
+    const dim3 img_size,
+    const int32_t* __restrict__ gaussian_ids_sorted,
+    const int2* __restrict__ tile_bins,
+    const float2* __restrict__ xys,
+    float2* __restrict__ xys_grad_abs,
+    const float3* __restrict__ conics,
+    const float3* __restrict__ rgbs,
+    const float3* __restrict__ igaf_coeffs,
+    const float4* __restrict__ igaf_screen_to_uv,
+    const float* __restrict__ igaf_gate,
+    const float igaf_frequency,
+    const float igaf_amplitude_max,
+    const float igaf_coordinate_clamp,
+    const float* __restrict__ opacities,
+    const float3* __restrict__ medium_rgb,
+    const float3* __restrict__ medium_bs,
+    const float3* __restrict__ medium_attn,
+    const float* __restrict__ depths,
+    const float3& __restrict__ background,
+    const float* __restrict__ final_Ts,
+    const int* __restrict__ final_index,
+    const int* __restrict__ first_index,
+    const float3* __restrict__ v_output,
+    const float3* __restrict__ v_out_medium,
+    const float* __restrict__ v_output_alpha,
+    float2* __restrict__ v_xy,
+    float3* __restrict__ v_conic,
+    float3* __restrict__ v_rgb,
+    float3* __restrict__ v_igaf_coeffs,
+    float* __restrict__ v_opacity,
+    float3* __restrict__ v_medium_rgb,
+    float3* __restrict__ v_medium_bs,
+    float3* __restrict__ v_medium_attn
+) {
+    auto block = cg::this_thread_block();
+    int32_t tile_id =
+        block.group_index().y * tile_bounds.x + block.group_index().x;
+    unsigned i =
+        block.group_index().y * block.group_dim().y + block.thread_index().y;
+    unsigned j =
+        block.group_index().x * block.group_dim().x + block.thread_index().x;
+
+    const float px = (float)j;
+    const float py = (float)i;
+    const int32_t pix_id = min(i * img_size.x + j, img_size.x * img_size.y - 1);
+    const bool inside = (i < img_size.y && j < img_size.x);
+
+    float T_final = final_Ts[pix_id];
+    float T = T_final;
+    float3 buffer = {0.f, 0.f, 0.f};
+    float3 buffer_medium = {0.f, 0.f, 0.f};
+    const int bin_final = inside ? final_index[pix_id] : 0;
+
+    const int2 range = tile_bins[tile_id];
+    const int block_size = block.size();
+    const int num_batches = (range.y - range.x + block_size - 1) / block_size;
+
+    __shared__ int32_t id_batch[MAX_BLOCK_SIZE];
+    __shared__ float3 xy_opacity_batch[MAX_BLOCK_SIZE];
+    __shared__ float3 conic_batch[MAX_BLOCK_SIZE];
+    __shared__ float3 rgbs_batch[MAX_BLOCK_SIZE];
+    __shared__ float depth_batch[MAX_BLOCK_SIZE];
+
+    const float3 v_out = v_output[pix_id];
+    const float3 v_out_med = v_out_medium[pix_id];
+    const float v_out_alpha = v_output_alpha[pix_id];
+
+    const float3 medium_rgb_pix = medium_rgb[pix_id];
+    const float3 medium_bs_pix = medium_bs[pix_id];
+    const float3 medium_attn_pix = medium_attn[pix_id];
+    float min_medium_attn_pix = std::min(medium_attn_pix.x, std::min(medium_attn_pix.y, medium_attn_pix.z));
+    min_medium_attn_pix = std::min(0.f, min_medium_attn_pix);
+
+    float latter_depth = 10.f;
+    float3 latter_exp_bs = {0.f, 0.f, 0.f};
+
+    const int tr = block.thread_rank();
+    cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
+    const int warp_bin_final = cg::reduce(warp, bin_final, cg::greater<int>());
+    for (int b = 0; b < num_batches; ++b) {
+        block.sync();
+        const int batch_end = range.y - 1 - block_size * b;
+        int batch_size = min(block_size, batch_end + 1 - range.x);
+        const int idx = batch_end - tr;
+        if (idx >= range.x) {
+            int32_t g_id = gaussian_ids_sorted[idx];
+            id_batch[tr] = g_id;
+            const float2 xy = xys[g_id];
+            const float opac = opacities[g_id];
+            xy_opacity_batch[tr] = {xy.x, xy.y, opac};
+            conic_batch[tr] = conics[g_id];
+            rgbs_batch[tr] = rgbs[g_id];
+            depth_batch[tr] = depths[g_id];
+        }
+        block.sync();
+        for (int t = max(0, batch_end - warp_bin_final); t < batch_size; ++t) {
+            int valid = inside;
+            if (batch_end - t > bin_final) {
+                valid = 0;
+            }
+            float alpha;
+            float opac;
+            float2 delta;
+            float3 conic;
+            float vis;
+            float depth;
+            float3 xy_opac;
+            if (valid) {
+                depth = depth_batch[t];
+                conic = conic_batch[t];
+                xy_opac = xy_opacity_batch[t];
+                opac = xy_opac.z;
+                delta = {xy_opac.x - px, xy_opac.y - py};
+                float sigma = 0.5f * (conic.x * delta.x * delta.x +
+                                            conic.z * delta.y * delta.y) +
+                                    conic.y * delta.x * delta.y;
+                vis = __expf(-sigma);
+                alpha = min(0.99f, opac * vis);
+                if (sigma < 0.f || alpha * __expf(-min_medium_attn_pix * depth) < 1.f / 255.f) {
+                    valid = 0;
+                }
+            }
+            if (!warp.any(valid)) {
+                continue;
+            }
+            float3 v_rgb_local = {0.f, 0.f, 0.f};
+            float3 v_conic_local = {0.f, 0.f, 0.f};
+            float2 v_xy_local = {0.f, 0.f};
+            float2 v_xy_abs_local = {0.f, 0.f};
+            float v_z_abs_local = 0.f;
+            float v_opacity_local = 0.f;
+            float3 v_medium_rgb_pix_local = {0.f, 0.f, 0.f};
+            float3 v_medium_bs_pix_local = {0.f, 0.f, 0.f};
+            float3 v_medium_attn_pix_local = {0.f, 0.f, 0.f};
+            float3 v_coeff_local[4] = {
+                {0.f, 0.f, 0.f},
+                {0.f, 0.f, 0.f},
+                {0.f, 0.f, 0.f},
+                {0.f, 0.f, 0.f},
+            };
+            if (valid) {
+                float3 exp_attn;
+                exp_attn.x = __expf(-medium_attn_pix.x * depth);
+                exp_attn.y = __expf(-medium_attn_pix.y * depth);
+                exp_attn.z = __expf(-medium_attn_pix.z * depth);
+                float3 exp_bs;
+                exp_bs.x = __expf(-medium_bs_pix.x * depth);
+                exp_bs.y = __expf(-medium_bs_pix.y * depth);
+                exp_bs.z = __expf(-medium_bs_pix.z * depth);
+
+                buffer_medium.x += T * medium_rgb_pix.x * exp_bs.x;
+                buffer_medium.y += T * medium_rgb_pix.y * exp_bs.y;
+                buffer_medium.z += T * medium_rgb_pix.z * exp_bs.z;
+
+                v_medium_rgb_pix_local.x += v_out_med.x * T * (exp_bs.x - latter_exp_bs.x);
+                v_medium_rgb_pix_local.y += v_out_med.y * T * (exp_bs.y - latter_exp_bs.y);
+                v_medium_rgb_pix_local.z += v_out_med.z * T * (exp_bs.z - latter_exp_bs.z);
+
+                float3 v_exp_bs_local = {v_out_med.x * T * medium_rgb_pix.x, v_out_med.y * T * medium_rgb_pix.y, v_out_med.z * T * medium_rgb_pix.z};
+                v_medium_bs_pix_local.x += v_exp_bs_local.x * (-depth * exp_bs.x + latter_depth * latter_exp_bs.x);
+                v_medium_bs_pix_local.y += v_exp_bs_local.y * (-depth * exp_bs.y + latter_depth * latter_exp_bs.y);
+                v_medium_bs_pix_local.z += v_exp_bs_local.z * (-depth * exp_bs.z + latter_depth * latter_exp_bs.z);
+
+                float ra = 1.f / (1.f - alpha);
+                T *= ra;
+
+                v_z_abs_local += fabsf(v_exp_bs_local.x * medium_bs_pix.x * exp_bs.x * (ra + 1.f));
+                v_z_abs_local += fabsf(v_exp_bs_local.y * medium_bs_pix.y * exp_bs.y * (ra + 1.f));
+                v_z_abs_local += fabsf(v_exp_bs_local.z * medium_bs_pix.z * exp_bs.z * (ra + 1.f));
+
+                int32_t g = id_batch[t];
+                float basis[4];
+                const float2 pixel_delta = {px - xy_opac.x, py - xy_opac.y};
+                igaf_basis_bwd(pixel_delta, igaf_screen_to_uv[g], igaf_frequency, igaf_coordinate_clamp, basis);
+                float3 raw;
+                const float3 rgb = igaf_rgb_and_raw_bwd(
+                    rgbs_batch[t],
+                    igaf_coeffs,
+                    g,
+                    basis,
+                    igaf_gate[g],
+                    igaf_amplitude_max,
+                    raw
+                );
+
+                const float fac = alpha * T;
+                float v_alpha = 0.f;
+                float3 exp_attn_fac = {fac * exp_attn.x, fac * exp_attn.y, fac * exp_attn.z};
+                v_rgb_local = {v_out.x * exp_attn_fac.x, v_out.y * exp_attn_fac.y, v_out.z * exp_attn_fac.z};
+                float3 v_exp_attn_local = {v_rgb_local.x * rgb.x, v_rgb_local.y * rgb.y, v_rgb_local.z * rgb.z};
+
+                const float gate_amp = igaf_gate[g] * igaf_amplitude_max;
+                const float3 sech2 = {
+                    1.f - tanhf(raw.x) * tanhf(raw.x),
+                    1.f - tanhf(raw.y) * tanhf(raw.y),
+                    1.f - tanhf(raw.z) * tanhf(raw.z),
+                };
+                #pragma unroll
+                for (int k = 0; k < 4; ++k) {
+                    v_coeff_local[k].x = v_rgb_local.x * gate_amp * sech2.x * basis[k];
+                    v_coeff_local[k].y = v_rgb_local.y * gate_amp * sech2.y * basis[k];
+                    v_coeff_local[k].z = v_rgb_local.z * gate_amp * sech2.z * basis[k];
+                }
+
+                v_medium_attn_pix_local.x += -v_exp_attn_local.x * depth;
+                v_medium_attn_pix_local.y += -v_exp_attn_local.y * depth;
+                v_medium_attn_pix_local.z += -v_exp_attn_local.z * depth;
+
+                v_z_abs_local += fabsf(v_exp_attn_local.x * medium_attn_pix.x);
+                v_z_abs_local += fabsf(v_exp_attn_local.y * medium_attn_pix.y);
+                v_z_abs_local += fabsf(v_exp_attn_local.z * medium_attn_pix.z);
+
+                v_alpha += (rgb.x * T * exp_attn.x - buffer.x * ra) * v_out.x - buffer_medium.x * ra * v_out_med.x;
+                v_alpha += (rgb.y * T * exp_attn.y - buffer.y * ra) * v_out.y - buffer_medium.y * ra * v_out_med.y;
+                v_alpha += (rgb.z * T * exp_attn.z - buffer.z * ra) * v_out.z - buffer_medium.z * ra * v_out_med.z;
+                v_alpha += T_final * ra * v_out_alpha;
+
+                buffer.x += rgb.x * exp_attn_fac.x;
+                buffer.y += rgb.y * exp_attn_fac.y;
+                buffer.z += rgb.z * exp_attn_fac.z;
+
+                buffer_medium.x += -T * medium_rgb_pix.x * exp_bs.x;
+                buffer_medium.y += -T * medium_rgb_pix.y * exp_bs.y;
+                buffer_medium.z += -T * medium_rgb_pix.z * exp_bs.z;
+
+                latter_depth = depth;
+                latter_exp_bs.x = exp_bs.x;
+                latter_exp_bs.y = exp_bs.y;
+                latter_exp_bs.z = exp_bs.z;
+
+                const float v_sigma = -opac * vis * v_alpha;
+                v_conic_local = {0.5f * v_sigma * delta.x * delta.x,
+                                 v_sigma * delta.x * delta.y,
+                                 0.5f * v_sigma * delta.y * delta.y};
+                v_xy_local = {v_sigma * (conic.x * delta.x + conic.y * delta.y),
+                              v_sigma * (conic.y * delta.x + conic.z * delta.y)};
+                v_xy_abs_local = {fabsf(v_xy_local.x), fabsf(v_xy_local.y)};
+                v_opacity_local = vis * v_alpha;
+            }
+            warpSum3(v_rgb_local, warp);
+            warpSum3(v_conic_local, warp);
+            warpSum2(v_xy_local, warp);
+            warpSum2(v_xy_abs_local, warp);
+            warpSum(v_z_abs_local, warp);
+            warpSum(v_opacity_local, warp);
+            warpSum3(v_medium_rgb_pix_local, warp);
+            warpSum3(v_medium_bs_pix_local, warp);
+            warpSum3(v_medium_attn_pix_local, warp);
+            #pragma unroll
+            for (int k = 0; k < 4; ++k) {
+                warpSum3(v_coeff_local[k], warp);
+            }
+            if (warp.thread_rank() == 0) {
+                int32_t g = id_batch[t];
+                float* v_rgb_ptr = (float*)(v_rgb);
+                atomicAdd(v_rgb_ptr + 3*g + 0, v_rgb_local.x);
+                atomicAdd(v_rgb_ptr + 3*g + 1, v_rgb_local.y);
+                atomicAdd(v_rgb_ptr + 3*g + 2, v_rgb_local.z);
+
+                float* v_igaf_ptr = (float*)(v_igaf_coeffs);
+                #pragma unroll
+                for (int k = 0; k < 4; ++k) {
+                    atomicAdd(v_igaf_ptr + 3*(4*g + k) + 0, v_coeff_local[k].x);
+                    atomicAdd(v_igaf_ptr + 3*(4*g + k) + 1, v_coeff_local[k].y);
+                    atomicAdd(v_igaf_ptr + 3*(4*g + k) + 2, v_coeff_local[k].z);
+                }
+
+                float* v_conic_ptr = (float*)(v_conic);
+                atomicAdd(v_conic_ptr + 3*g + 0, v_conic_local.x);
+                atomicAdd(v_conic_ptr + 3*g + 1, v_conic_local.y);
+                atomicAdd(v_conic_ptr + 3*g + 2, v_conic_local.z);
+
+                float* v_xy_ptr = (float*)(v_xy);
+                atomicAdd(v_xy_ptr + 2*g + 0, v_xy_local.x);
+                atomicAdd(v_xy_ptr + 2*g + 1, v_xy_local.y);
+
+                float* v_xy_abs_ptr = (float*)(xys_grad_abs);
+                atomicAdd(v_xy_abs_ptr + 2*g + 0, v_xy_abs_local.x);
+                atomicAdd(v_xy_abs_ptr + 2*g + 1, v_xy_abs_local.y);
+
+                atomicAdd(v_opacity + g, v_opacity_local);
+
+                float* v_medium_attn_ptr = (float*)(v_medium_attn);
+                atomicAdd(v_medium_attn_ptr + 3*pix_id + 0, v_medium_attn_pix_local.x);
+                atomicAdd(v_medium_attn_ptr + 3*pix_id + 1, v_medium_attn_pix_local.y);
+                atomicAdd(v_medium_attn_ptr + 3*pix_id + 2, v_medium_attn_pix_local.z);
+
+                float* v_medium_rgb_ptr = (float*)(v_medium_rgb);
+                atomicAdd(v_medium_rgb_ptr + 3*pix_id + 0, v_medium_rgb_pix_local.x);
+                atomicAdd(v_medium_rgb_ptr + 3*pix_id + 1, v_medium_rgb_pix_local.y);
+                atomicAdd(v_medium_rgb_ptr + 3*pix_id + 2, v_medium_rgb_pix_local.z);
+
+                float* v_medium_bs_ptr = (float*)(v_medium_bs);
+                atomicAdd(v_medium_bs_ptr + 3*pix_id + 0, v_medium_bs_pix_local.x);
+                atomicAdd(v_medium_bs_ptr + 3*pix_id + 1, v_medium_bs_pix_local.y);
+                atomicAdd(v_medium_bs_ptr + 3*pix_id + 2, v_medium_bs_pix_local.z);
+            }
+        }
+    }
+
+    block.sync();
+
+    if (inside) {
+        float3 v_medium_rgb_pix_local = {0.f, 0.f, 0.f};
+        float3 v_medium_bs_pix_local = {0.f, 0.f, 0.f};
+        float3 exp_bs = {1.f, 1.f, 1.f};
+        T = 1.f;
+
+        v_medium_rgb_pix_local.x += v_out_med.x * T * (exp_bs.x - latter_exp_bs.x);
+        v_medium_rgb_pix_local.y += v_out_med.y * T * (exp_bs.y - latter_exp_bs.y);
+        v_medium_rgb_pix_local.z += v_out_med.z * T * (exp_bs.z - latter_exp_bs.z);
+
+        float3 v_exp_bs_local = {v_out_med.x * T * medium_rgb_pix.x, v_out_med.y * T * medium_rgb_pix.y, v_out_med.z * T * medium_rgb_pix.z};
+        v_medium_bs_pix_local.x += v_exp_bs_local.x * latter_depth * latter_exp_bs.x;
+        v_medium_bs_pix_local.y += v_exp_bs_local.y * latter_depth * latter_exp_bs.y;
+        v_medium_bs_pix_local.z += v_exp_bs_local.z * latter_depth * latter_exp_bs.z;
+
         float* v_medium_rgb_ptr = (float*)(v_medium_rgb);
         atomicAdd(v_medium_rgb_ptr + 3*pix_id + 0, v_medium_rgb_pix_local.x);
         atomicAdd(v_medium_rgb_ptr + 3*pix_id + 1, v_medium_rgb_pix_local.y);

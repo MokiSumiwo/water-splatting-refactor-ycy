@@ -89,6 +89,43 @@ __global__ void rasterize_backward_kernel(
     float3* __restrict__ v_medium_attn
 );
 
+__global__ void rasterize_backward_kernel_igaf(
+    const dim3 tile_bounds,
+    const dim3 img_size,
+    const int32_t* __restrict__ gaussian_ids_sorted,
+    const int2* __restrict__ tile_bins,
+    const float2* __restrict__ xys,
+    float2* __restrict__ xys_grad_abs,
+    const float3* __restrict__ conics,
+    const float3* __restrict__ rgbs,
+    const float3* __restrict__ igaf_coeffs,
+    const float4* __restrict__ igaf_screen_to_uv,
+    const float* __restrict__ igaf_gate,
+    const float igaf_frequency,
+    const float igaf_amplitude_max,
+    const float igaf_coordinate_clamp,
+    const float* __restrict__ opacities,
+    const float3* __restrict__ medium_rgb,
+    const float3* __restrict__ medium_bs,
+    const float3* __restrict__ medium_attn,
+    const float* __restrict__ depths,
+    const float3& __restrict__ background,
+    const float* __restrict__ final_Ts,
+    const int* __restrict__ final_index,
+    const int* __restrict__ first_index,
+    const float3* __restrict__ v_output,
+    const float3* __restrict__ v_out_medium,
+    const float* __restrict__ v_output_alpha,
+    float2* __restrict__ v_xy,
+    float3* __restrict__ v_conic,
+    float3* __restrict__ v_rgb,
+    float3* __restrict__ v_igaf_coeffs,
+    float* __restrict__ v_opacity,
+    float3* __restrict__ v_medium_rgb,
+    float3* __restrict__ v_medium_bs,
+    float3* __restrict__ v_medium_attn
+);
+
 __device__ void project_cov3d_ewa_vjp(
     const float3 &mean3d,
     const float *cov3d,
