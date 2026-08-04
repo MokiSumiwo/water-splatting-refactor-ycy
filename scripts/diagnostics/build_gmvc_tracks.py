@@ -111,12 +111,29 @@ def _track_bank_entries(
     w_depth = torch.exp(-depth_err / max(cfg.depth_error_sigma, cfg.eps)).clamp(0.0, 1.0)
     w_t = ((t_scalar - cfg.transmission_min) / max(1.0 - cfg.transmission_min, cfg.eps)).clamp(0.0, 1.0)
     w_span = min(max(relative_span / max(cfg.span_weight_high, cfg.eps), 0.0), 1.0)
-    weights = torch.where(j_valid, (w_alpha * w_depth * w_t * w_span).float(), torch.zeros_like(t_scalar))
+    if bool(getattr(cfg, "geometry_only_bank", False)):
+        signal = gt.mean(dim=-1)
+        signal_max = gt.max(dim=-1).values
+        softness = max(float(getattr(cfg, "signal_softness", 0.05)), float(cfg.eps))
+        signal_valid = (
+            torch.isfinite(gt).all(dim=-1)
+            & (signal >= float(getattr(cfg, "signal_min", 0.02)))
+            & (signal_max <= float(getattr(cfg, "signal_max", 0.98)))
+        )
+        w_signal_low = ((signal - float(getattr(cfg, "signal_min", 0.02))) / softness).clamp(0.0, 1.0)
+        w_signal_high = ((float(getattr(cfg, "signal_max", 0.98)) - signal_max) / softness).clamp(0.0, 1.0)
+        weights_raw = (w_alpha * w_depth * w_span * w_signal_low * w_signal_high).float()
+        weights = torch.where(signal_valid, weights_raw, torch.zeros_like(t_scalar))
+        j_center_source = gt
+    else:
+        weights_raw = (w_alpha * w_depth * w_t * w_span).float()
+        weights = torch.where(j_valid, weights_raw, torch.zeros_like(t_scalar))
+        j_center_source = j_hat
     valid = weights > 0
     if int(valid.sum().item()) < cfg.min_views:
         return []
     denom = weights.sum().clamp_min(float(cfg.eps))
-    j_center = (j_hat * weights[:, None]).sum(dim=0) / denom
+    j_center = (j_center_source * weights[:, None]).sum(dim=0) / denom
     attn_log_center = (torch.log(medium_attn.clamp_min(cfg.eps)) * weights[:, None]).sum(dim=0) / denom
     bs_log_center = (torch.log(medium_bs.clamp_min(cfg.eps)) * weights[:, None]).sum(dim=0) / denom
     b_inf_center = (b_inf * weights[:, None]).sum(dim=0) / denom
@@ -234,6 +251,10 @@ def build_bank(args: argparse.Namespace) -> Dict[str, Any]:
         samples_per_view=args.samples_per_view,
         seed=args.seed,
         target_neighbor_window=args.target_neighbor_window,
+        geometry_only_bank=args.geometry_only_v2_bank,
+        signal_min=args.signal_min,
+        signal_max=args.signal_max,
+        signal_softness=args.signal_softness,
     )
     views = render_gmvc_views(pipeline, args.split, args.max_images)
     per_camera_lists: Dict[str, Dict[str, List[torch.Tensor]]] = {}
@@ -301,13 +322,23 @@ def build_bank(args: argparse.Namespace) -> Dict[str, Any]:
             alpha = target_obs["alpha"].reshape(-1)
             depth_std = target_obs["depth_std_relative"].reshape(-1)
             t_mean = target_obs["transmission"].mean(dim=-1)
+            gt = target_obs["gt"]
+            signal = gt.mean(dim=-1)
+            signal_max = gt.max(dim=-1).values
+            signal_valid = (
+                torch.isfinite(gt).all(dim=-1)
+                & (signal >= float(cfg.signal_min))
+                & (signal_max <= float(cfg.signal_max))
+            )
+            t_valid = torch.ones_like(t_mean, dtype=torch.bool) if cfg.geometry_only_bank else (t_mean >= cfg.transmission_min)
             final_valid = (
                 torch.isfinite(target_depth)
                 & (target_depth > 0)
                 & (depth_rel_error <= cfg.depth_rel_threshold)
                 & (alpha >= cfg.alpha_threshold)
                 & (depth_std <= cfg.depth_std_rel_threshold)
-                & (t_mean >= cfg.transmission_min)
+                & t_valid
+                & (signal_valid if cfg.geometry_only_bank else torch.ones_like(t_valid))
             )
             for row_idx in torch.nonzero(final_valid, as_tuple=False).reshape(-1).tolist():
                 _append_obs(
@@ -432,6 +463,10 @@ def main() -> None:
     parser.add_argument("--samples-per-view", type=int, default=4096)
     parser.add_argument("--max-observations-per-camera", type=int, default=20000)
     parser.add_argument("--target-neighbor-window", type=int, default=0)
+    parser.add_argument("--geometry-only-v2-bank", action="store_true")
+    parser.add_argument("--signal-min", type=float, default=0.02)
+    parser.add_argument("--signal-max", type=float, default=0.98)
+    parser.add_argument("--signal-softness", type=float, default=0.05)
     parser.add_argument("--track-min-views", type=int, default=3)
     parser.add_argument("--alpha-threshold", type=float, default=0.95)
     parser.add_argument("--depth-rel-threshold", type=float, default=0.02)

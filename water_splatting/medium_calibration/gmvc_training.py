@@ -47,6 +47,18 @@ def _weighted_mean(value: Tensor, weight: Tensor, eps: float) -> Tensor:
     return (value * weight[:, None]).sum() / (weight.sum() * value.shape[-1] + float(eps))
 
 
+def _track_balanced_mean(value: Tensor, weight: Tensor, local_track: Tensor, track_count: int, eps: float) -> Tensor:
+    if value.numel() == 0 or track_count <= 0:
+        return value.new_zeros(())
+    weighted_sum = _scatter_sum(value * weight[:, None], local_track, track_count).sum(dim=-1)
+    weight_sum = _scatter_sum(weight[:, None], local_track, track_count).reshape(-1)
+    valid = weight_sum > 0
+    if not bool(valid.any()):
+        return value.new_zeros(())
+    per_track = weighted_sum[valid] / (weight_sum[valid] * value.shape[-1] + float(eps))
+    return per_track.mean()
+
+
 def _weighted_channel_mean(value: Tensor, weight: Tensor, eps: float) -> Tensor:
     return (value * weight[:, None]).sum(dim=0) / (weight.sum() + float(eps))
 
@@ -128,6 +140,34 @@ def _scatter_sum(value: Tensor, index: Tensor, count: int) -> Tensor:
     return out.scatter_add_(0, expand_index, value)
 
 
+def _track_scalar_min_max(value: Tensor, index: Tensor, valid: Tensor, count: int) -> Tuple[Tensor, Tensor]:
+    mins = value.new_zeros((count,))
+    maxs = value.new_zeros((count,))
+    for track_idx in range(count):
+        rows = torch.nonzero((index == track_idx) & valid, as_tuple=False).reshape(-1)
+        if int(rows.numel()) == 0:
+            continue
+        vals = value[rows].reshape(-1)
+        mins[track_idx] = vals.min()
+        maxs[track_idx] = vals.max()
+    return mins, maxs
+
+
+def _gmvc_v3_object_phase(config: Any, step: int) -> bool:
+    if not bool(getattr(config, "gmvc_v3_enabled", False)):
+        return False
+    start = int(getattr(config, "gmvc_start_step", 10000))
+    stop = int(getattr(config, "gmvc_stop_step", 15000))
+    if step < start or step >= stop:
+        return False
+    medium_steps = max(int(getattr(config, "gmvc_v3_medium_steps", 4)), 0)
+    object_steps = max(int(getattr(config, "gmvc_v3_object_steps", 1)), 0)
+    cycle = medium_steps + object_steps
+    if cycle <= 0 or object_steps <= 0:
+        return False
+    return ((int(step) - start) % cycle) >= medium_steps
+
+
 def _compute_v2_pair_indices(local_track: Tensor, depth: Tensor, weight: Tensor, track_count: int) -> Tuple[Tensor, Tensor]:
     near_indices = []
     far_indices = []
@@ -147,6 +187,7 @@ def _compute_v2_pair_indices(local_track: Tensor, depth: Tensor, weight: Tensor,
 
 def _compute_gmvc_v2_terms(
     *,
+    outputs: Optional[Dict[str, Tensor]] = None,
     gt_img: Tensor,
     bank: Dict[str, Any],
     step: int,
@@ -214,23 +255,161 @@ def _compute_gmvc_v2_terms(
 
     min_obs = max(int(getattr(config, "gmvc_v2_min_observations_per_track", 2)), 2)
     obs_count = _scatter_sum((weight > 0).to(dtype)[:, None], local_track, sampled_track_count).reshape(-1)
-    track_valid = obs_count >= float(min_obs)
+    base_track_valid = obs_count >= float(min_obs)
+    transmission_scalar_for_gate = transmission.detach().mean(dim=-1)
+    valid_rows = weight > 0
+    t_min, t_max = _track_scalar_min_max(
+        transmission_scalar_for_gate,
+        local_track,
+        valid_rows,
+        sampled_track_count,
+    )
+    depth_scalar_for_gate = depth.detach().reshape(-1)
+    d_min, d_max = _track_scalar_min_max(depth_scalar_for_gate, local_track, valid_rows, sampled_track_count)
+    median_depth = _scatter_sum((depth_scalar_for_gate * valid_rows.to(dtype))[:, None], local_track, sampled_track_count).reshape(-1)
+    median_depth = median_depth / obs_count.clamp_min(1.0)
+    initial_profile_weight = torch.where(base_track_valid[local_track], weight, torch.zeros_like(weight))
+    initial_denominator = _scatter_sum(
+        initial_profile_weight[:, None] * transmission.detach().square(),
+        local_track,
+        sampled_track_count,
+    )
+    hessian_scalar = initial_denominator.detach().mean(dim=-1)
+    depth_span_rel = (d_max - d_min) / median_depth.clamp_min(eps)
+    track_valid = (
+        base_track_valid
+        & (hessian_scalar >= float(getattr(config, "gmvc_profile_min_hessian", 0.0)))
+        & ((t_max - t_min) >= float(getattr(config, "gmvc_profile_min_transmission_span", 0.0)))
+        & (depth_span_rel >= float(getattr(config, "gmvc_profile_min_depth_span_rel", 0.0)))
+    )
     profile_weight = torch.where(track_valid[local_track], weight, torch.zeros_like(weight))
+    profile_loss_mode = str(getattr(config, "gmvc_profile_loss_mode", "charbonnier"))
+    profile_track_balanced = bool(getattr(config, "gmvc_profile_track_balanced", False))
+    irls_weight = torch.ones_like(profile_weight)
 
     if profile_weight.sum() > 0:
-        numerator = _scatter_sum(profile_weight[:, None] * transmission * (gt - backscatter), local_track, sampled_track_count)
-        denominator = _scatter_sum(profile_weight[:, None] * transmission.square(), local_track, sampled_track_count)
+        numerator0 = _scatter_sum(
+            profile_weight[:, None] * transmission * (gt - backscatter),
+            local_track,
+            sampled_track_count,
+        )
+        denominator0 = _scatter_sum(
+            profile_weight[:, None] * transmission.square(),
+            local_track,
+            sampled_track_count,
+        )
+        j0 = numerator0 / (denominator0 + eps)
+        if profile_loss_mode == "irls_l2":
+            pred0 = j0.detach()[local_track] * transmission.detach() + backscatter.detach()
+            residual_norm = torch.linalg.norm(pred0 - gt.detach(), dim=-1)
+            delta = max(float(getattr(config, "gmvc_profile_irls_delta", 0.03)), eps)
+            irls_weight = (delta / torch.sqrt(residual_norm.square() + delta * delta)).detach()
+            irls_weight = irls_weight.clamp_max(float(getattr(config, "gmvc_profile_irls_max_weight", 1.0)))
+            solve_weight = profile_weight * irls_weight
+        else:
+            solve_weight = profile_weight
+        numerator = _scatter_sum(solve_weight[:, None] * transmission * (gt - backscatter), local_track, sampled_track_count)
+        denominator = _scatter_sum(solve_weight[:, None] * transmission.square(), local_track, sampled_track_count)
         j_star = numerator / (denominator + eps)
         j_star_for_loss = j_star.detach() if bool(getattr(config, "gmvc_profile_detach_j_star", True)) else j_star
         pred = j_star_for_loss[local_track] * transmission + backscatter
-        profile_loss = _weighted_mean(charbonnier_loss(pred - gt, eps=float(getattr(config, "gmvc_charbonnier_eps", 1e-6))), profile_weight, eps)
+        if profile_loss_mode == "irls_l2":
+            profile_loss_values = 0.5 * (pred - gt).square()
+            loss_weight = solve_weight
+        else:
+            profile_loss_values = charbonnier_loss(
+                pred - gt,
+                eps=float(getattr(config, "gmvc_charbonnier_eps", 1e-6)),
+            )
+            loss_weight = profile_weight
+        if profile_track_balanced:
+            profile_loss = _track_balanced_mean(
+                profile_loss_values,
+                loss_weight,
+                local_track,
+                sampled_track_count,
+                eps,
+            )
+        else:
+            profile_loss = _weighted_mean(profile_loss_values, loss_weight, eps)
         j_obs = (gt.detach() - backscatter.detach()) / (transmission.detach() + eps)
         j_center = j_star.detach()[local_track]
-        j_variance = _weighted_mean((j_obs - j_center).abs(), profile_weight.detach(), eps)
+        j_variance_values = (j_obs - j_center).abs()
+        if profile_track_balanced:
+            j_variance = _track_balanced_mean(
+                j_variance_values,
+                profile_weight.detach(),
+                local_track,
+                sampled_track_count,
+                eps,
+            )
+        else:
+            j_variance = _weighted_mean(j_variance_values, profile_weight.detach(), eps)
     else:
         profile_loss = zero
         j_variance = zero
         j_star = gt_img.new_zeros((sampled_track_count, 3))
+
+    object_phase = _gmvc_v3_object_phase(config, step)
+    object_loss = zero
+    object_valid_observation_fraction = zero
+    object_valid_tracks = zero
+    object_weight_sum = zero
+    object_source_available = zero
+    if object_phase and outputs is not None:
+        camera_key = _camera_key(outputs)
+        intrinsic_source_key = str(getattr(config, "gmvc_v3_object_source", "J_proxy_raw"))
+        intrinsic_source = outputs.get(intrinsic_source_key)
+        if camera_key is not None and intrinsic_source is not None:
+            object_source_available = gt_img.new_tensor(1.0)
+            row_camera = observations["camera_index"][rows_cpu].to(device=device).long()
+            current_camera = int(camera_key)
+            current_mask = row_camera == current_camera
+            object_track_valid = (
+                track_valid
+                & (hessian_scalar >= float(getattr(config, "gmvc_object_min_hessian", 0.0)))
+                & (depth_span_rel >= float(getattr(config, "gmvc_object_min_depth_span_rel", 0.05)))
+            )
+            j_target = j_star.detach()[local_track]
+            j_valid = (
+                torch.isfinite(j_target).all(dim=-1)
+                & (j_target >= float(getattr(config, "gmvc_object_j_clamp_min", -0.1))).all(dim=-1)
+                & (j_target <= float(getattr(config, "gmvc_object_j_clamp_max", 1.1))).all(dim=-1)
+            )
+            object_weight = torch.where(
+                current_mask & object_track_valid[local_track] & j_valid,
+                profile_weight.detach(),
+                torch.zeros_like(profile_weight),
+            )
+            if object_weight.sum() > 0:
+                xy_abs = observations["xy"][rows_cpu].to(device=device, dtype=dtype)
+                intrinsic_sample = _sample_hwc(intrinsic_source, xy_abs)
+                valid_intrinsic = torch.isfinite(intrinsic_sample).all(dim=-1)
+                object_weight = torch.where(valid_intrinsic, object_weight, torch.zeros_like(object_weight))
+                if object_weight.sum() > 0:
+                    object_values = charbonnier_loss(
+                        intrinsic_sample - j_target,
+                        eps=float(getattr(config, "gmvc_charbonnier_eps", 1e-6)),
+                    )
+                    if bool(getattr(config, "gmvc_object_track_balanced", True)):
+                        object_loss = _track_balanced_mean(
+                            object_values,
+                            object_weight,
+                            local_track,
+                            sampled_track_count,
+                            eps,
+                        )
+                    else:
+                        object_loss = _weighted_mean(object_values, object_weight, eps)
+                    object_valid_tracks = (
+                        _scatter_sum((object_weight > 0).to(dtype)[:, None], local_track, sampled_track_count)
+                        .reshape(-1)
+                        .gt(0)
+                        .float()
+                        .sum()
+                    )
+                    object_valid_observation_fraction = (object_weight > 0).float().mean().detach()
+                    object_weight_sum = object_weight.detach().sum()
 
     closure_signal_floor = max(float(getattr(config, "gmvc_closure_signal_floor", 0.03)), eps)
     near_idx, far_idx = _compute_v2_pair_indices(local_track, depth.reshape(-1), weight, sampled_track_count)
@@ -269,6 +448,13 @@ def _compute_gmvc_v2_terms(
         ramp,
         stop,
     )
+    lambda_object = _ramped_weight(float(getattr(config, "lambda_gmvc_object", 0.0)), step, start, ramp, stop)
+    if bool(getattr(config, "gmvc_v3_enabled", False)):
+        if object_phase:
+            lambda_profile = 0.0
+            lambda_symmetric_closure = 0.0
+        else:
+            lambda_object = 0.0
     transmission_scalar = transmission.detach().mean(dim=-1)
     residual_abs = torch.cat(
         [
@@ -281,6 +467,7 @@ def _compute_gmvc_v2_terms(
     losses = {
         "gmvc_profile_loss": profile_loss * lambda_profile,
         "gmvc_symmetric_closure_loss": closure_loss * lambda_symmetric_closure,
+        "gmvc_object_loss": object_loss * lambda_object,
     }
     metrics = {
         "gmvc_v2_available_tracks": gt_img.new_tensor(float(track_count_total)),
@@ -289,11 +476,24 @@ def _compute_gmvc_v2_terms(
         "gmvc_v2_valid_tracks": track_valid.detach().float().sum(),
         "gmvc_v2_valid_observation_fraction": (profile_weight > 0).detach().float().mean(),
         "gmvc_profile_raw": profile_loss.detach(),
+        "gmvc_profile_loss_mode_irls": gt_img.new_tensor(float(profile_loss_mode == "irls_l2")),
+        "gmvc_profile_track_balanced": gt_img.new_tensor(float(profile_track_balanced)),
+        "gmvc_profile_hessian_p50": _safe_quantile(hessian_scalar, 0.50, zero),
+        "gmvc_profile_hessian_p05": _safe_quantile(hessian_scalar, 0.05, zero),
+        "gmvc_profile_transmission_span_p50": _safe_quantile(t_max - t_min, 0.50, zero),
+        "gmvc_profile_depth_span_rel_p50": _safe_quantile(depth_span_rel, 0.50, zero),
+        "gmvc_profile_irls_weight_mean": irls_weight.detach().mean() if irls_weight.numel() else zero.detach(),
         "gmvc_profile_j_variance_l1": j_variance.detach(),
         "gmvc_profile_j_star_mean": j_star.detach().mean() if j_star.numel() else zero.detach(),
         "gmvc_profile_j_star_p05": _safe_quantile(j_star, 0.05, zero),
         "gmvc_profile_j_star_p95": _safe_quantile(j_star, 0.95, zero),
         "gmvc_symmetric_closure_raw": closure_loss.detach(),
+        "gmvc_object_raw": object_loss.detach(),
+        "gmvc_object_source_available": object_source_available.detach(),
+        "gmvc_object_valid_tracks": object_valid_tracks.detach(),
+        "gmvc_object_valid_observation_fraction": object_valid_observation_fraction.detach(),
+        "gmvc_object_weight_sum": object_weight_sum.detach(),
+        "gmvc_v3_object_phase": gt_img.new_tensor(float(object_phase)),
         "gmvc_symmetric_closure_l1": closure_l1.detach(),
         "gmvc_symmetric_closure_norm_l1": closure_norm_l1.detach(),
         "gmvc_symmetric_closure_pairs": gt_img.new_tensor(float(pair_weight.numel())),
@@ -304,6 +504,7 @@ def _compute_gmvc_v2_terms(
         "gmvc_v2_residual_abs_p95": _safe_quantile(residual_abs, 0.95, zero),
         "gmvc_lambda_profile": gt_img.new_tensor(float(lambda_profile)),
         "gmvc_lambda_symmetric_closure": gt_img.new_tensor(float(lambda_symmetric_closure)),
+        "gmvc_lambda_object": gt_img.new_tensor(float(lambda_object)),
     }
     return losses, metrics
 
@@ -311,8 +512,10 @@ def _compute_gmvc_v2_terms(
 def _gmvc_v2_requested(config: Any) -> bool:
     return bool(
         getattr(config, "gmvc_v2_enabled", False)
+        or getattr(config, "gmvc_v3_enabled", False)
         or float(getattr(config, "lambda_gmvc_profile", 0.0)) > 0.0
         or float(getattr(config, "lambda_gmvc_symmetric_closure", 0.0)) > 0.0
+        or float(getattr(config, "lambda_gmvc_object", 0.0)) > 0.0
     )
 
 
@@ -335,6 +538,7 @@ def compute_gmvc_training_terms(
     if camera_key is None:
         if v2_requested:
             return _compute_gmvc_v2_terms(
+                outputs=outputs,
                 gt_img=gt_img,
                 bank=bank,
                 step=step,
@@ -348,6 +552,7 @@ def compute_gmvc_training_terms(
     if entry is None:
         if v2_requested:
             return _compute_gmvc_v2_terms(
+                outputs=outputs,
                 gt_img=gt_img,
                 bank=bank,
                 step=step,
@@ -361,6 +566,7 @@ def compute_gmvc_training_terms(
     if count == 0:
         if v2_requested:
             return _compute_gmvc_v2_terms(
+                outputs=outputs,
                 gt_img=gt_img,
                 bank=bank,
                 step=step,
@@ -386,6 +592,7 @@ def compute_gmvc_training_terms(
     if weight.sum() <= 0:
         if v2_requested:
             return _compute_gmvc_v2_terms(
+                outputs=outputs,
                 gt_img=gt_img,
                 bank=bank,
                 step=step,
@@ -421,6 +628,7 @@ def compute_gmvc_training_terms(
     if weight.sum() <= 0:
         if v2_requested:
             return _compute_gmvc_v2_terms(
+                outputs=outputs,
                 gt_img=gt_img,
                 bank=bank,
                 step=step,
@@ -638,6 +846,7 @@ def compute_gmvc_training_terms(
     }
     if v2_requested:
         v2_losses, v2_metrics = _compute_gmvc_v2_terms(
+            outputs=outputs,
             gt_img=gt_img,
             bank=bank,
             step=step,

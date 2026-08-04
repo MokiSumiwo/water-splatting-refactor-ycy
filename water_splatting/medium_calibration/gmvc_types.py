@@ -27,6 +27,10 @@ class GMVCTrackConfig:
     samples_per_view: int = 4096
     seed: int = 42
     target_neighbor_window: int = 0
+    geometry_only_bank: bool = False
+    signal_min: float = 0.02
+    signal_max: float = 0.98
+    signal_softness: float = 0.05
 
 
 @dataclass

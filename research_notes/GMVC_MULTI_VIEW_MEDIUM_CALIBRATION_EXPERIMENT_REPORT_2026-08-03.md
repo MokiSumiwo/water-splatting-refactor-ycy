@@ -2319,3 +2319,288 @@ fixed closure不恶化超过 5%
 是否确认 V2 已成为成功模块: No
 下一步: 不继续 bounded；若继续 GMVC，应重新设计低扰动 profile schedule 或 medium-only freeze/ramp，再考虑 object-step active DC proxy
 ```
+
+## 23. GMVC-V3 alternating medium-object calibration
+
+日期：2026-08-04
+
+### 23.1 Motivation
+
+V2 结果说明 profiled radiance 有真实解耦信号，但旧实现仍有三个限制：
+
+1. track bank 仍由旧 M1 medium 反演出的 `J`、旧 M1 transmission 和 `j_valid` 筛选，容易只保留旧 M1 已经自洽的轨迹；
+2. 解析 `J*` 用 L2 解，外层却用 Charbonnier，且 `J*` detach，目标函数与梯度不严格匹配；
+3. medium 被校准后，Gaussian `features_dc` 没有用新的在线 `J*` 重新对齐，因此可能出现解耦指标改善但 RGB 下降。
+
+V3 因此实现三项修改：
+
+```text
+geometry-only V2/V3 track bank
+robust IRLS profiled medium objective + track-balanced averaging
+4 medium steps : 1 object DC-only calibration step
+```
+
+### 23.2 Code changes
+
+Changed files:
+
+```text
+water_splatting/medium_calibration/gmvc_types.py
+water_splatting/medium_calibration/gmvc_tracks.py
+scripts/diagnostics/build_gmvc_tracks.py
+water_splatting/medium_calibration/gmvc_training.py
+water_splatting/water_splatting.py
+scripts/experiments/backscatter_consistent_binf_iui3_redsea.sh
+scripts/experiments/gmvc_phase_b_common.sh
+scripts/experiments/gmvc_v3_alternating_1000.sh
+```
+
+New/default-off model flags:
+
+```text
+gmvc_profile_loss_mode: charbonnier | irls_l2
+gmvc_profile_track_balanced
+gmvc_profile_irls_delta
+gmvc_profile_irls_max_weight
+gmvc_profile_min_hessian
+gmvc_profile_min_transmission_span
+gmvc_profile_min_depth_span_rel
+gmvc_v3_enabled
+lambda_gmvc_object
+gmvc_v3_medium_steps
+gmvc_v3_object_steps
+gmvc_v3_object_source
+gmvc_object_track_balanced
+gmvc_object_j_clamp_min / max
+gmvc_object_min_hessian
+gmvc_object_min_depth_span_rel
+```
+
+Track-bank flags:
+
+```text
+--geometry-only-v2-bank
+--signal-min
+--signal-max
+--signal-softness
+```
+
+V3 routing:
+
+```text
+medium phase: profile / symmetric closure -> medium MLP only through normal optimizer ownership
+object phase: online detached J* -> J_proxy_raw, intended to update features_dc
+bounded S3/S4/S5 path remains disabled
+```
+
+The 1000-step wrapper now defaults to calibrated V3 scales:
+
+```text
+Curasao profile default = 40
+Panama profile default = 80
+GMVC_GRAD_LOG_EVERY = 49
+```
+
+`49` avoids phase-locking the gradient diagnostic to the 4+1 alternating cycle boundary.
+
+### 23.3 Smoke tests
+
+Static checks:
+
+```bash
+/opt/anaconda3/envs/water_splatting/bin/python -m py_compile \
+  water_splatting/medium_calibration/gmvc_training.py \
+  water_splatting/medium_calibration/gmvc_types.py \
+  water_splatting/medium_calibration/gmvc_tracks.py \
+  scripts/diagnostics/build_gmvc_tracks.py \
+  water_splatting/water_splatting.py
+
+bash -n scripts/experiments/gmvc_phase_b_common.sh
+bash -n scripts/experiments/backscatter_consistent_binf_iui3_redsea.sh
+bash -n scripts/experiments/gmvc_v3_alternating_1000.sh
+git diff --check
+```
+
+Geometry-only bank smoke:
+
+```text
+scene: Curasao
+max train images: 4
+samples/view: 128
+accepted tracks: 270
+accepted observations: 1021
+output: renders/gmvc_v3_smoke_bank/curasao/gmvc_track_bank.pt
+```
+
+Alternating object smoke:
+
+```text
+run: Curasao A2, 5 steps
+grad log: logs/gmvc_v3_grad_a2_alternating_object_curasao_20260804_gmvc_v3_a2_grad_smoke5.jsonl
+object phase step: 10004
+object_to_rgb_dc_grad_ratio: 0.00126 during early ramp
+object geometry grad: 0
+object opacity grad: 0
+object medium grad: 0
+```
+
+Profile scale smoke:
+
+```text
+Curasao profile=50, full ramp smoke:
+profile/RGB-medium grad ratio: 0.0114-0.0125 on active steps
+
+Curasao profile=100, 1000-step:
+profile/RGB-medium grad mean: 0.0254-0.0268
+result: strong decoupling but RGB unsafe
+```
+
+### 23.4 Track banks
+
+| Scene | Bank | Tracks | Observations | Train views | Per-camera cap |
+|---|---|---:|---:|---:|---:|
+| Curasao | `renders/gmvc_v3_geometry_track_banks/curasao_m1_step10000_train_s4096/gmvc_track_bank.pt` | 64,810 | 760,864 | 18 | 20,000 |
+| Panama | `renders/gmvc_v3_geometry_track_banks/panama_m1_step10000_train_s4096/gmvc_track_bank.pt` | 49,216 | 422,324 | 15 | 20,000 |
+
+Both banks are geometry-only and do not use old M1 `J`, old M1 transmission gating, or old `j_valid` filtering.
+
+### 23.5 Commands
+
+Curasao tuned runs:
+
+```bash
+SCENE=curasao VARIANT=A1 LAMBDA_GMVC_PROFILE=40 STAMP=20260804_gmvc_v3_curasao_profile40_1000 bash scripts/experiments/gmvc_v3_alternating_1000.sh
+SCENE=curasao VARIANT=A2 LAMBDA_GMVC_PROFILE=40 STAMP=20260804_gmvc_v3_curasao_profile40_1000 bash scripts/experiments/gmvc_v3_alternating_1000.sh
+SCENE=curasao VARIANT=A3 LAMBDA_GMVC_PROFILE=40 STAMP=20260804_gmvc_v3_curasao_profile40_1000 bash scripts/experiments/gmvc_v3_alternating_1000.sh
+```
+
+Panama runs:
+
+```bash
+SCENE=panama VARIANT=A0 STAMP=20260804_gmvc_v3_panama_profile80_1000 bash scripts/experiments/gmvc_v3_alternating_1000.sh
+SCENE=panama VARIANT=A1 STAMP=20260804_gmvc_v3_panama_profile80_1000 bash scripts/experiments/gmvc_v3_alternating_1000.sh
+SCENE=panama VARIANT=A2 STAMP=20260804_gmvc_v3_panama_profile80_1000 bash scripts/experiments/gmvc_v3_alternating_1000.sh
+SCENE=panama VARIANT=A3 STAMP=20260804_gmvc_v3_panama_profile80_1000 bash scripts/experiments/gmvc_v3_alternating_1000.sh
+```
+
+Panama higher-profile follow-up:
+
+```bash
+SCENE=panama VARIANT=A1 LAMBDA_GMVC_PROFILE=120 STAMP=20260804_gmvc_v3_panama_profile120_1000 bash scripts/experiments/gmvc_v3_alternating_1000.sh
+SCENE=panama VARIANT=A2 LAMBDA_GMVC_PROFILE=120 STAMP=20260804_gmvc_v3_panama_profile120_1000 bash scripts/experiments/gmvc_v3_alternating_1000.sh
+SCENE=panama VARIANT=A3 LAMBDA_GMVC_PROFILE=120 STAMP=20260804_gmvc_v3_panama_profile120_1000 bash scripts/experiments/gmvc_v3_alternating_1000.sh
+```
+
+Checkpoint diagnostics:
+
+```bash
+/opt/anaconda3/envs/water_splatting/bin/python scripts/diagnostics/diagnose_gmvc_checkpoint_tracks.py \
+  --load-config <RUN_CONFIG> \
+  --split train \
+  --samples-per-view 4096 \
+  --max-tracks 30000 \
+  --output-dir renders/gmvc_v3_checkpoint_diag_20260804_<scene>/<variant>
+```
+
+### 23.6 Curasao 1000-step results
+
+Baseline: A0 M1 continuation at step 11000.
+
+| Run | Profile | Closure | Object | ΔPSNR | ΔSSIM | ΔLPIPS | Transfer Δ | Object-J var Δ | Fixed closure Δ | Consensus recon Δ | Gate |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| A1 profile | 40 | 0 | 0 | -0.1733 | -0.000862 | +0.000488 | -1.36% | -7.61% | -2.02% | -1.37% | image fail |
+| A2 alternating object | 40 | 0 | 0.004 | -0.1330 | -0.000696 | +0.000341 | -1.20% | -5.03% | -0.93% | -1.27% | partial pass |
+| A3 object + closure | 40 | 0.005 | 0.004 | -0.1299 | -0.000638 | +0.000283 | -1.36% | -7.77% | -1.95% | -1.55% | partial pass |
+| A1 profile | 100 | 0 | 0 | -0.4929 | -0.001850 | +0.001044 | -4.65% | -15.71% | -3.79% | -4.46% | image fail |
+| A2 alternating object | 100 | 0 | 0.004 | -0.4061 | -0.001559 | +0.000858 | -4.45% | -16.74% | -2.63% | -4.41% | image fail |
+| A3 object + closure | 100 | 0.005 | 0.004 | -0.4024 | -0.001522 | +0.000867 | -3.99% | -15.03% | -2.57% | -3.87% | image fail |
+
+Interpretation:
+
+```text
+profile=100 proves the geometry-only IRLS profile objective can strongly reduce Curasao transfer and object-J variance,
+but RGB degradation is too large.
+
+profile=40 is the best current Curasao candidate:
+it stays inside PSNR and LPIPS safety limits for A2/A3 and gives consistent but sub-gate decoupling gains.
+```
+
+### 23.7 Panama 1000-step results
+
+Baseline: A0 M1 continuation at step 11000.
+
+| Run | Profile | Closure | Object | ΔPSNR | ΔSSIM | ΔLPIPS | Transfer Δ | Object-J var Δ | Fixed closure Δ | Consensus recon Δ | Gate |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| A1 profile | 80 | 0 | 0 | -0.0243 | -0.000065 | -0.000163 | +1.98% | +0.98% | -2.10% | +1.54% | image pass, decoupling fail |
+| A2 alternating object | 80 | 0 | 0.006 | -0.0087 | -0.000033 | -0.000141 | -0.36% | +0.07% | -2.25% | -0.40% | image pass, decoupling fail |
+| A3 object + closure | 80 | 0.0075 | 0.006 | -0.0106 | -0.000004 | -0.000117 | +0.72% | +3.99% | -2.96% | +0.04% | image pass, decoupling fail |
+| A1 profile | 120 | 0 | 0 | -0.0087 | -0.000046 | -0.000090 | +1.60% | +2.87% | -2.09% | +0.85% | image pass, decoupling fail |
+| A2 alternating object | 120 | 0 | 0.006 | -0.0601 | -0.000204 | +0.001073 | +0.88% | +3.17% | -0.89% | +0.81% | image pass, decoupling fail |
+| A3 object + closure | 120 | 0.0075 | 0.006 | -0.0710 | -0.000180 | +0.000968 | +0.44% | +5.57% | -1.32% | +0.68% | image pass, decoupling fail |
+
+Panama gradient diagnostics:
+
+| Profile | Run | profile/RGB-medium mean | closure/RGB-medium mean | object/RGB-DC mean | Object route |
+|---:|---|---:|---:|---:|---|
+| 80 | A1 | 0.0359 | 0.0000 | 0.0000 | n/a |
+| 80 | A2 | 0.0294 | 0.0000 | 0.0067 | DC only; geometry/opacity/medium zero |
+| 80 | A3 | 0.0340 | 0.0078 | 0.0067 | DC only; geometry/opacity/medium zero |
+| 120 | A1 | 0.0418 | 0.0000 | 0.0000 | n/a |
+| 120 | A2 | 0.0415 | 0.0000 | 0.0066 | DC only; geometry/opacity/medium zero |
+| 120 | A3 | 0.0398 | 0.0062 | 0.0067 | DC only; geometry/opacity/medium zero |
+
+Interpretation:
+
+```text
+Panama V3 is RGB-safe and object-gradient routing works,
+but profile80/profile120 no longer reproduce the V2 Panama S2 transfer/J-var improvement.
+The strongest consistent Panama signal is only closure-floor reduction.
+```
+
+### 23.8 Gate decision
+
+V3 final gate:
+
+```text
+transfer下降 >= 5%
+J-var下降 >= 10%
+PSNR下降 <= 0.15 dB
+LPIPS增加 <= 0.003
+raw/fixed closure不恶化
+```
+
+Gate outcome:
+
+| Scene | Best safe run | Image safety | Transfer | J-var | Closure | Decision |
+|---|---|---|---:|---:|---:|---|
+| Curasao | A3 profile40 | pass | -1.36% | -7.77% | -1.95% | partial success, below full gate |
+| Panama | A2 profile80 | pass | -0.36% | +0.07% | -2.25% | fail decoupling gate |
+| Panama | A1 profile120 | pass | +1.60% | +2.87% | -2.09% | fail decoupling gate |
+
+Current decision:
+
+```text
+进入 15k: No
+进入 JapaneseGradens/IUI3: No
+继续 bounded path: No
+最佳 Curasao V3 candidate: A3 profile40
+最佳 Panama V3 candidate: none; A2 profile80 is image-safe but not a decoupling win
+```
+
+### 23.9 Conclusion
+
+GMVC-V3 should be recorded as a partial but insufficient success:
+
+1. Geometry-only banks and robust IRLS profile remove the old M1 filtering bias and can produce stronger Curasao decoupling than low-weight V2.
+2. Alternating object calibration is correctly routed: object loss reaches `features_dc` and does not update geometry, opacity, or medium in object phase.
+3. Object calibration helps recover RGB on Curasao: at profile40, A2/A3 recover about `0.040-0.043 dB` versus A1 and bring PSNR back inside the safety gate.
+4. The full V3 gate is not met. Curasao is still below `5%/10%` transfer/J-var improvement, and Panama does not show consistent transfer/J-var improvement at profile80 or profile120.
+5. V3 should not proceed to 15k or pressure scenes yet. If GMVC continues, the next change should target why geometry-only IRLS profile loses the V2 Panama transfer/J-var signal, not simply increase `lambda_gmvc_profile`.
+
+Recommended next experiment, if continuing GMVC:
+
+```text
+Compare V2 filtered bank vs V3 geometry-only bank under the same IRLS profile objective,
+and separately compare Charbonnier profile vs IRLS-L2 on the same bank.
+This isolates whether Panama regression comes from bank construction or objective scaling.
+```

@@ -156,12 +156,25 @@ def _valid_source_mask(view: GMVCView, cfg: GMVCTrackConfig) -> torch.Tensor:
         & (yy < h - cfg.edge_margin)
     )
     t_mean = view.transmission.mean(dim=-1, keepdim=True)
+    if bool(getattr(cfg, "geometry_only_bank", False)):
+        gt = view.gt
+        signal = gt.mean(dim=-1, keepdim=True)
+        signal_valid = (
+            torch.isfinite(gt).all(dim=-1, keepdim=True)
+            & (signal >= float(getattr(cfg, "signal_min", 0.02)))
+            & (gt.max(dim=-1, keepdim=True).values <= float(getattr(cfg, "signal_max", 0.98)))
+        )
+        t_valid = torch.ones_like(t_mean, dtype=torch.bool)
+    else:
+        signal_valid = torch.ones_like(t_mean, dtype=torch.bool)
+        t_valid = t_mean >= cfg.transmission_min
     valid = (
         torch.isfinite(view.depth)
         & (view.depth > 0)
         & (view.accumulation >= cfg.alpha_threshold)
         & (view.depth_std_relative <= cfg.depth_std_rel_threshold)
-        & (t_mean >= cfg.transmission_min)
+        & t_valid
+        & signal_valid
         & edge[..., None]
     )
     return valid[..., 0]

@@ -318,6 +318,40 @@ class WaterSplattingModelConfig(ModelConfig):
     """Weight for weak GMVC-V2 symmetric current-medium closure."""
     gmvc_profile_detach_j_star: bool = True
     """Detach analytic per-track J* inside the GMVC-V2 profiled-radiance loss."""
+    gmvc_profile_loss_mode: Literal["charbonnier", "irls_l2"] = "charbonnier"
+    """Profile objective form. irls_l2 aligns the analytic J* solve and the outer profile loss."""
+    gmvc_profile_track_balanced: bool = False
+    """Average profiled-radiance loss per track before averaging across tracks."""
+    gmvc_profile_irls_delta: float = 0.03
+    """Robust residual scale for GMVC IRLS profile."""
+    gmvc_profile_irls_max_weight: float = 1.0
+    """Maximum normalized IRLS observation weight."""
+    gmvc_profile_min_hessian: float = 0.0
+    """Minimum per-track current-medium profile Hessian for GMVC profile loss."""
+    gmvc_profile_min_transmission_span: float = 0.0
+    """Minimum per-track current-medium transmission span for GMVC profile loss."""
+    gmvc_profile_min_depth_span_rel: float = 0.0
+    """Minimum relative depth span for GMVC profile loss."""
+    gmvc_v3_enabled: bool = False
+    """Enable GMVC-V3 alternating medium/object calibration."""
+    lambda_gmvc_object: float = 0.0
+    """Weight for online DC-only object calibration against profiled J*."""
+    gmvc_v3_medium_steps: int = 4
+    """Number of medium calibration steps in each GMVC-V3 alternation cycle."""
+    gmvc_v3_object_steps: int = 1
+    """Number of object DC calibration steps in each GMVC-V3 alternation cycle."""
+    gmvc_v3_object_source: Literal["J_proxy_raw"] = "J_proxy_raw"
+    """Rendered clear proxy used for GMVC-V3 object calibration."""
+    gmvc_object_track_balanced: bool = True
+    """Average GMVC-V3 object loss per track before averaging across tracks."""
+    gmvc_object_j_clamp_min: float = -0.1
+    """Minimum profiled J* value accepted as a GMVC-V3 object target."""
+    gmvc_object_j_clamp_max: float = 1.1
+    """Maximum profiled J* value accepted as a GMVC-V3 object target."""
+    gmvc_object_min_hessian: float = 0.0
+    """Minimum per-track profile Hessian for GMVC-V3 object targets."""
+    gmvc_object_min_depth_span_rel: float = 0.05
+    """Minimum relative depth span for GMVC-V3 object targets."""
     gmvc_v2_max_tracks_per_step: int = 512
     """Maximum full tracks sampled per step for GMVC-V2."""
     gmvc_v2_min_observations_per_track: int = 2
@@ -1405,12 +1439,17 @@ class WaterSplattingModel(Model):
             getattr(self.config, "gmvc_enabled", False)
             or getattr(self.config, "gmvc_diagnostic_only", False)
             or getattr(self.config, "gmvc_v2_enabled", False)
+            or getattr(self.config, "gmvc_v3_enabled", False)
+            or float(getattr(self.config, "lambda_gmvc_object", 0.0)) > 0.0
         )
 
     def _gmvc_intrinsic_active(self) -> bool:
         if not (self.training and self._gmvc_requested()):
             return False
-        weight = float(getattr(self.config, "lambda_gmvc_intrinsic", 0.0))
+        weight = max(
+            float(getattr(self.config, "lambda_gmvc_intrinsic", 0.0)),
+            float(getattr(self.config, "lambda_gmvc_object", 0.0)),
+        )
         if weight <= 0.0:
             return False
         start = int(getattr(self.config, "gmvc_start_step", 10000))
@@ -1418,7 +1457,13 @@ class WaterSplattingModel(Model):
         return start <= int(self.step) < stop
 
     def _gmvc_intrinsic_uses_proxy(self) -> bool:
-        return str(getattr(self.config, "gmvc_intrinsic_source", "J_proxy_raw")) == "J_proxy_raw"
+        return bool(
+            str(getattr(self.config, "gmvc_intrinsic_source", "J_proxy_raw")) == "J_proxy_raw"
+            or (
+                float(getattr(self.config, "lambda_gmvc_object", 0.0)) > 0.0
+                and str(getattr(self.config, "gmvc_v3_object_source", "J_proxy_raw")) == "J_proxy_raw"
+            )
+        )
 
     @staticmethod
     def _grad_norm(grads: Tuple[Optional[torch.Tensor], ...]) -> float:
@@ -1445,7 +1490,8 @@ class WaterSplattingModel(Model):
         closure_loss = loss_dict.get("gmvc_fixed_closure_loss")
         profile_loss = loss_dict.get("gmvc_profile_loss")
         symmetric_closure_loss = loss_dict.get("gmvc_symmetric_closure_loss")
-        gmvc_losses = [intrinsic_loss, residual_loss, closure_loss, profile_loss, symmetric_closure_loss]
+        object_loss = loss_dict.get("gmvc_object_loss")
+        gmvc_losses = [intrinsic_loss, residual_loss, closure_loss, profile_loss, symmetric_closure_loss, object_loss]
         if not any(loss is not None and bool(getattr(loss, "requires_grad", False)) for loss in gmvc_losses):
             return
 
@@ -1496,6 +1542,10 @@ class WaterSplattingModel(Model):
         intrinsic_geom = _safe_grad(intrinsic_loss, geom_params)
         intrinsic_opacity = _safe_grad(intrinsic_loss, opacity_params)
         intrinsic_medium = _safe_grad(intrinsic_loss, medium_params)
+        object_dc = _safe_grad(object_loss, dc_params)
+        object_geom = _safe_grad(object_loss, geom_params)
+        object_opacity = _safe_grad(object_loss, opacity_params)
+        object_medium = _safe_grad(object_loss, medium_params)
         residual_medium = _safe_grad(residual_loss, medium_params)
         closure_medium = _safe_grad(closure_loss, medium_params)
         profile_medium = _safe_grad(profile_loss, medium_params)
@@ -1508,8 +1558,10 @@ class WaterSplattingModel(Model):
             self.xys_grad_abs_proxy = xys_grad_abs_proxy_before
 
         intrinsic_dc_norm = self._grad_norm(intrinsic_dc)
+        object_dc_norm = self._grad_norm(object_dc)
         rgb_dc_norm = self._grad_norm(rgb_dc)
         intrinsic_medium_norm = self._grad_norm(intrinsic_medium)
+        object_medium_norm = self._grad_norm(object_medium)
         residual_medium_norm = self._grad_norm(residual_medium)
         closure_medium_norm = self._grad_norm(closure_medium)
         profile_medium_norm = self._grad_norm(profile_medium)
@@ -1611,24 +1663,50 @@ class WaterSplattingModel(Model):
                     else 0.0
                 )
             ),
+            "gmvc_object_raw": float(
+                metrics_dict.get(
+                    "gmvc_object_raw",
+                    object_loss.detach()
+                    if object_loss is not None
+                    else torch.zeros((), device=self.device),
+                )
+                .detach()
+                .float()
+                .item()
+                if metrics_dict is not None
+                else (
+                    object_loss.detach().float().item()
+                    if object_loss is not None
+                    else 0.0
+                )
+            ),
             "gmvc_profile_weighted": float(
                 profile_loss.detach().float().item() if profile_loss is not None else 0.0
             ),
             "gmvc_symmetric_closure_weighted": float(
                 symmetric_closure_loss.detach().float().item() if symmetric_closure_loss is not None else 0.0
             ),
+            "gmvc_object_weighted": float(
+                object_loss.detach().float().item() if object_loss is not None else 0.0
+            ),
             "gmvc_intrinsic_grad_norm_dc": intrinsic_dc_norm,
+            "gmvc_object_grad_norm_dc": object_dc_norm,
             "rgb_grad_norm_dc": rgb_dc_norm,
             "intrinsic_to_rgb_dc_grad_ratio": intrinsic_dc_norm / (rgb_dc_norm + 1e-12),
+            "object_to_rgb_dc_grad_ratio": object_dc_norm / (rgb_dc_norm + 1e-12),
             "gmvc_intrinsic_grad_norm_geometry": self._grad_norm(intrinsic_geom),
+            "gmvc_object_grad_norm_geometry": self._grad_norm(object_geom),
             "gmvc_intrinsic_grad_norm_opacity": self._grad_norm(intrinsic_opacity),
+            "gmvc_object_grad_norm_opacity": self._grad_norm(object_opacity),
             "gmvc_intrinsic_grad_norm_medium": intrinsic_medium_norm,
+            "gmvc_object_grad_norm_medium": object_medium_norm,
             "gmvc_residual_grad_norm_medium": residual_medium_norm,
             "gmvc_closure_grad_norm_medium": closure_medium_norm,
             "gmvc_profile_grad_norm_medium": profile_medium_norm,
             "gmvc_symmetric_closure_grad_norm_medium": symmetric_closure_medium_norm,
             "rgb_grad_norm_medium": rgb_medium_norm,
             "gmvc_intrinsic_to_rgb_medium_grad_ratio": intrinsic_medium_norm / (rgb_medium_norm + 1e-12),
+            "gmvc_object_to_rgb_medium_grad_ratio": object_medium_norm / (rgb_medium_norm + 1e-12),
             "gmvc_residual_to_rgb_medium_grad_ratio": residual_medium_norm / (rgb_medium_norm + 1e-12),
             "gmvc_closure_to_rgb_medium_grad_ratio": closure_medium_norm / (rgb_medium_norm + 1e-12),
             "gmvc_profile_to_rgb_medium_grad_ratio": profile_medium_norm / (rgb_medium_norm + 1e-12),
