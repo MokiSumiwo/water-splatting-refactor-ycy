@@ -3188,3 +3188,140 @@ Mechanism conclusion: the bottleneck is partly timing/target instability, not on
 Next minimal experiment, if continuing GMVC-V3: object-lambda sweep around R500, not more gradient-scale tuning.
 Suggested matrix: R500-L002, R500-L003, R500-L004 current, R500-L006, same fixed Eval-F/G and RGB eval.
 ```
+
+## 27. R500 object-lambda sweep
+
+This section follows the R500 ramp result with the smallest object-loss strength test. It keeps the successful R500 timing and freezes the object-phase RGB medium path exactly as before. The only intended training change is `lambda_gmvc_object`.
+
+Implementation note:
+
+```text
+water_splatting/water_splatting.py
+- GMVC gradient JSONL now also records:
+  gmvc_profile_j_star_mean
+  gmvc_profile_j_star_p05
+  gmvc_profile_j_star_p95
+
+scripts/experiments/gmvc_v3_curasao_r500_object_lambda_sweep_1000.sh
+- New wrapper for O004/O003/O002.
+- It reuses the R500 G000 ramp wrapper and only changes LAMBDA_GMVC_OBJECT.
+```
+
+Experiment setup:
+
+```text
+scene=curasao
+start=M1 step 10000
+target step=11000
+seed=42
+medium_context_mode=dir_xy_camera
+b_inf_mode=tied
+lambda_gmvc_profile=40
+gmvc_ramp_steps=500
+gmvc_v3_object_phase_medium_grad_scale=0.00
+gmvc_v3_target_current_camera_tracks=True
+gmvc_grad_log_every=49
+fixed Eval-F bank=renders/gmvc_v2_track_banks/curasao_m1_step10000_train_s4096/gmvc_track_bank.pt
+fixed Eval-G bank=renders/gmvc_v3_geometry_track_banks/curasao_m1_step10000_train_s4096/gmvc_track_bank.pt
+```
+
+Runs:
+
+| Run | Object lambda |
+|---|---:|
+| O004 | 0.004 |
+| O003 | 0.003 |
+| O002 | 0.002 |
+
+Commands:
+
+```text
+CUDA_VISIBLE_DEVICES=7 VARIANT=O004 GPU=7 STAMP=20260804_gmvc_v3_curasao_r500_object_lambda_sweep_1000_jstar_log49 GMVC_GRAD_LOG_EVERY=49 RUN_EVAL=1 scripts/experiments/gmvc_v3_curasao_r500_object_lambda_sweep_1000.sh
+CUDA_VISIBLE_DEVICES=8 VARIANT=O003 GPU=8 STAMP=20260804_gmvc_v3_curasao_r500_object_lambda_sweep_1000_jstar_log49 GMVC_GRAD_LOG_EVERY=49 RUN_EVAL=1 scripts/experiments/gmvc_v3_curasao_r500_object_lambda_sweep_1000.sh
+CUDA_VISIBLE_DEVICES=9 VARIANT=O002 GPU=9 STAMP=20260804_gmvc_v3_curasao_r500_object_lambda_sweep_1000_jstar_log49 GMVC_GRAD_LOG_EVERY=49 RUN_EVAL=1 scripts/experiments/gmvc_v3_curasao_r500_object_lambda_sweep_1000.sh
+```
+
+Summary JSON:
+
+```text
+renders/gmvc_fixed_bank_diag_20260804/curasao_r500_object_lambda_jstar_log49/summary.json
+```
+
+RGB metrics:
+
+| Run | Object lambda | PSNR | dPSNR vs A0 | dPSNR vs O004 | SSIM | dSSIM vs A0 | LPIPS | dLPIPS vs A0 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| A0 | n/a | 32.9690 | +0.0000 | +0.1076 | 0.957966 | +0.000000 | 0.106611 | +0.000000 |
+| O004 | 0.004 | 32.8614 | -0.1076 | +0.0000 | 0.957483 | -0.000482 | 0.106860 | +0.000248 |
+| O003 | 0.003 | 32.8630 | -0.1061 | +0.0016 | 0.957490 | -0.000476 | 0.106853 | +0.000242 |
+| O002 | 0.002 | 32.8587 | -0.1103 | -0.0027 | 0.957471 | -0.000495 | 0.106789 | +0.000178 |
+
+Fixed-bank metrics, percent change versus A0:
+
+Eval-F:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| O004 | -1.69% | -5.87% | -1.06% | -2.33% | -2.70% | -1.34% |
+| O003 | -1.70% | -5.95% | -1.04% | -2.43% | -2.67% | -1.38% |
+| O002 | -1.70% | -5.91% | -1.05% | -2.39% | -2.68% | -1.37% |
+
+Eval-G:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| O004 | -1.72% | -6.93% | -0.74% | -3.26% | -2.66% | -1.24% |
+| O003 | -1.73% | -7.05% | -0.70% | -3.30% | -2.80% | -1.27% |
+| O002 | -1.72% | -6.98% | -0.72% | -3.19% | -2.75% | -1.22% |
+
+Fixed-bank metrics, percent change versus O004:
+
+Eval-F:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| O003 | -0.00% | -0.09% | +0.02% | -0.10% | +0.04% | -0.05% |
+| O002 | -0.01% | -0.04% | +0.01% | -0.07% | +0.03% | -0.04% |
+
+Eval-G:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| O003 | -0.00% | -0.14% | +0.03% | -0.05% | -0.14% | -0.04% |
+| O002 | -0.00% | -0.06% | +0.01% | +0.07% | -0.09% | +0.01% |
+
+Mechanism diagnostics:
+
+| Run | Rows | Object rows | Object RGB medium grad | Object aux DC grad | Object/RGB DC ratio mean | Object/RGB DC ratio max | Drift early | Drift middle | Drift late | Last J* mean | Last J* p05 | Last J* p95 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| O004 | 20 | 4 | 0.000000 | 0.000009425 | 0.014129 | 0.019907 | 0.021896 | 0.022126 | 0.020860 | 0.485173 | 0.048079 | 1.585536 |
+| O003 | 20 | 4 | 0.000000 | 0.000007065 | 0.010599 | 0.014975 | 0.021910 | 0.022228 | 0.020911 | 0.484760 | 0.048016 | 1.581720 |
+| O002 | 20 | 4 | 0.000000 | 0.000004709 | 0.007055 | 0.009968 | 0.021886 | 0.022193 | 0.020879 | 0.484952 | 0.048004 | 1.584424 |
+
+Interpretation:
+
+```text
+The object lambda implementation behaves correctly:
+- object-phase RGB medium gradient stays exactly 0.0;
+- object auxiliary DC gradient and object/RGB-DC ratio decrease roughly proportionally with lambda;
+- valid object track coverage is stable across runs.
+
+The experiment does not find a meaningful object-lambda Pareto improvement.
+O003 is numerically the best PSNR point, but the gain over O004 is only +0.0016 dB, far below the +0.01 dB local gate.
+O002 improves LPIPS slightly but loses PSNR and SSIM.
+Fixed-bank metrics are effectively flat across O004/O003/O002, with all relative changes versus O004 within about 0.15%.
+J* drift and J* distribution are also effectively unchanged.
+
+Lowering object lambda therefore does not explain the remaining RGB cost under R500.
+The remaining difference from A0 is more likely tied to profile medium calibration or to the shared profile/object target construction than to object auxiliary strength.
+```
+
+Updated decision:
+
+```text
+进入 15k: No.
+扩展场景: No.
+Best candidate remains R500/O004 or O003-equivalent; O003 is not a statistically meaningful upgrade.
+Do not continue lowering object lambda.
+Next single-factor experiment, if continuing GMVC-V3: reduce profile lambda from 40 to 35/30 under the same R500/O004 setup, because object-lambda strength is not the active bottleneck.
+```
