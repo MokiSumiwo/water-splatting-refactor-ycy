@@ -3055,3 +3055,136 @@ Best image-safe candidate: G050
 Best decoupling candidate: G000/C3, but PSNR unsafe
 Next single-factor experiment, if continuing GMVC-V3: adjust ramp or object lambda rather than fine-grained medium gradient scale.
 ```
+
+## 26. G000 ramp sweep with optimizer-level medium detachment
+
+The gradient-scale sweep above left one unresolved question: G000/C3 gave the strongest decoupling direction, but its PSNR drop was just outside the safety line. This section tests the smallest timing change: keep object-phase medium RGB gradient scale at 0.00, keep all Curasao V3 settings fixed, and sweep only `gmvc_ramp_steps`.
+
+Implementation changes:
+
+```text
+water_splatting/water_splatting.py
+- _scale_gradient(value, scale) now returns value.detach() when scale <= 0.0.
+- This makes G000 a true detach path for the object-phase RGB medium tensors, instead of sending a zero current gradient through medium parameters.
+- GMVC JSONL logging now includes RGB gradients for features_rest, geometry, opacity, the current phase flag, lambda values, sampled/valid track counts, J* drift, and medium parameter deltas.
+
+water_splatting/medium_calibration/gmvc_training.py
+- _compute_gmvc_v2_terms() now receives the persistent model state.
+- The state caches previous per-track J* and previous per-observation medium_attn, medium_bs, b_inf, and transmission values.
+- Logged diagnostics include J* drift and medium parameter delta mean/p95/count.
+
+scripts/experiments/gmvc_v3_curasao_g000_ramp_sweep_1000.sh
+- New wrapper for R100/R300/R500.
+- It reuses gmvc_v3_curasao_medium_grad_sweep_1000.sh with VARIANT=G000 and only changes GMVC_RAMP_STEPS.
+```
+
+Experiment setup:
+
+```text
+scene=curasao
+start=M1 step 10000
+target step=11000
+seed=42
+medium_context_mode=dir_xy_camera
+b_inf_mode=tied
+lambda_gmvc_profile=40
+lambda_gmvc_object=0.004
+gmvc_v3_target_current_camera_tracks=True
+gmvc_v3_object_phase_medium_grad_scale=0.00
+gmvc_grad_log_every=49
+fixed Eval-F bank=renders/gmvc_v2_track_banks/curasao_m1_step10000_train_s4096/gmvc_track_bank.pt
+fixed Eval-G bank=renders/gmvc_v3_geometry_track_banks/curasao_m1_step10000_train_s4096/gmvc_track_bank.pt
+```
+
+Commands:
+
+```text
+CUDA_VISIBLE_DEVICES=8 VARIANT=R100 GPU=8 STAMP=20260804_gmvc_v3_curasao_g000_ramp_sweep_1000_log49 GMVC_GRAD_LOG_EVERY=49 RUN_EVAL=1 scripts/experiments/gmvc_v3_curasao_g000_ramp_sweep_1000.sh
+CUDA_VISIBLE_DEVICES=8 VARIANT=R300 GPU=8 STAMP=20260804_gmvc_v3_curasao_g000_ramp_sweep_1000_log49 GMVC_GRAD_LOG_EVERY=49 RUN_EVAL=1 scripts/experiments/gmvc_v3_curasao_g000_ramp_sweep_1000.sh
+CUDA_VISIBLE_DEVICES=8 VARIANT=R500 GPU=8 STAMP=20260804_gmvc_v3_curasao_g000_ramp_sweep_1000_log49 GMVC_GRAD_LOG_EVERY=49 RUN_EVAL=1 scripts/experiments/gmvc_v3_curasao_g000_ramp_sweep_1000.sh
+
+/opt/anaconda3/envs/water_splatting/bin/python scripts/diagnostics/diagnose_gmvc_fixed_bank.py \
+  --load-config <run config.yml> \
+  --load-step 11000 \
+  --track-bank renders/gmvc_v2_track_banks/curasao_m1_step10000_train_s4096/gmvc_track_bank.pt \
+  --max-tracks 30000 \
+  --output-dir renders/gmvc_fixed_bank_diag_20260804/curasao_g000_ramp_log49/<run>/evalf
+
+/opt/anaconda3/envs/water_splatting/bin/python scripts/diagnostics/diagnose_gmvc_fixed_bank.py \
+  --load-config <run config.yml> \
+  --load-step 11000 \
+  --track-bank renders/gmvc_v3_geometry_track_banks/curasao_m1_step10000_train_s4096/gmvc_track_bank.pt \
+  --max-tracks 30000 \
+  --output-dir renders/gmvc_fixed_bank_diag_20260804/curasao_g000_ramp_log49/<run>/evalg
+```
+
+Notes:
+
+```text
+The first R300 run before cleanup wrote a corrupt checkpoint because the filesystem was full.
+After deleting outdated outputs/renders, R300 was rerun successfully and produced a valid step-11000 checkpoint and eval JSON.
+Summary JSON: renders/gmvc_fixed_bank_diag_20260804/curasao_g000_ramp_log49/summary.json
+```
+
+RGB metrics:
+
+| Run | Ramp | PSNR | dPSNR vs A0 | SSIM | dSSIM vs A0 | LPIPS | dLPIPS vs A0 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A0 | n/a | 32.9690 | +0.0000 | 0.957966 | +0.000000 | 0.106611 | +0.000000 |
+| prior G000 | 100 | 32.8183 | -0.1507 | 0.957343 | -0.000623 | 0.106901 | +0.000289 |
+| R100 | 100 | 32.8147 | -0.1543 | 0.957334 | -0.000632 | 0.106908 | +0.000296 |
+| R300 | 300 | 32.8349 | -0.1342 | 0.957400 | -0.000566 | 0.106868 | +0.000257 |
+| R500 | 500 | 32.8627 | -0.1063 | 0.957492 | -0.000474 | 0.106813 | +0.000202 |
+
+Fixed-bank metrics, percent change versus A0:
+
+Eval-F:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| prior G000 | -2.00% | -6.54% | -1.40% | -2.05% | -2.80% | -1.30% |
+| R100 | -2.00% | -6.51% | -1.38% | -1.98% | -2.61% | -1.27% |
+| R300 | -1.87% | -6.27% | -1.24% | -2.23% | -2.86% | -1.35% |
+| R500 | -1.70% | -5.87% | -1.05% | -2.35% | -2.63% | -1.34% |
+
+Eval-G:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| prior G000 | -2.02% | -7.53% | -1.04% | -2.95% | -2.82% | -1.18% |
+| R100 | -2.02% | -7.51% | -1.02% | -2.93% | -2.89% | -1.17% |
+| R300 | -1.89% | -7.27% | -0.89% | -3.13% | -2.85% | -1.22% |
+| R500 | -1.73% | -6.94% | -0.73% | -3.30% | -2.67% | -1.26% |
+
+Gradient route and drift diagnostics:
+
+| Run | Log rows | Object rows | Object RGB medium grad mean | Object RGB geometry grad mean | Object RGB SH-rest grad mean | Object aux DC grad mean | Last J* drift mean | Last attn delta | Last bs delta | Last transmission delta |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| R100 | 20 | 4 | 0.000000 | 0.418124 | 0.00259657 | 0.0000130146 | 0.016570 | 0.006972 | 0.004551 | 0.004177 |
+| R300 | 20 | 4 | 0.000000 | 0.418279 | 0.00258426 | 0.0000109282 | 0.016517 | 0.006984 | 0.004495 | 0.004186 |
+| R500 | 20 | 4 | 0.000000 | 0.418534 | 0.00257224 | 0.0000094229 | 0.016477 | 0.006969 | 0.004416 | 0.004176 |
+
+Interpretation:
+
+```text
+The implementation now passes the stricter G000 route audit:
+- object-phase RGB medium gradient is exactly 0.0 in logged object rows;
+- object-phase RGB still reaches geometry, opacity, and SH-rest;
+- object auxiliary loss still only produces DC gradient and does not update medium, geometry, opacity, or SH-rest.
+
+Longer ramp improves RGB safety monotonically in this small sweep.
+R500 recovers the PSNR safety margin relative to the previous G000 endpoint: dPSNR improves from -0.1507 dB to -0.1063 dB versus A0.
+However, the decoupling signal weakens slightly as ramp length increases: Eval-F transfer/J-var improvements move from -2.00%/-6.54% to -1.70%/-5.87%; Eval-G moves from -2.02%/-7.53% to -1.73%/-6.94%.
+This is a real internal Pareto direction, but not a free improvement.
+```
+
+Updated decision:
+
+```text
+进入 15k: No.
+扩展场景: No.
+Best short-run candidate: R500, because it keeps meaningful fixed-bank transfer/J-var/DC-var gains while restoring RGB safety.
+Mechanism conclusion: the bottleneck is partly timing/target instability, not only steady-state direct competition. A slower ramp lets RGB medium adaptation recover part of the lost PSNR while preserving most of the decoupling signal.
+Next minimal experiment, if continuing GMVC-V3: object-lambda sweep around R500, not more gradient-scale tuning.
+Suggested matrix: R500-L002, R500-L003, R500-L004 current, R500-L006, same fixed Eval-F/G and RGB eval.
+```

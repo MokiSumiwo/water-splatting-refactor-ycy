@@ -210,6 +210,7 @@ def _compute_gmvc_v2_terms(
     bank: Dict[str, Any],
     step: int,
     config: Any,
+    state: Optional[Dict[str, Tensor]] = None,
     medium_query_fn: Optional[Callable[[Tensor, Tensor, Tensor, Optional[Tensor]], Dict[str, Tensor]]],
 ) -> Tuple[Dict[str, Tensor], Dict[str, Tensor]]:
     device = gt_img.device
@@ -243,7 +244,7 @@ def _compute_gmvc_v2_terms(
         if camera_key is not None:
             eligible_track_ids = bank.get("camera_to_track_ids", {}).get(str(camera_key))
 
-    rows_cpu, local_cpu, _ = _sample_v2_track_rows(
+    rows_cpu, local_cpu, sampled_track_ids_cpu = _sample_v2_track_rows(
         observations=observations,
         max_tracks=int(getattr(config, "gmvc_v2_max_tracks_per_step", 512)),
         step=step,
@@ -493,6 +494,93 @@ def _compute_gmvc_v2_terms(
         ],
         dim=-1,
     )
+
+    target_drift_mean = zero.detach()
+    target_drift_p95 = zero.detach()
+    target_drift_count = zero.detach()
+    medium_attn_delta_mean = zero.detach()
+    medium_attn_delta_p95 = zero.detach()
+    medium_bs_delta_mean = zero.detach()
+    medium_bs_delta_p95 = zero.detach()
+    b_inf_delta_mean = zero.detach()
+    b_inf_delta_p95 = zero.detach()
+    transmission_delta_mean = zero.detach()
+    transmission_delta_p95 = zero.detach()
+    medium_delta_count = zero.detach()
+
+    if state is not None:
+        with torch.no_grad():
+            sampled_track_ids = sampled_track_ids_cpu.long()
+            if int(sampled_track_ids.numel()) > 0:
+                cache_size = max(
+                    int(observations.get("track_ids", torch.empty(0)).max().item()) + 1
+                    if int(observations.get("track_ids", torch.empty(0)).numel()) > 0
+                    else 0,
+                    int(sampled_track_ids.max().item()) + 1,
+                )
+                key = "gmvc_v2_prev_j_star_by_track"
+                previous = state.get(key)
+                if previous is None or previous.ndim != 2 or previous.shape[0] < cache_size:
+                    new_previous = torch.full((cache_size, 3), float("nan"), dtype=torch.float32)
+                    if previous is not None and previous.ndim == 2:
+                        rows_to_copy = min(int(previous.shape[0]), cache_size)
+                        cols_to_copy = min(int(previous.shape[1]), 3)
+                        new_previous[:rows_to_copy, :cols_to_copy] = previous[:rows_to_copy, :cols_to_copy].cpu()
+                    previous = new_previous
+                    state[key] = previous
+                j_star_cpu = j_star.detach().float().cpu()
+                valid_track = track_valid.detach().cpu() & torch.isfinite(j_star_cpu).all(dim=-1)
+                prev_values = previous[sampled_track_ids]
+                valid_prev = valid_track & torch.isfinite(prev_values).all(dim=-1)
+                if bool(valid_prev.any()):
+                    drift = (j_star_cpu[valid_prev] - prev_values[valid_prev]).abs().mean(dim=-1)
+                    target_drift_mean = gt_img.new_tensor(float(drift.mean().item()))
+                    target_drift_p95 = gt_img.new_tensor(float(torch.quantile(drift, 0.95).item()))
+                    target_drift_count = gt_img.new_tensor(float(drift.numel()))
+                if bool(valid_track.any()):
+                    previous[sampled_track_ids[valid_track]] = j_star_cpu[valid_track]
+
+            row_ids = rows_cpu.long()
+            if int(row_ids.numel()) > 0:
+                obs_count_total = int(observations["gt"].shape[0])
+
+                def _row_delta_cache(name: str, current: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+                    current_cpu = current.detach().float().cpu()
+                    key = f"gmvc_v2_prev_{name}_by_row"
+                    previous = state.get(key)
+                    channels = int(current_cpu.shape[-1])
+                    if previous is None or previous.ndim != 2 or previous.shape[0] < obs_count_total or previous.shape[1] != channels:
+                        new_previous = torch.full((obs_count_total, channels), float("nan"), dtype=torch.float32)
+                        if previous is not None and previous.ndim == 2:
+                            rows_to_copy = min(int(previous.shape[0]), obs_count_total)
+                            cols_to_copy = min(int(previous.shape[1]), channels)
+                            new_previous[:rows_to_copy, :cols_to_copy] = previous[:rows_to_copy, :cols_to_copy].cpu()
+                        previous = new_previous
+                        state[key] = previous
+                    prev_values = previous[row_ids]
+                    valid = torch.isfinite(prev_values).all(dim=-1) & torch.isfinite(current_cpu).all(dim=-1)
+                    if bool(valid.any()):
+                        delta = (current_cpu[valid] - prev_values[valid]).abs().mean(dim=-1)
+                        mean = gt_img.new_tensor(float(delta.mean().item()))
+                        p95 = gt_img.new_tensor(float(torch.quantile(delta, 0.95).item()))
+                        count = gt_img.new_tensor(float(delta.numel()))
+                    else:
+                        mean = zero.detach()
+                        p95 = zero.detach()
+                        count = zero.detach()
+                    current_valid = torch.isfinite(current_cpu).all(dim=-1)
+                    if bool(current_valid.any()):
+                        previous[row_ids[current_valid]] = current_cpu[current_valid]
+                    return mean, p95, count
+
+                medium_attn_delta_mean, medium_attn_delta_p95, medium_delta_count = _row_delta_cache(
+                    "medium_attn",
+                    medium_attn,
+                )
+                medium_bs_delta_mean, medium_bs_delta_p95, _ = _row_delta_cache("medium_bs", medium_bs)
+                b_inf_delta_mean, b_inf_delta_p95, _ = _row_delta_cache("b_inf", b_inf)
+                transmission_delta_mean, transmission_delta_p95, _ = _row_delta_cache("transmission", transmission)
+
     losses = {
         "gmvc_profile_loss": profile_loss * lambda_profile,
         "gmvc_symmetric_closure_loss": closure_loss * lambda_symmetric_closure,
@@ -516,6 +604,9 @@ def _compute_gmvc_v2_terms(
         "gmvc_profile_j_star_mean": j_star.detach().mean() if j_star.numel() else zero.detach(),
         "gmvc_profile_j_star_p05": _safe_quantile(j_star, 0.05, zero),
         "gmvc_profile_j_star_p95": _safe_quantile(j_star, 0.95, zero),
+        "gmvc_profile_j_star_drift_l1_mean": target_drift_mean.detach(),
+        "gmvc_profile_j_star_drift_l1_p95": target_drift_p95.detach(),
+        "gmvc_profile_j_star_drift_count": target_drift_count.detach(),
         "gmvc_symmetric_closure_raw": closure_loss.detach(),
         "gmvc_object_raw": object_loss.detach(),
         "gmvc_object_source_available": object_source_available.detach(),
@@ -531,6 +622,15 @@ def _compute_gmvc_v2_terms(
         "gmvc_v2_transmission_p95": _safe_quantile(transmission_scalar, 0.95, zero),
         "gmvc_v2_backscatter_mean": backscatter.detach().mean(),
         "gmvc_v2_residual_abs_p95": _safe_quantile(residual_abs, 0.95, zero),
+        "gmvc_medium_attn_delta_l1_mean": medium_attn_delta_mean.detach(),
+        "gmvc_medium_attn_delta_l1_p95": medium_attn_delta_p95.detach(),
+        "gmvc_medium_bs_delta_l1_mean": medium_bs_delta_mean.detach(),
+        "gmvc_medium_bs_delta_l1_p95": medium_bs_delta_p95.detach(),
+        "gmvc_b_inf_delta_l1_mean": b_inf_delta_mean.detach(),
+        "gmvc_b_inf_delta_l1_p95": b_inf_delta_p95.detach(),
+        "gmvc_transmission_delta_l1_mean": transmission_delta_mean.detach(),
+        "gmvc_transmission_delta_l1_p95": transmission_delta_p95.detach(),
+        "gmvc_medium_delta_count": medium_delta_count.detach(),
         "gmvc_lambda_profile": gt_img.new_tensor(float(lambda_profile)),
         "gmvc_lambda_symmetric_closure": gt_img.new_tensor(float(lambda_symmetric_closure)),
         "gmvc_lambda_object": gt_img.new_tensor(float(lambda_object)),
@@ -572,6 +672,7 @@ def compute_gmvc_training_terms(
                 bank=bank,
                 step=step,
                 config=config,
+                state=state,
                 medium_query_fn=medium_query_fn,
             )
         return {}, {"gmvc_available_tracks": zero, "gmvc_sampled_tracks": zero}
@@ -586,6 +687,7 @@ def compute_gmvc_training_terms(
                 bank=bank,
                 step=step,
                 config=config,
+                state=state,
                 medium_query_fn=medium_query_fn,
             )
         return {}, {"gmvc_available_tracks": zero, "gmvc_sampled_tracks": zero}
@@ -600,6 +702,7 @@ def compute_gmvc_training_terms(
                 bank=bank,
                 step=step,
                 config=config,
+                state=state,
                 medium_query_fn=medium_query_fn,
             )
         return {}, {"gmvc_available_tracks": zero, "gmvc_sampled_tracks": zero}
@@ -626,6 +729,7 @@ def compute_gmvc_training_terms(
                 bank=bank,
                 step=step,
                 config=config,
+                state=state,
                 medium_query_fn=medium_query_fn,
             )
         return {}, {"gmvc_available_tracks": gt_img.new_tensor(float(count)), "gmvc_sampled_tracks": zero}
@@ -662,6 +766,7 @@ def compute_gmvc_training_terms(
                 bank=bank,
                 step=step,
                 config=config,
+                state=state,
                 medium_query_fn=medium_query_fn,
             )
         return {}, {"gmvc_available_tracks": gt_img.new_tensor(float(count)), "gmvc_sampled_tracks": zero}
@@ -880,6 +985,7 @@ def compute_gmvc_training_terms(
             bank=bank,
             step=step,
             config=config,
+            state=state,
             medium_query_fn=medium_query_fn,
         )
         losses.update(v2_losses)

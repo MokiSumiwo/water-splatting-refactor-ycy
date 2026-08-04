@@ -1487,6 +1487,10 @@ class WaterSplattingModel(Model):
 
     @staticmethod
     def _scale_gradient(value: torch.Tensor, scale: float) -> torch.Tensor:
+        if scale <= 0.0:
+            return value.detach()
+        if scale >= 1.0:
+            return value
         return value.detach() + float(scale) * (value - value.detach())
 
     def _maybe_scale_gmvc_v3_object_medium_grad(self, medium: MediumFieldOutput) -> MediumFieldOutput:
@@ -1566,6 +1570,7 @@ class WaterSplattingModel(Model):
         )
 
         dc_params = [self.gauss_params["features_dc"]]
+        rest_params = [self.gauss_params["features_rest"]]
         geom_params = [
             self.gauss_params["means"],
             self.gauss_params["scales"],
@@ -1584,8 +1589,11 @@ class WaterSplattingModel(Model):
 
         intrinsic_dc = _safe_grad(intrinsic_loss, dc_params)
         rgb_dc = _safe_grad(main_loss, dc_params)
+        rgb_rest = _safe_grad(main_loss, rest_params)
         intrinsic_geom = _safe_grad(intrinsic_loss, geom_params)
+        rgb_geom = _safe_grad(main_loss, geom_params)
         intrinsic_opacity = _safe_grad(intrinsic_loss, opacity_params)
+        rgb_opacity = _safe_grad(main_loss, opacity_params)
         intrinsic_medium = _safe_grad(intrinsic_loss, medium_params)
         object_dc = _safe_grad(object_loss, dc_params)
         object_geom = _safe_grad(object_loss, geom_params)
@@ -1605,6 +1613,9 @@ class WaterSplattingModel(Model):
         intrinsic_dc_norm = self._grad_norm(intrinsic_dc)
         object_dc_norm = self._grad_norm(object_dc)
         rgb_dc_norm = self._grad_norm(rgb_dc)
+        rgb_rest_norm = self._grad_norm(rgb_rest)
+        rgb_geom_norm = self._grad_norm(rgb_geom)
+        rgb_opacity_norm = self._grad_norm(rgb_opacity)
         intrinsic_medium_norm = self._grad_norm(intrinsic_medium)
         object_medium_norm = self._grad_norm(object_medium)
         residual_medium_norm = self._grad_norm(residual_medium)
@@ -1612,6 +1623,15 @@ class WaterSplattingModel(Model):
         profile_medium_norm = self._grad_norm(profile_medium)
         symmetric_closure_medium_norm = self._grad_norm(symmetric_closure_medium)
         rgb_medium_norm = self._grad_norm(rgb_medium)
+
+        def _metric_float(name: str, default: float = 0.0) -> float:
+            if metrics_dict is None or name not in metrics_dict:
+                return float(default)
+            value = metrics_dict[name]
+            if not torch.is_tensor(value):
+                return float(value)
+            return float(value.detach().float().reshape(-1)[0].item())
+
         row = {
             "step": int(self.step),
             "gmvc_intrinsic_raw": float(
@@ -1737,6 +1757,9 @@ class WaterSplattingModel(Model):
             "gmvc_intrinsic_grad_norm_dc": intrinsic_dc_norm,
             "gmvc_object_grad_norm_dc": object_dc_norm,
             "rgb_grad_norm_dc": rgb_dc_norm,
+            "rgb_grad_norm_features_rest": rgb_rest_norm,
+            "rgb_grad_norm_geometry": rgb_geom_norm,
+            "rgb_grad_norm_opacity": rgb_opacity_norm,
             "intrinsic_to_rgb_dc_grad_ratio": intrinsic_dc_norm / (rgb_dc_norm + 1e-12),
             "object_to_rgb_dc_grad_ratio": object_dc_norm / (rgb_dc_norm + 1e-12),
             "gmvc_intrinsic_grad_norm_geometry": self._grad_norm(intrinsic_geom),
@@ -1760,6 +1783,31 @@ class WaterSplattingModel(Model):
             "gmvc_intrinsic_source": str(getattr(self.config, "gmvc_intrinsic_source", "J_proxy_raw")),
             "gmvc_intrinsic_use_dc_proxy": bool(getattr(self.config, "gmvc_intrinsic_use_dc_proxy", True)),
         }
+        for key in [
+            "gmvc_v3_object_phase",
+            "gmvc_lambda_profile",
+            "gmvc_lambda_object",
+            "gmvc_v2_sampled_tracks",
+            "gmvc_v2_sampled_observations",
+            "gmvc_v2_valid_tracks",
+            "gmvc_v2_valid_observation_fraction",
+            "gmvc_object_valid_tracks",
+            "gmvc_object_valid_observation_fraction",
+            "gmvc_object_weight_sum",
+            "gmvc_profile_j_star_drift_l1_mean",
+            "gmvc_profile_j_star_drift_l1_p95",
+            "gmvc_profile_j_star_drift_count",
+            "gmvc_medium_attn_delta_l1_mean",
+            "gmvc_medium_attn_delta_l1_p95",
+            "gmvc_medium_bs_delta_l1_mean",
+            "gmvc_medium_bs_delta_l1_p95",
+            "gmvc_b_inf_delta_l1_mean",
+            "gmvc_b_inf_delta_l1_p95",
+            "gmvc_transmission_delta_l1_mean",
+            "gmvc_transmission_delta_l1_p95",
+            "gmvc_medium_delta_count",
+        ]:
+            row[key] = _metric_float(key)
         log_path = Path(path)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf8") as f:
