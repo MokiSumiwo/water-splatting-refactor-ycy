@@ -8,6 +8,10 @@ GPU="${GPU:-6}"
 STAMP="${STAMP:-20260804_gmvc_v3_curasao_r500_object_lambda_sweep_1000}"
 
 case "${VARIANT}" in
+  O000|o000)
+    OBJECT_LAMBDA="0.000"
+    SLUG="o000"
+    ;;
   O004|o004)
     OBJECT_LAMBDA="0.004"
     SLUG="o004"
@@ -21,7 +25,7 @@ case "${VARIANT}" in
     SLUG="o002"
     ;;
   *)
-    echo "Unknown VARIANT=${VARIANT}. Use O004, O003, or O002." >&2
+    echo "Unknown VARIANT=${VARIANT}. Use O000, O004, O003, or O002." >&2
     exit 2
     ;;
 esac

@@ -3325,3 +3325,161 @@ Best candidate remains R500/O004 or O003-equivalent; O003 is not a statistically
 Do not continue lowering object lambda.
 Next single-factor experiment, if continuing GMVC-V3: reduce profile lambda from 40 to 35/30 under the same R500/O004 setup, because object-lambda strength is not the active bottleneck.
 ```
+
+## 28. R500 auxiliary-off control and profile-lambda sweep
+
+This section first adds the missing causal control requested after the object-lambda sweep: keep the R500 object phase, 4:1 schedule, strict object-phase medium freeze, and profile objective unchanged, but set `lambda_gmvc_object=0.000`. This tests whether R500's fixed-bank gains require the explicit object auxiliary loss, rather than only the phase schedule and medium freeze.
+
+Implementation changes:
+
+```text
+scripts/experiments/gmvc_v3_curasao_r500_object_lambda_sweep_1000.sh
+- Added O000 with LAMBDA_GMVC_OBJECT=0.000.
+
+scripts/experiments/gmvc_v3_curasao_r500_profile_lambda_sweep_1000.sh
+- New wrapper for P40/P35/P30.
+- It reuses the R500 ramp wrapper, fixes object lambda at 0.004, and changes only LAMBDA_GMVC_PROFILE.
+```
+
+Auxiliary-off command:
+
+```text
+CUDA_VISIBLE_DEVICES=9 VARIANT=O000 GPU=9 STAMP=20260804_gmvc_v3_curasao_r500_object_lambda_sweep_1000_jstar_log49 GMVC_GRAD_LOG_EVERY=49 RUN_EVAL=1 scripts/experiments/gmvc_v3_curasao_r500_object_lambda_sweep_1000.sh
+```
+
+Profile sweep commands:
+
+```text
+CUDA_VISIBLE_DEVICES=8 VARIANT=P35 GPU=8 STAMP=20260804_gmvc_v3_curasao_r500_profile_lambda_sweep_1000_log49 GMVC_GRAD_LOG_EVERY=49 RUN_EVAL=1 scripts/experiments/gmvc_v3_curasao_r500_profile_lambda_sweep_1000.sh
+CUDA_VISIBLE_DEVICES=9 VARIANT=P30 GPU=9 STAMP=20260804_gmvc_v3_curasao_r500_profile_lambda_sweep_1000_log49 GMVC_GRAD_LOG_EVERY=49 RUN_EVAL=1 scripts/experiments/gmvc_v3_curasao_r500_profile_lambda_sweep_1000.sh
+```
+
+Summary JSON:
+
+```text
+renders/gmvc_fixed_bank_diag_20260804/curasao_r500_object_lambda_jstar_log49/summary_with_o000.json
+renders/gmvc_fixed_bank_diag_20260804/curasao_r500_profile_lambda_log49/summary.json
+```
+
+### 28.1 R500-O000 auxiliary-off control
+
+RGB metrics:
+
+| Run | Object lambda | PSNR | dPSNR vs A0 | dPSNR vs O004 | SSIM | LPIPS |
+|---|---:|---:|---:|---:|---:|---:|
+| O004 | 0.004 | 32.8614 | -0.1076 | +0.0000 | 0.957483 | 0.106860 |
+| O000 | 0.000 | 32.8614 | -0.1077 | -0.0001 | 0.957492 | 0.106874 |
+
+Fixed-bank metrics, percent change versus A0:
+
+Eval-F:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| O004 | -1.69% | -5.87% | -1.06% | -2.33% | -2.70% | -1.34% |
+| O000 | -1.69% | -5.76% | -0.97% | -2.04% | -2.85% | -1.15% |
+
+Eval-G:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| O004 | -1.72% | -6.93% | -0.74% | -3.26% | -2.66% | -1.24% |
+| O000 | -1.72% | -6.86% | -0.66% | -2.56% | -2.98% | -0.98% |
+
+O004 versus O000, percent change:
+
+| Eval | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| Eval-F | +0.00% | -0.12% | -0.09% | -0.29% | +0.15% | -0.19% |
+| Eval-G | +0.00% | -0.07% | -0.08% | -0.72% | +0.33% | -0.26% |
+
+Mechanism diagnostics:
+
+| Run | Object rows | Object RGB medium grad | Object aux DC grad | Object/RGB DC ratio mean | Drift early | Drift middle | Drift late | Last J* mean | Last J* p05 | Last J* p95 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| O004 | 4 | 0.000000 | 0.000009425 | 0.014129 | 0.021896 | 0.022126 | 0.020860 | 0.485173 | 0.048079 | 1.585536 |
+| O000 | 4 | 0.000000 | 0.000000000 | 0.000000 | 0.021859 | 0.022121 | 0.020941 | 0.484612 | 0.046806 | 1.583098 |
+
+Interpretation:
+
+```text
+O000 confirms that the object phase and medium freeze are still present while explicit object auxiliary DC gradients are zero.
+O004 and O000 have indistinguishable RGB metrics.
+The explicit object auxiliary contributes weakly but detectably to object_target_l1 and dc_recomposition_l1, especially on Eval-G, while J-var/closure improvements are very small and DC-var slightly worsens versus O000.
+Therefore R500's main fixed-bank signal is not caused primarily by the explicit object auxiliary. It comes mostly from the R500 profile/phase/medium-freeze setup, with object auxiliary acting as a small object-fit/recomposition stabilizer.
+For the profile sweep, keep O004 as the cleaner continuation because it improves object-fit/recomposition without RGB cost, but do not claim the object auxiliary is the main source of the GMVC-V3 effect.
+```
+
+### 28.2 R500 profile-lambda sweep
+
+RGB metrics:
+
+| Run | Profile lambda | PSNR | dPSNR vs A0 | dPSNR vs P40 | SSIM | dSSIM vs A0 | LPIPS | dLPIPS vs A0 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| P40 | 40 | 32.8614 | -0.1076 | +0.0000 | 0.957483 | -0.000482 | 0.106860 | +0.000248 |
+| P35 | 35 | 32.8925 | -0.0765 | +0.0311 | 0.957576 | -0.000390 | 0.106773 | +0.000161 |
+| P30 | 30 | 32.9243 | -0.0448 | +0.0628 | 0.957664 | -0.000302 | 0.106695 | +0.000084 |
+
+Fixed-bank metrics, percent change versus A0:
+
+Eval-F:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| P40 | -1.69% | -5.87% | -1.06% | -2.33% | -2.70% | -1.34% |
+| P35 | -1.51% | -5.45% | -0.87% | -2.53% | -2.58% | -1.38% |
+| P30 | -1.32% | -4.98% | -0.68% | -2.72% | -2.57% | -1.44% |
+
+Eval-G:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| P40 | -1.72% | -6.93% | -0.74% | -3.26% | -2.66% | -1.24% |
+| P35 | -1.55% | -6.56% | -0.58% | -3.52% | -2.64% | -1.35% |
+| P30 | -1.37% | -6.12% | -0.41% | -3.70% | -2.69% | -1.40% |
+
+Fixed-bank metrics, percent change versus P40:
+
+Eval-F:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| P35 | +0.19% | +0.45% | +0.19% | -0.20% | +0.13% | -0.04% |
+| P30 | +0.38% | +0.95% | +0.39% | -0.40% | +0.14% | -0.10% |
+
+Eval-G:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| P35 | +0.18% | +0.39% | +0.16% | -0.27% | +0.02% | -0.11% |
+| P30 | +0.36% | +0.87% | +0.32% | -0.45% | -0.03% | -0.17% |
+
+Mechanism diagnostics:
+
+| Run | Profile lambda | Last profile grad norm | Last profile/RGB medium ratio | Drift early | Drift middle | Drift late | Last J* mean | Last J* p05 | Last J* p95 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| P40 | 40 | 0.002655 | 0.014331 | 0.021896 | 0.022126 | 0.020860 | 0.485173 | 0.048079 | 1.585536 |
+| P35 | 35 | 0.002374 | 0.012565 | 0.021906 | 0.022137 | 0.020922 | 0.485274 | 0.047985 | 1.583848 |
+| P30 | 30 | 0.002085 | 0.010804 | 0.021906 | 0.022175 | 0.020925 | 0.485454 | 0.047666 | 1.584946 |
+
+Interpretation:
+
+```text
+Profile lambda is the active Pareto control that object lambda was not.
+Lowering profile lambda monotonically improves PSNR, SSIM, and LPIPS while retaining positive fixed-bank transfer/J-var/DC-var signals.
+The RGB recovery is material: P30 improves PSNR by +0.0628 dB versus P40 and reduces the A0 PSNR gap to -0.0448 dB.
+The cost is a controlled weakening of transfer/J-var/closure improvements, while object-fit and recomposition improve.
+P30 retains around 78%-80% of the P40 transfer gain and more than 85% of the J-var gain, depending on Eval-F/G. P35 is the conservative retention point; P30 is the stronger RGB recovery point.
+J* drift and J* distribution remain essentially unchanged across P40/P35/P30, so the profile-lambda effect is not explained by target-distribution drift.
+```
+
+Updated decision:
+
+```text
+进入 15k: No.
+扩展场景: No.
+Best short-run RGB candidate: P30.
+Best conservative decoupling candidate: P35.
+Current recommended next step: Curasao-only 3k persistence check for P30 and P35 against P40/A0, still no cross-scene expansion.
+If only one candidate can be carried forward, prefer P30 because it restores most RGB loss while keeping fixed-bank metrics positive.
+```
