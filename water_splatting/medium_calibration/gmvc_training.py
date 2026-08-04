@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -86,6 +86,236 @@ def _ramped_weight(weight: float, step: int, start: int, ramp: int, stop: int) -
     return float(weight) * min((step - start) / max(float(ramp), 1.0), 1.0)
 
 
+def _sample_v2_track_rows(
+    observations: Dict[str, Tensor],
+    max_tracks: int,
+    step: int,
+    seed: int,
+) -> Tuple[Tensor, Tensor, Tensor]:
+    track_ids = observations.get("track_ids")
+    starts = observations.get("track_starts")
+    lengths = observations.get("track_lengths")
+    if track_ids is None or starts is None or lengths is None or int(track_ids.numel()) == 0:
+        empty = torch.empty((0,), dtype=torch.long)
+        return empty, empty, empty
+
+    track_count = int(track_ids.shape[0])
+    if max_tracks <= 0 or track_count <= max_tracks:
+        chosen = torch.arange(track_count, dtype=torch.long)
+    else:
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(int(seed) + int(step) * 7919)
+        chosen = torch.randperm(track_count, generator=generator)[:max_tracks]
+
+    row_chunks = []
+    local_chunks = []
+    for local_idx, track_idx in enumerate(chosen.tolist()):
+        start = int(starts[track_idx].item())
+        length = int(lengths[track_idx].item())
+        row_chunks.append(torch.arange(start, start + length, dtype=torch.long))
+        local_chunks.append(torch.full((length,), int(local_idx), dtype=torch.long))
+    if not row_chunks:
+        empty = torch.empty((0,), dtype=torch.long)
+        return empty, empty, empty
+    return torch.cat(row_chunks), torch.cat(local_chunks), track_ids[chosen].long()
+
+
+def _scatter_sum(value: Tensor, index: Tensor, count: int) -> Tensor:
+    out = value.new_zeros((count,) + tuple(value.shape[1:]))
+    if value.numel() == 0:
+        return out
+    expand_index = index.reshape(-1, *([1] * (value.ndim - 1))).expand_as(value)
+    return out.scatter_add_(0, expand_index, value)
+
+
+def _compute_v2_pair_indices(local_track: Tensor, depth: Tensor, weight: Tensor, track_count: int) -> Tuple[Tensor, Tensor]:
+    near_indices = []
+    far_indices = []
+    valid = weight > 0
+    for track_idx in range(track_count):
+        rows = torch.nonzero((local_track == track_idx) & valid, as_tuple=False).reshape(-1)
+        if int(rows.numel()) < 2:
+            continue
+        track_depth = depth[rows].reshape(-1)
+        near_indices.append(rows[int(torch.argmin(track_depth).item())])
+        far_indices.append(rows[int(torch.argmax(track_depth).item())])
+    if not near_indices:
+        empty = torch.empty((0,), dtype=torch.long, device=local_track.device)
+        return empty, empty
+    return torch.stack(near_indices).long(), torch.stack(far_indices).long()
+
+
+def _compute_gmvc_v2_terms(
+    *,
+    gt_img: Tensor,
+    bank: Dict[str, Any],
+    step: int,
+    config: Any,
+    medium_query_fn: Optional[Callable[[Tensor, Tensor, Tensor, Optional[Tensor]], Dict[str, Tensor]]],
+) -> Tuple[Dict[str, Tensor], Dict[str, Tensor]]:
+    device = gt_img.device
+    dtype = gt_img.dtype
+    zero = gt_img.new_zeros(())
+    eps = float(getattr(config, "gmvc_eps", 1e-4))
+    observations = bank.get("observations")
+    if observations is None or medium_query_fn is None:
+        return {}, {
+            "gmvc_v2_available_tracks": zero,
+            "gmvc_v2_sampled_tracks": zero,
+            "gmvc_v2_sampled_observations": zero,
+        }
+
+    track_count_total = int(observations.get("track_ids", torch.empty(0)).shape[0])
+    if track_count_total == 0:
+        return {}, {
+            "gmvc_v2_available_tracks": zero,
+            "gmvc_v2_sampled_tracks": zero,
+            "gmvc_v2_sampled_observations": zero,
+        }
+
+    rows_cpu, local_cpu, _ = _sample_v2_track_rows(
+        observations=observations,
+        max_tracks=int(getattr(config, "gmvc_v2_max_tracks_per_step", 512)),
+        step=step,
+        seed=int(getattr(config, "gmvc_seed", 42)) + 44497,
+    )
+    if int(rows_cpu.numel()) == 0:
+        return {}, {
+            "gmvc_v2_available_tracks": gt_img.new_tensor(float(track_count_total)),
+            "gmvc_v2_sampled_tracks": zero,
+            "gmvc_v2_sampled_observations": zero,
+        }
+
+    local_track = local_cpu.to(device=device)
+    sampled_track_count = int(local_cpu.max().item()) + 1 if int(local_cpu.numel()) > 0 else 0
+    gt = observations["gt"][rows_cpu].to(device=device, dtype=dtype)
+    weight = observations["weight"][rows_cpu].to(device=device, dtype=dtype).reshape(-1).clamp_min(0.0)
+    depth = observations["fixed_depth"][rows_cpu].to(device=device, dtype=dtype).reshape(-1, 1).clamp_min(eps)
+    directions = observations["ray_direction"][rows_cpu].to(device=device, dtype=dtype)
+    image_xy = observations["image_xy_norm"][rows_cpu].to(device=device, dtype=dtype)
+    camera_centers = observations["camera_center"][rows_cpu].to(device=device, dtype=dtype)
+    bank_attn = observations["bank_medium_attn"][rows_cpu].to(device=device, dtype=dtype)
+    bank_bs = observations["bank_medium_bs"][rows_cpu].to(device=device, dtype=dtype)
+    bank_binf = observations["bank_b_inf"][rows_cpu].to(device=device, dtype=dtype)
+
+    current_medium = medium_query_fn(directions, image_xy, camera_centers, None)
+    medium_attn = current_medium["medium_attn"]
+    medium_bs = current_medium["medium_bs"]
+    b_inf = current_medium.get("b_inf", current_medium["medium_rgb"])
+    finite = (
+        torch.isfinite(gt).all(dim=-1)
+        & torch.isfinite(medium_attn).all(dim=-1)
+        & torch.isfinite(medium_bs).all(dim=-1)
+        & torch.isfinite(b_inf).all(dim=-1)
+        & torch.isfinite(depth).all(dim=-1)
+    )
+    weight = torch.where(finite, weight, torch.zeros_like(weight))
+    transmission, backscatter = _medium_terms(depth, medium_attn, medium_bs, b_inf)
+
+    min_obs = max(int(getattr(config, "gmvc_v2_min_observations_per_track", 2)), 2)
+    obs_count = _scatter_sum((weight > 0).to(dtype)[:, None], local_track, sampled_track_count).reshape(-1)
+    track_valid = obs_count >= float(min_obs)
+    profile_weight = torch.where(track_valid[local_track], weight, torch.zeros_like(weight))
+
+    if profile_weight.sum() > 0:
+        numerator = _scatter_sum(profile_weight[:, None] * transmission * (gt - backscatter), local_track, sampled_track_count)
+        denominator = _scatter_sum(profile_weight[:, None] * transmission.square(), local_track, sampled_track_count)
+        j_star = numerator / (denominator + eps)
+        j_star_for_loss = j_star.detach() if bool(getattr(config, "gmvc_profile_detach_j_star", True)) else j_star
+        pred = j_star_for_loss[local_track] * transmission + backscatter
+        profile_loss = _weighted_mean(charbonnier_loss(pred - gt, eps=float(getattr(config, "gmvc_charbonnier_eps", 1e-6))), profile_weight, eps)
+        j_obs = (gt.detach() - backscatter.detach()) / (transmission.detach() + eps)
+        j_center = j_star.detach()[local_track]
+        j_variance = _weighted_mean((j_obs - j_center).abs(), profile_weight.detach(), eps)
+    else:
+        profile_loss = zero
+        j_variance = zero
+        j_star = gt_img.new_zeros((sampled_track_count, 3))
+
+    closure_signal_floor = max(float(getattr(config, "gmvc_closure_signal_floor", 0.03)), eps)
+    near_idx, far_idx = _compute_v2_pair_indices(local_track, depth.reshape(-1), weight, sampled_track_count)
+    if int(near_idx.numel()) > 0:
+        bank_t, bank_b = _medium_terms(depth.detach(), bank_attn.detach(), bank_bs.detach(), bank_binf.detach())
+        left0 = (gt.detach()[near_idx] - bank_b[near_idx]) * bank_t[far_idx]
+        right0 = (gt.detach()[far_idx] - bank_b[far_idx]) * bank_t[near_idx]
+        fixed_denom = (left0.abs() + right0.abs()).clamp_min(closure_signal_floor)
+
+        left = (gt.detach()[near_idx] - backscatter[near_idx]) * transmission[far_idx]
+        right = (gt.detach()[far_idx] - backscatter[far_idx]) * transmission[near_idx]
+        closure_delta = left - right
+        closure_norm = closure_delta / fixed_denom.clamp_min(eps)
+        pair_weight = torch.sqrt(weight[near_idx].clamp_min(0.0) * weight[far_idx].clamp_min(0.0))
+        closure_loss = _weighted_mean(
+            charbonnier_loss(closure_norm, eps=float(getattr(config, "gmvc_charbonnier_eps", 1e-6))),
+            pair_weight,
+            eps,
+        )
+        closure_l1 = _weighted_mean(closure_delta.detach().abs(), pair_weight.detach(), eps)
+        closure_norm_l1 = _weighted_mean(closure_norm.detach().abs(), pair_weight.detach(), eps)
+    else:
+        closure_loss = zero
+        closure_l1 = zero
+        closure_norm_l1 = zero
+        pair_weight = gt_img.new_empty((0,))
+
+    start = int(getattr(config, "gmvc_start_step", 10000))
+    stop = int(getattr(config, "gmvc_stop_step", 15000))
+    ramp = int(getattr(config, "gmvc_ramp_steps", 500))
+    lambda_profile = _ramped_weight(float(getattr(config, "lambda_gmvc_profile", 0.0)), step, start, ramp, stop)
+    lambda_symmetric_closure = _ramped_weight(
+        float(getattr(config, "lambda_gmvc_symmetric_closure", 0.0)),
+        step,
+        start,
+        ramp,
+        stop,
+    )
+    transmission_scalar = transmission.detach().mean(dim=-1)
+    residual_abs = torch.cat(
+        [
+            torch.log(medium_attn.detach().clamp_min(eps)).abs(),
+            torch.log(medium_bs.detach().clamp_min(eps)).abs(),
+            _logit_from_unit(b_inf.detach(), eps).abs(),
+        ],
+        dim=-1,
+    )
+    losses = {
+        "gmvc_profile_loss": profile_loss * lambda_profile,
+        "gmvc_symmetric_closure_loss": closure_loss * lambda_symmetric_closure,
+    }
+    metrics = {
+        "gmvc_v2_available_tracks": gt_img.new_tensor(float(track_count_total)),
+        "gmvc_v2_sampled_tracks": gt_img.new_tensor(float(sampled_track_count)),
+        "gmvc_v2_sampled_observations": gt_img.new_tensor(float(rows_cpu.numel())),
+        "gmvc_v2_valid_tracks": track_valid.detach().float().sum(),
+        "gmvc_v2_valid_observation_fraction": (profile_weight > 0).detach().float().mean(),
+        "gmvc_profile_raw": profile_loss.detach(),
+        "gmvc_profile_j_variance_l1": j_variance.detach(),
+        "gmvc_profile_j_star_mean": j_star.detach().mean() if j_star.numel() else zero.detach(),
+        "gmvc_profile_j_star_p05": _safe_quantile(j_star, 0.05, zero),
+        "gmvc_profile_j_star_p95": _safe_quantile(j_star, 0.95, zero),
+        "gmvc_symmetric_closure_raw": closure_loss.detach(),
+        "gmvc_symmetric_closure_l1": closure_l1.detach(),
+        "gmvc_symmetric_closure_norm_l1": closure_norm_l1.detach(),
+        "gmvc_symmetric_closure_pairs": gt_img.new_tensor(float(pair_weight.numel())),
+        "gmvc_v2_transmission_p05": _safe_quantile(transmission_scalar, 0.05, zero),
+        "gmvc_v2_transmission_p50": _safe_quantile(transmission_scalar, 0.50, zero),
+        "gmvc_v2_transmission_p95": _safe_quantile(transmission_scalar, 0.95, zero),
+        "gmvc_v2_backscatter_mean": backscatter.detach().mean(),
+        "gmvc_v2_residual_abs_p95": _safe_quantile(residual_abs, 0.95, zero),
+        "gmvc_lambda_profile": gt_img.new_tensor(float(lambda_profile)),
+        "gmvc_lambda_symmetric_closure": gt_img.new_tensor(float(lambda_symmetric_closure)),
+    }
+    return losses, metrics
+
+
+def _gmvc_v2_requested(config: Any) -> bool:
+    return bool(
+        getattr(config, "gmvc_v2_enabled", False)
+        or float(getattr(config, "lambda_gmvc_profile", 0.0)) > 0.0
+        or float(getattr(config, "lambda_gmvc_symmetric_closure", 0.0)) > 0.0
+    )
+
+
 def compute_gmvc_training_terms(
     outputs: Dict[str, Tensor],
     gt_img: Tensor,
@@ -93,24 +323,50 @@ def compute_gmvc_training_terms(
     step: int,
     config: Any,
     state: Optional[Dict[str, Tensor]] = None,
+    medium_query_fn: Optional[Callable[[Tensor, Tensor, Tensor, Optional[Tensor]], Dict[str, Tensor]]] = None,
 ) -> Tuple[Dict[str, Tensor], Dict[str, Tensor]]:
     """Compute current-view GMVC losses against a detached offline track bank."""
 
     device = gt_img.device
     eps = float(getattr(config, "gmvc_eps", 1e-4))
+    v2_requested = _gmvc_v2_requested(config)
     camera_key = _camera_key(outputs)
     zero = gt_img.new_zeros(())
     if camera_key is None:
+        if v2_requested:
+            return _compute_gmvc_v2_terms(
+                gt_img=gt_img,
+                bank=bank,
+                step=step,
+                config=config,
+                medium_query_fn=medium_query_fn,
+            )
         return {}, {"gmvc_available_tracks": zero, "gmvc_sampled_tracks": zero}
 
     per_camera = bank.get("per_camera", {})
     entry = per_camera.get(camera_key)
     if entry is None:
+        if v2_requested:
+            return _compute_gmvc_v2_terms(
+                gt_img=gt_img,
+                bank=bank,
+                step=step,
+                config=config,
+                medium_query_fn=medium_query_fn,
+            )
         return {}, {"gmvc_available_tracks": zero, "gmvc_sampled_tracks": zero}
 
     xy = entry["xy"].to(device=device, dtype=gt_img.dtype)
     count = int(xy.shape[0])
     if count == 0:
+        if v2_requested:
+            return _compute_gmvc_v2_terms(
+                gt_img=gt_img,
+                bank=bank,
+                step=step,
+                config=config,
+                medium_query_fn=medium_query_fn,
+            )
         return {}, {"gmvc_available_tracks": zero, "gmvc_sampled_tracks": zero}
 
     rows = _choose_rows(
@@ -128,6 +384,14 @@ def compute_gmvc_training_terms(
     b_inf_center = entry["b_inf_center"].to(device=device, dtype=gt_img.dtype)[rows]
 
     if weight.sum() <= 0:
+        if v2_requested:
+            return _compute_gmvc_v2_terms(
+                gt_img=gt_img,
+                bank=bank,
+                step=step,
+                config=config,
+                medium_query_fn=medium_query_fn,
+            )
         return {}, {"gmvc_available_tracks": gt_img.new_tensor(float(count)), "gmvc_sampled_tracks": zero}
 
     depth = _sample_hwc(outputs["depth"], xy)
@@ -155,6 +419,14 @@ def compute_gmvc_training_terms(
     )
     weight = torch.where(valid_j, weight, torch.zeros_like(weight))
     if weight.sum() <= 0:
+        if v2_requested:
+            return _compute_gmvc_v2_terms(
+                gt_img=gt_img,
+                bank=bank,
+                step=step,
+                config=config,
+                medium_query_fn=medium_query_fn,
+            )
         return {}, {"gmvc_available_tracks": gt_img.new_tensor(float(count)), "gmvc_sampled_tracks": zero}
 
     huber_eps = float(getattr(config, "gmvc_charbonnier_eps", 1e-6))
@@ -364,4 +636,14 @@ def compute_gmvc_training_terms(
         "gmvc_lambda_residual_budget": gt_img.new_tensor(float(lambda_residual_budget)),
         "gmvc_lambda_fixed_closure": gt_img.new_tensor(float(lambda_fixed_closure)),
     }
+    if v2_requested:
+        v2_losses, v2_metrics = _compute_gmvc_v2_terms(
+            gt_img=gt_img,
+            bank=bank,
+            step=step,
+            config=config,
+            medium_query_fn=medium_query_fn,
+        )
+        losses.update(v2_losses)
+        metrics.update(v2_metrics)
     return losses, metrics

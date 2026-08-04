@@ -88,6 +88,12 @@ water_splatting_method = MethodSpecification(
                     lr_final=1.5e-4, max_steps=NUM_STEPS, 
                 ),
             },
+            "gmvc_bounded_medium": {
+                "optimizer": AdamOptimizerConfig(lr=1e-3, eps=1e-15, max_norm=0.001),
+                "scheduler": ExponentialDecaySchedulerConfig(
+                    lr_final=1.5e-4, max_steps=NUM_STEPS,
+                ),
+            },
         },
         viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
         vis="viewer",
@@ -154,6 +160,12 @@ water_splatting_method_big = MethodSpecification(
                 "optimizer": AdamOptimizerConfig(lr=1e-3, eps=1e-15, max_norm=0.001),
                 "scheduler": ExponentialDecaySchedulerConfig(
                     lr_final=1.5e-4, max_steps=NUM_STEPS, 
+                ),
+            },
+            "gmvc_bounded_medium": {
+                "optimizer": AdamOptimizerConfig(lr=1e-3, eps=1e-15, max_norm=0.001),
+                "scheduler": ExponentialDecaySchedulerConfig(
+                    lr_final=1.5e-4, max_steps=NUM_STEPS,
                 ),
             },
         },

@@ -24,11 +24,41 @@ from water_splatting.medium_calibration.gmvc_tracks import (
 )
 
 
+R_EDIT = torch.diag(torch.tensor([1.0, -1.0, -1.0], dtype=torch.float32))
+
+
 def _git_commit(repo: Path) -> str:
     try:
         return subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
     except Exception:
         return "unknown"
+
+
+def _camera_center(view: Any) -> torch.Tensor:
+    return view.camera_to_world[:3, 3].detach().float().cpu()
+
+
+def _image_xy_norm(view: Any, xy: torch.Tensor) -> torch.Tensor:
+    x = 2.0 * xy[:, 0] / max(float(view.width - 1), 1.0) - 1.0
+    y = 2.0 * xy[:, 1] / max(float(view.height - 1), 1.0) - 1.0
+    return torch.stack([x, y], dim=-1).float()
+
+
+def _ray_directions_world(view: Any, xy: torch.Tensor) -> torch.Tensor:
+    x_full = xy[:, 0] * (float(view.width) / max(float(view.width - 1), 1.0))
+    y_full = xy[:, 1] * (float(view.height) / max(float(view.height - 1), 1.0))
+    p_view = torch.stack(
+        [
+            (x_full - float(view.cx)) / float(view.fx),
+            (y_full - float(view.cy)) / float(view.fy),
+            torch.ones_like(xy[:, 0]),
+        ],
+        dim=-1,
+    )
+    p_view = p_view / torch.linalg.norm(p_view, dim=-1, keepdim=True).clamp_min(1e-8)
+    rotation = view.camera_to_world[:3, :3].detach().float().cpu() @ R_EDIT
+    directions = p_view.float() @ rotation.T
+    return directions / torch.linalg.norm(directions, dim=-1, keepdim=True).clamp_min(1e-8)
 
 
 def _append_obs(
@@ -37,17 +67,26 @@ def _append_obs(
     obs: Dict[str, torch.Tensor],
     row_idx: int,
     xy: torch.Tensor,
-    view_camera_index: int,
-    view_image_index: int,
+    view: Any,
+    point_world: torch.Tensor,
 ) -> None:
     payload = {key: value[row_idx].detach().cpu() for key, value in obs.items()}
     payload["xy"] = xy[row_idx].detach().cpu()
-    payload["camera_index"] = torch.tensor(float(view_camera_index))
-    payload["image_index"] = torch.tensor(float(view_image_index))
+    payload["image_xy_norm"] = _image_xy_norm(view, xy[row_idx : row_idx + 1])[0]
+    payload["ray_direction"] = _ray_directions_world(view, xy[row_idx : row_idx + 1])[0]
+    center = _camera_center(view)
+    payload["camera_center"] = center
+    payload["fixed_depth"] = torch.linalg.norm(point_world.detach().float().cpu() - center).reshape(())
+    payload["camera_index"] = torch.tensor(int(view.camera_index), dtype=torch.long)
+    payload["image_index"] = torch.tensor(int(view.image_index), dtype=torch.long)
     obs_lists[local_idx].append(payload)
 
 
-def _track_bank_entries(observations: List[Dict[str, torch.Tensor]], cfg: GMVCTrackConfig) -> List[Dict[str, torch.Tensor]]:
+def _track_bank_entries(
+    observations: List[Dict[str, torch.Tensor]],
+    cfg: GMVCTrackConfig,
+    track_id: int,
+) -> List[Dict[str, torch.Tensor]]:
     depth = torch.stack([obs["depth"].reshape(()) for obs in observations]).float()
     alpha = torch.stack([obs["alpha"].reshape(()) for obs in observations]).float()
     depth_err = torch.stack([obs["depth_rel_error"].reshape(()) for obs in observations]).float()
@@ -102,7 +141,16 @@ def _track_bank_entries(observations: List[Dict[str, torch.Tensor]], cfg: GMVCTr
             {
                 "camera_index": obs["camera_index"].long(),
                 "image_index": obs["image_index"].long(),
+                "track_id": torch.tensor(int(track_id), dtype=torch.long),
                 "xy": obs["xy"].float(),
+                "image_xy_norm": obs["image_xy_norm"].float(),
+                "ray_direction": obs["ray_direction"].float(),
+                "camera_center": obs["camera_center"].float(),
+                "gt": gt[row_idx].float(),
+                "fixed_depth": obs["fixed_depth"].reshape(()).float(),
+                "bank_medium_attn": medium_attn[row_idx].float(),
+                "bank_medium_bs": medium_bs[row_idx].float(),
+                "bank_b_inf": b_inf[row_idx].float(),
                 "j_consensus": j_center.float(),
                 "medium_attn_log_center": attn_log_center.float(),
                 "medium_bs_log_center": bs_log_center.float(),
@@ -125,6 +173,24 @@ def _stack_or_empty(values: List[torch.Tensor], shape: tuple[int, ...]) -> torch
     if not values:
         return torch.empty(shape, dtype=torch.float32)
     return torch.stack(values).float()
+
+
+def _stack_long_or_empty(values: List[torch.Tensor], shape: tuple[int, ...]) -> torch.Tensor:
+    if not values:
+        return torch.empty(shape, dtype=torch.long)
+    return torch.stack(values).long()
+
+
+def _track_slices(track_ids: torch.Tensor) -> Dict[str, torch.Tensor]:
+    if track_ids.numel() == 0:
+        return {
+            "track_ids": torch.empty((0,), dtype=torch.long),
+            "track_starts": torch.empty((0,), dtype=torch.long),
+            "track_lengths": torch.empty((0,), dtype=torch.long),
+        }
+    unique, counts = torch.unique_consecutive(track_ids.long(), return_counts=True)
+    starts = torch.cat([torch.zeros(1, dtype=torch.long), counts.cumsum(dim=0)[:-1].long()])
+    return {"track_ids": unique.long(), "track_starts": starts, "track_lengths": counts.long()}
 
 
 def _medium_terms(
@@ -171,6 +237,21 @@ def build_bank(args: argparse.Namespace) -> Dict[str, Any]:
     )
     views = render_gmvc_views(pipeline, args.split, args.max_images)
     per_camera_lists: Dict[str, Dict[str, List[torch.Tensor]]] = {}
+    observation_lists: Dict[str, List[torch.Tensor]] = {
+        "track_id": [],
+        "camera_index": [],
+        "image_index": [],
+        "xy": [],
+        "image_xy_norm": [],
+        "ray_direction": [],
+        "camera_center": [],
+        "gt": [],
+        "fixed_depth": [],
+        "weight": [],
+        "bank_medium_attn": [],
+        "bank_medium_bs": [],
+        "bank_b_inf": [],
+    }
     counters: Dict[str, int] = {
         "source_valid_pixels_total": 0,
         "sampled_source_tracks": 0,
@@ -195,8 +276,8 @@ def build_bank(args: argparse.Namespace) -> Dict[str, Any]:
                 source_obs,
                 local_idx,
                 source_xy,
-                source_view.camera_index,
-                source_view.image_index,
+                source_view,
+                points_world[local_idx],
             )
 
         for target_idx in _selected_target_indices(source_idx, len(views), cfg):
@@ -235,19 +316,22 @@ def build_bank(args: argparse.Namespace) -> Dict[str, Any]:
                     target_obs,
                     int(row_idx),
                     target_xy,
-                    target_view.camera_index,
-                    target_view.image_index,
+                    target_view,
+                    points_world[int(local_indices[row_idx].item())],
                 )
 
         for observations in obs_lists:
             if len(observations) < cfg.min_views:
                 continue
-            entries = _track_bank_entries(observations, cfg)
+            track_id = counters["accepted_tracks"]
+            entries = _track_bank_entries(observations, cfg, track_id=track_id)
             if not entries:
                 continue
             counters["accepted_tracks"] += 1
             counters["accepted_observations"] += len(entries)
             for entry in entries:
+                for name in observation_lists:
+                    observation_lists[name].append(entry[name])
                 key = str(int(entry["camera_index"].item()))
                 bucket = per_camera_lists.setdefault(
                     key,
@@ -270,6 +354,23 @@ def build_bank(args: argparse.Namespace) -> Dict[str, Any]:
                 )
                 for name in bucket:
                     bucket[name].append(entry[name])
+
+    observations = {
+        "track_id": _stack_long_or_empty(observation_lists["track_id"], (0,)),
+        "camera_index": _stack_long_or_empty(observation_lists["camera_index"], (0,)),
+        "image_index": _stack_long_or_empty(observation_lists["image_index"], (0,)),
+        "xy": _stack_or_empty(observation_lists["xy"], (0, 2)),
+        "image_xy_norm": _stack_or_empty(observation_lists["image_xy_norm"], (0, 2)),
+        "ray_direction": _stack_or_empty(observation_lists["ray_direction"], (0, 3)),
+        "camera_center": _stack_or_empty(observation_lists["camera_center"], (0, 3)),
+        "gt": _stack_or_empty(observation_lists["gt"], (0, 3)),
+        "fixed_depth": _stack_or_empty(observation_lists["fixed_depth"], (0,)),
+        "weight": _stack_or_empty(observation_lists["weight"], (0,)),
+        "bank_medium_attn": _stack_or_empty(observation_lists["bank_medium_attn"], (0, 3)),
+        "bank_medium_bs": _stack_or_empty(observation_lists["bank_medium_bs"], (0, 3)),
+        "bank_b_inf": _stack_or_empty(observation_lists["bank_b_inf"], (0, 3)),
+    }
+    observations.update(_track_slices(observations["track_id"]))
 
     per_camera: Dict[str, Dict[str, torch.Tensor]] = {}
     for key, bucket in sorted(per_camera_lists.items(), key=lambda item: int(item[0])):
@@ -307,11 +408,13 @@ def build_bank(args: argparse.Namespace) -> Dict[str, Any]:
         "track_config": cfg.__dict__,
         "counters": counters,
         "per_camera_counts": {key: int(value["xy"].shape[0]) for key, value in per_camera.items()},
+        "v2_observation_count": int(observations["track_id"].shape[0]),
+        "v2_track_count": int(observations["track_ids"].shape[0]),
         "git_commit": _git_commit(Path(__file__).resolve().parents[2]),
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
     }
-    bank = {"metadata": metadata, "per_camera": per_camera}
+    bank = {"metadata": metadata, "per_camera": per_camera, "observations": observations}
     args.output_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(bank, args.output_path)
     summary_path = args.output_path.with_suffix(".json")

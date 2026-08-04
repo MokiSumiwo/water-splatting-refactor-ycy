@@ -45,6 +45,7 @@ from water_splatting.attribution import (
 from water_splatting.cleanup import build_cleanup_candidate_mask, format_cleanup_stats, sample_pixel_map_at_gaussians
 from water_splatting.fields import (
     DirectionConditionedMediumField,
+    MediumFieldOutput,
     compute_dual_gaussian_colors,
     compute_gaussian_colors,
     compute_gaussian_sh_residual,
@@ -309,6 +310,30 @@ class WaterSplattingModelConfig(ModelConfig):
     """Weight for online scene-center residual budget on medium attenuation/backscatter/B_inf."""
     lambda_gmvc_fixed_closure: float = 0.0
     """Weight for online fixed-denominator cross-view medium closure."""
+    gmvc_v2_enabled: bool = False
+    """Enable symmetric current-medium GMVC-V2 diagnostics/losses."""
+    lambda_gmvc_profile: float = 0.0
+    """Weight for GMVC-V2 profiled shared intrinsic radiance loss."""
+    lambda_gmvc_symmetric_closure: float = 0.0
+    """Weight for weak GMVC-V2 symmetric current-medium closure."""
+    gmvc_profile_detach_j_star: bool = True
+    """Detach analytic per-track J* inside the GMVC-V2 profiled-radiance loss."""
+    gmvc_v2_max_tracks_per_step: int = 512
+    """Maximum full tracks sampled per step for GMVC-V2."""
+    gmvc_v2_min_observations_per_track: int = 2
+    """Minimum valid observations in a sampled track for GMVC-V2 losses."""
+    gmvc_bounded_medium_enabled: bool = False
+    """Apply explicit scene-centered bounded medium projection to renderer and GMVC point queries."""
+    gmvc_bounded_medium_start_step: int = 10000
+    """First step for ramping in bounded medium projection."""
+    gmvc_bounded_medium_projection_steps: int = 500
+    """Ramp length for bounded medium projection alpha."""
+    gmvc_bounded_beta_log_scale: float = 0.15
+    """Tanh residual scale for log betaD and log betaB in bounded medium mode."""
+    gmvc_bounded_binf_logit_scale: float = 0.10
+    """Tanh residual scale for logit B_inf/medium_rgb in bounded medium mode."""
+    gmvc_bounded_init_from_first_batch: bool = True
+    """Initialize bounded scene centers from the first rendered/query medium batch."""
     gmvc_residual_beta_log_scale: float = 0.15
     """Log residual budget scale for beta_D and beta_B."""
     gmvc_residual_binf_logit_scale: float = 0.10
@@ -735,6 +760,10 @@ class WaterSplattingModel(Model):
             colour_activation=self.colour_activation,
             sigma_activation=self.sigma_activation,
         )
+        self.gmvc_bounded_log_attn_center = nn.Parameter(torch.full((3,), math.log(0.05)))
+        self.gmvc_bounded_log_bs_center = nn.Parameter(torch.full((3,), math.log(0.05)))
+        self.gmvc_bounded_binf_logit_center = nn.Parameter(torch.zeros(3))
+        self._gmvc_bounded_initialized = False
         self.underwater_rasterizer = UnderwaterRasterizer()
 
         if self.seed_points is not None and not self.config.random_init:
@@ -901,6 +930,13 @@ class WaterSplattingModel(Model):
                 # before loading checkpoints, so replacing Parameter objects here leaves
                 # optimizer param groups attached to stale tensors.
                 param.data = torch.zeros(new_shape, device=self.device, dtype=param.dtype)
+        for key in [
+            "gmvc_bounded_log_attn_center",
+            "gmvc_bounded_log_bs_center",
+            "gmvc_bounded_binf_logit_center",
+        ]:
+            if key not in dict:
+                dict[key] = getattr(self, key).detach().clone()
         super().load_state_dict(dict, **kwargs)
 
     def k_nearest_sklearn(self, x: torch.Tensor, k: int):
@@ -1315,6 +1351,18 @@ class WaterSplattingModel(Model):
             param.requires_grad_(not freeze_medium)
         gps["medium_mlp"] = list(self.medium_mlp.parameters())
         gps["direction_encoding"] = list(self.direction_encoding.parameters())
+        bounded_trainable = bool(getattr(self.config, "gmvc_bounded_medium_enabled", False)) and not freeze_medium
+        for param in [
+            self.gmvc_bounded_log_attn_center,
+            self.gmvc_bounded_log_bs_center,
+            self.gmvc_bounded_binf_logit_center,
+        ]:
+            param.requires_grad_(bounded_trainable)
+        gps["gmvc_bounded_medium"] = [
+            self.gmvc_bounded_log_attn_center,
+            self.gmvc_bounded_log_bs_center,
+            self.gmvc_bounded_binf_logit_center,
+        ]
         return gps
 
     def _get_downscale_factor(self):
@@ -1353,7 +1401,11 @@ class WaterSplattingModel(Model):
         return self._effective_b_inf_mode() in {"bounded_residual", "independent"}
 
     def _gmvc_requested(self) -> bool:
-        return bool(getattr(self.config, "gmvc_enabled", False) or getattr(self.config, "gmvc_diagnostic_only", False))
+        return bool(
+            getattr(self.config, "gmvc_enabled", False)
+            or getattr(self.config, "gmvc_diagnostic_only", False)
+            or getattr(self.config, "gmvc_v2_enabled", False)
+        )
 
     def _gmvc_intrinsic_active(self) -> bool:
         if not (self.training and self._gmvc_requested()):
@@ -1391,21 +1443,28 @@ class WaterSplattingModel(Model):
         intrinsic_loss = loss_dict.get("gmvc_intrinsic_loss")
         residual_loss = loss_dict.get("gmvc_residual_budget_loss")
         closure_loss = loss_dict.get("gmvc_fixed_closure_loss")
-        gmvc_losses = [intrinsic_loss, residual_loss, closure_loss]
+        profile_loss = loss_dict.get("gmvc_profile_loss")
+        symmetric_closure_loss = loss_dict.get("gmvc_symmetric_closure_loss")
+        gmvc_losses = [intrinsic_loss, residual_loss, closure_loss, profile_loss, symmetric_closure_loss]
         if not any(loss is not None and bool(getattr(loss, "requires_grad", False)) for loss in gmvc_losses):
             return
 
         def _safe_grad(loss: Optional[torch.Tensor], params: List[torch.Tensor]) -> Tuple[Optional[torch.Tensor], ...]:
             if loss is None or not bool(getattr(loss, "requires_grad", False)):
                 return tuple(None for _ in params)
+            active_params = [param for param in params if bool(getattr(param, "requires_grad", False))]
+            if not active_params:
+                return tuple(None for _ in params)
             try:
-                return torch.autograd.grad(
+                active_grads = torch.autograd.grad(
                     loss,
-                    params,
+                    active_params,
                     retain_graph=True,
                     create_graph=False,
                     allow_unused=True,
                 )
+                grad_iter = iter(active_grads)
+                return tuple(next(grad_iter) if bool(getattr(param, "requires_grad", False)) else None for param in params)
             except RuntimeError as exc:
                 CONSOLE.log(f"[yellow]GMVC grad diagnostic skipped at step {self.step}: {exc}[/yellow]")
                 return tuple(None for _ in params)
@@ -1422,7 +1481,15 @@ class WaterSplattingModel(Model):
             self.gauss_params["quats"],
         ]
         opacity_params = [self.gauss_params["opacities"]]
-        medium_params = list(self.medium_mlp.parameters()) + list(self.direction_encoding.parameters())
+        medium_params = (
+            list(self.medium_mlp.parameters())
+            + list(self.direction_encoding.parameters())
+            + [
+                self.gmvc_bounded_log_attn_center,
+                self.gmvc_bounded_log_bs_center,
+                self.gmvc_bounded_binf_logit_center,
+            ]
+        )
 
         intrinsic_dc = _safe_grad(intrinsic_loss, dc_params)
         rgb_dc = _safe_grad(main_loss, dc_params)
@@ -1431,6 +1498,8 @@ class WaterSplattingModel(Model):
         intrinsic_medium = _safe_grad(intrinsic_loss, medium_params)
         residual_medium = _safe_grad(residual_loss, medium_params)
         closure_medium = _safe_grad(closure_loss, medium_params)
+        profile_medium = _safe_grad(profile_loss, medium_params)
+        symmetric_closure_medium = _safe_grad(symmetric_closure_loss, medium_params)
         rgb_medium = _safe_grad(main_loss, medium_params)
 
         if xys_grad_abs_before is not None and self.xys_grad_abs is not None:
@@ -1443,6 +1512,8 @@ class WaterSplattingModel(Model):
         intrinsic_medium_norm = self._grad_norm(intrinsic_medium)
         residual_medium_norm = self._grad_norm(residual_medium)
         closure_medium_norm = self._grad_norm(closure_medium)
+        profile_medium_norm = self._grad_norm(profile_medium)
+        symmetric_closure_medium_norm = self._grad_norm(symmetric_closure_medium)
         rgb_medium_norm = self._grad_norm(rgb_medium)
         row = {
             "step": int(self.step),
@@ -1506,6 +1577,46 @@ class WaterSplattingModel(Model):
             "gmvc_fixed_closure_weighted": float(
                 closure_loss.detach().float().item() if closure_loss is not None else 0.0
             ),
+            "gmvc_profile_raw": float(
+                metrics_dict.get(
+                    "gmvc_profile_raw",
+                    profile_loss.detach()
+                    if profile_loss is not None
+                    else torch.zeros((), device=self.device),
+                )
+                .detach()
+                .float()
+                .item()
+                if metrics_dict is not None
+                else (
+                    profile_loss.detach().float().item()
+                    if profile_loss is not None
+                    else 0.0
+                )
+            ),
+            "gmvc_symmetric_closure_raw": float(
+                metrics_dict.get(
+                    "gmvc_symmetric_closure_raw",
+                    symmetric_closure_loss.detach()
+                    if symmetric_closure_loss is not None
+                    else torch.zeros((), device=self.device),
+                )
+                .detach()
+                .float()
+                .item()
+                if metrics_dict is not None
+                else (
+                    symmetric_closure_loss.detach().float().item()
+                    if symmetric_closure_loss is not None
+                    else 0.0
+                )
+            ),
+            "gmvc_profile_weighted": float(
+                profile_loss.detach().float().item() if profile_loss is not None else 0.0
+            ),
+            "gmvc_symmetric_closure_weighted": float(
+                symmetric_closure_loss.detach().float().item() if symmetric_closure_loss is not None else 0.0
+            ),
             "gmvc_intrinsic_grad_norm_dc": intrinsic_dc_norm,
             "rgb_grad_norm_dc": rgb_dc_norm,
             "intrinsic_to_rgb_dc_grad_ratio": intrinsic_dc_norm / (rgb_dc_norm + 1e-12),
@@ -1514,10 +1625,15 @@ class WaterSplattingModel(Model):
             "gmvc_intrinsic_grad_norm_medium": intrinsic_medium_norm,
             "gmvc_residual_grad_norm_medium": residual_medium_norm,
             "gmvc_closure_grad_norm_medium": closure_medium_norm,
+            "gmvc_profile_grad_norm_medium": profile_medium_norm,
+            "gmvc_symmetric_closure_grad_norm_medium": symmetric_closure_medium_norm,
             "rgb_grad_norm_medium": rgb_medium_norm,
             "gmvc_intrinsic_to_rgb_medium_grad_ratio": intrinsic_medium_norm / (rgb_medium_norm + 1e-12),
             "gmvc_residual_to_rgb_medium_grad_ratio": residual_medium_norm / (rgb_medium_norm + 1e-12),
             "gmvc_closure_to_rgb_medium_grad_ratio": closure_medium_norm / (rgb_medium_norm + 1e-12),
+            "gmvc_profile_to_rgb_medium_grad_ratio": profile_medium_norm / (rgb_medium_norm + 1e-12),
+            "gmvc_symmetric_closure_to_rgb_medium_grad_ratio": symmetric_closure_medium_norm
+            / (rgb_medium_norm + 1e-12),
             "gmvc_intrinsic_source": str(getattr(self.config, "gmvc_intrinsic_source", "J_proxy_raw")),
             "gmvc_intrinsic_use_dc_proxy": bool(getattr(self.config, "gmvc_intrinsic_use_dc_proxy", True)),
         }
@@ -2125,6 +2241,118 @@ class WaterSplattingModel(Model):
             except Exception as exc:
                 CONSOLE.log(f"[yellow]Failed to write densification region log: {exc}[/yellow]")
 
+    def _gmvc_bounded_projection_alpha(self) -> float:
+        if not bool(getattr(self.config, "gmvc_bounded_medium_enabled", False)):
+            return 0.0
+        start = int(getattr(self.config, "gmvc_bounded_medium_start_step", getattr(self.config, "gmvc_start_step", 10000)))
+        ramp = int(getattr(self.config, "gmvc_bounded_medium_projection_steps", 500))
+        if int(self.step) < start:
+            return 0.0
+        if ramp <= 0:
+            return 1.0
+        return min(max((int(self.step) - start) / max(float(ramp), 1.0), 0.0), 1.0)
+
+    @staticmethod
+    def _logit_unit(value: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
+        clipped = value.clamp(float(eps), 1.0 - float(eps))
+        return torch.log(clipped) - torch.log1p(-clipped)
+
+    def _maybe_initialize_gmvc_bounded_centers(
+        self,
+        *,
+        medium_attn: torch.Tensor,
+        medium_bs: torch.Tensor,
+        b_inf: torch.Tensor,
+    ) -> None:
+        if self._gmvc_bounded_initialized:
+            return
+        if not bool(getattr(self.config, "gmvc_bounded_init_from_first_batch", True)):
+            self._gmvc_bounded_initialized = True
+            return
+        eps = float(getattr(self.config, "gmvc_eps", 1e-4))
+        with torch.no_grad():
+            log_attn = torch.log(medium_attn.detach().clamp_min(eps)).reshape(-1, 3)
+            log_bs = torch.log(medium_bs.detach().clamp_min(eps)).reshape(-1, 3)
+            binf_logit = self._logit_unit(b_inf.detach(), eps=eps).reshape(-1, 3)
+            if log_attn.numel() > 0:
+                self.gmvc_bounded_log_attn_center.data.copy_(log_attn.median(dim=0).values)
+                self.gmvc_bounded_log_bs_center.data.copy_(log_bs.median(dim=0).values)
+                self.gmvc_bounded_binf_logit_center.data.copy_(binf_logit.median(dim=0).values)
+        self._gmvc_bounded_initialized = True
+
+    def _apply_gmvc_bounded_medium(self, medium: MediumFieldOutput) -> MediumFieldOutput:
+        alpha = self._gmvc_bounded_projection_alpha()
+        if alpha <= 0.0 or self.config.zero_medium:
+            return medium
+
+        eps = float(getattr(self.config, "gmvc_eps", 1e-4))
+        b_inf_in = medium.b_inf if medium.b_inf is not None else medium.rgb
+        self._maybe_initialize_gmvc_bounded_centers(
+            medium_attn=medium.attn,
+            medium_bs=medium.bs,
+            b_inf=b_inf_in,
+        )
+
+        beta_scale = max(float(getattr(self.config, "gmvc_bounded_beta_log_scale", 0.15)), eps)
+        binf_scale = max(float(getattr(self.config, "gmvc_bounded_binf_logit_scale", 0.10)), eps)
+
+        def bounded_q(q: torch.Tensor, center: torch.Tensor, scale: float) -> torch.Tensor:
+            center = center.to(device=q.device, dtype=q.dtype).view(*([1] * (q.ndim - 1)), 3)
+            projected = center + float(scale) * torch.tanh((q - center) / float(scale))
+            return (1.0 - alpha) * q + alpha * projected
+
+        log_attn = torch.log(medium.attn.clamp_min(eps))
+        log_bs = torch.log(medium.bs.clamp_min(eps))
+        binf_logit = self._logit_unit(b_inf_in, eps=eps)
+        bounded_attn = torch.exp(bounded_q(log_attn, self.gmvc_bounded_log_attn_center, beta_scale))
+        bounded_bs = torch.exp(bounded_q(log_bs, self.gmvc_bounded_log_bs_center, beta_scale))
+        bounded_binf = torch.sigmoid(bounded_q(binf_logit, self.gmvc_bounded_binf_logit_center, binf_scale))
+        mode = self._effective_b_inf_mode()
+        bounded_rgb = bounded_binf if mode == "tied" else medium.rgb
+        bounded_b_inf = bounded_binf if medium.b_inf is not None or mode == "tied" else None
+        return MediumFieldOutput(
+            rgb=bounded_rgb,
+            bs=bounded_bs,
+            attn=bounded_attn,
+            directions=medium.directions,
+            b_inf=bounded_b_inf,
+            b_inf_residual=medium.b_inf_residual,
+        )
+
+    def _query_gmvc_medium_points(
+        self,
+        directions: torch.Tensor,
+        image_xy: torch.Tensor,
+        camera_centers: torch.Tensor,
+        depth_context: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        scene_center, scene_scale = self._get_scene_normalization(dtype=directions.dtype, device=directions.device)
+        medium = self.medium_field.query_points(
+            directions=directions,
+            image_xy=image_xy,
+            camera_centers=camera_centers,
+            density_bias=self.medium_density_bias,
+            mlp_type=self.config.mlp_type,
+            zero_medium=self.config.zero_medium,
+            context_mode=getattr(self.config, "medium_context_mode", "dir_only"),
+            scene_center=scene_center,
+            scene_scale=scene_scale,
+            camera_context_scale=getattr(self.config, "medium_camera_context_scale", 1.0),
+            camera_context_dropout=getattr(self.config, "medium_camera_context_dropout", 0.0),
+            training=self.training,
+            depth_context=depth_context,
+            enable_b_inf=self._b_inf_requires_head(),
+            b_inf_mode=self._effective_b_inf_mode(),
+            b_inf_residual_scale=getattr(self.config, "b_inf_residual_scale", 0.02),
+        )
+        medium = self._apply_gmvc_bounded_medium(medium)
+        return {
+            "medium_rgb": medium.rgb,
+            "medium_bs": medium.bs,
+            "medium_attn": medium.attn,
+            "b_inf": medium.b_inf if medium.b_inf is not None else medium.rgb,
+        }
+
     def _predict_medium(
         self,
         *,
@@ -2140,7 +2368,7 @@ class WaterSplattingModel(Model):
             dtype=rotation_world_from_camera.dtype,
             device=rotation_world_from_camera.device,
         )
-        return self.medium_field(
+        medium = self.medium_field(
             camera=camera,
             rotation_world_from_camera=rotation_world_from_camera,
             height=height,
@@ -2162,6 +2390,7 @@ class WaterSplattingModel(Model):
             b_inf_mode=self._effective_b_inf_mode(),
             b_inf_residual_scale=getattr(self.config, "b_inf_residual_scale", 0.02),
         )
+        return self._apply_gmvc_bounded_medium(medium)
 
     def _uses_medium_depth_context(self) -> bool:
         return "depth" in getattr(self.config, "medium_context_mode", "dir_only")
@@ -3444,6 +3673,7 @@ class WaterSplattingModel(Model):
                     step=int(self.step),
                     config=self.config,
                     state=self._gmvc_online_state,
+                    medium_query_fn=self._query_gmvc_medium_points,
                 )
                 if metrics_dict is not None:
                     for name, value in gmvc_metrics.items():

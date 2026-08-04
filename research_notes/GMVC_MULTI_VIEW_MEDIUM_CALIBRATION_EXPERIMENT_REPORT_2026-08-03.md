@@ -2089,3 +2089,233 @@ tuned 权重已经进入或超过建议梯度比例区间，但仍未改善 held
 是否确认 GMVC online V1 成功: No
 是否确认 oracle 信号完全失败: No
 ```
+
+## 22. GMVC-V2: symmetric profiled-radiance calibration
+
+### 22.1 Motivation
+
+本轮根据新的分析回到 M1 step-10000 continuation，目标是修复 V1 与 Oracle 不一致的问题。V1 使用当前 view 的 medium 去适配旧 bank partner；V2 改为对同一 track 的所有 observation 都查询当前 medium network，并用解析消元的共享固有辐射 \(J_p^\star\) 恢复 Oracle 中最关键的 latent object color。
+
+V2 不修改 underwater renderer，不监督去水体颜色，不重新启用旧 J/TBAP/TMICA/TACMD/cleanup/capacity 分支。
+
+### 22.2 Code changes
+
+- `water_splatting/fields/medium_field.py`
+  - 新增 `DirectionConditionedMediumField.query_points(...)`；
+  - 新增 `_append_point_context(...)`，复用 `dir_xy_camera` 的 direction、image xy、camera center context；
+  - point query 不 rasterize partner image，只对 bank 中的 ray context 做 medium MLP 查询。
+- `scripts/diagnostics/build_gmvc_tracks.py`
+  - track bank 新增 V2 flat `observations` 表；
+  - 保存 `track_id/camera_index/image_index/xy/image_xy_norm/ray_direction/camera_center/gt/fixed_depth/weight`；
+  - 保留 legacy `per_camera` bank，保证 V1 诊断兼容；
+  - 同时保存 M1 bank medium 参数，仅用于固定分母/诊断，不作为 V2 当前 medium 的梯度端。
+- `water_splatting/medium_calibration/gmvc_training.py`
+  - 新增 `_compute_gmvc_v2_terms(...)`；
+  - 实现 profiled radiance:
+
+```text
+J_p* = sum_i w_i T_i (I_i - B_i) / (sum_i w_i T_i^2 + eps)
+I_hat_i = J_p* T_i + B_i
+```
+
+  - 默认 `J_p*` detach，medium 仍通过 `I_hat_i = sg(J_p*) T_i + B_i` 接收梯度；
+  - 保留 weak symmetric closure，使用每条 sampled track 的 near/far depth-span pair。
+- `water_splatting/water_splatting.py`
+  - 新增 `_query_gmvc_medium_points(...)`；
+  - 将 V2 losses 接入 `compute_gmvc_training_terms(...)`；
+  - 新增 bounded medium projection 试验路径；
+  - 扩展 GMVC grad JSONL，记录 profile / symmetric closure 对 RGB medium gradient ratio。
+- `scripts/experiments/gmvc_v2_symmetric_profile_500.sh`
+  - 新增 S0-S6 500-step continuation wrapper；
+  - S6 是不带 bounded 的 `profile + weak closure`，用于避开 S3/S5 中已经失败的 bounded projection；
+  - Curasao/Panama 的默认 profile 权重调为 `0.5`，保持 profile/RGB-medium gradient ratio 在更保守区间。
+
+### 22.3 New config flags
+
+```text
+gmvc_v2_enabled: bool = False
+lambda_gmvc_profile: float = 0.0
+lambda_gmvc_symmetric_closure: float = 0.0
+gmvc_profile_detach_j_star: bool = True
+gmvc_v2_max_tracks_per_step: int = 512
+gmvc_v2_min_observations_per_track: int = 2
+gmvc_bounded_medium_enabled: bool = False
+gmvc_bounded_medium_start_step: int = 10000
+gmvc_bounded_medium_projection_steps: int = 500
+gmvc_bounded_beta_log_scale: float = 0.15
+gmvc_bounded_binf_logit_scale: float = 0.10
+gmvc_bounded_init_from_first_batch: bool = True
+```
+
+所有新增训练项默认关闭。
+
+### 22.4 Validation and smoke
+
+Point-query diagnostic:
+
+```text
+script: scripts/diagnostics/diagnose_gmvc_point_query.py
+scene: Panama M1 step-10000
+output: renders/gmvc_v2_point_query_smoke_panama.json
+mean_abs_error: 1.44e-5
+max_abs_error: 4.88e-4
+```
+
+结论：point-query 与 full-map bilinear sample 已经没有坐标系级别错配；`max_abs` 未达原始 `1e-5` 理想阈值，主要集中在 tcnn/采样精度量级，作为后续风险记录。
+
+Smoke tests:
+
+```text
+S2 profile 10-step Panama: pass
+S1 symmetric closure 2-step Panama: pass
+S3 bounded-only 2-step Panama: pass after wrapper fixed GMVC bank requirement
+```
+
+Gradient calibration:
+
+```text
+profile lambda=1.0: profile/RGB-medium grad ratio about 3.8% at first probe, later can peak above 10%
+symmetric closure lambda=0.01: closure/RGB-medium grad ratio about 0.4%
+wrapper default closure: 0.02 for Curasao/Panama
+```
+
+### 22.5 Track banks
+
+```text
+Curasao:
+renders/gmvc_v2_track_banks/curasao_m1_step10000_train_s4096/gmvc_track_bank.pt
+tracks: 60,168
+observations: 701,330
+
+Panama:
+renders/gmvc_v2_track_banks/panama_m1_step10000_train_s4096/gmvc_track_bank.pt
+tracks: 47,918
+observations: 400,203
+```
+
+### 22.6 Experiment commands
+
+Main 500-step matrix:
+
+```bash
+SCENE=curasao VARIANT=S0 GPU=6 LOAD_STEP=10000 TARGET_FINAL_STEP=10500 RUN_EVAL=1 STAMP=20260804_gmvc_v2_500 bash scripts/experiments/gmvc_v2_symmetric_profile_500.sh
+SCENE=curasao VARIANT=S1 GPU=7 LOAD_STEP=10000 TARGET_FINAL_STEP=10500 RUN_EVAL=1 STAMP=20260804_gmvc_v2_500 bash scripts/experiments/gmvc_v2_symmetric_profile_500.sh
+SCENE=curasao VARIANT=S2 GPU=8 LOAD_STEP=10000 TARGET_FINAL_STEP=10500 RUN_EVAL=1 STAMP=20260804_gmvc_v2_500 bash scripts/experiments/gmvc_v2_symmetric_profile_500.sh
+SCENE=curasao VARIANT=S3 GPU=9 LOAD_STEP=10000 TARGET_FINAL_STEP=10500 RUN_EVAL=1 STAMP=20260804_gmvc_v2_500 bash scripts/experiments/gmvc_v2_symmetric_profile_500.sh
+
+SCENE=panama VARIANT=S0 GPU=6 LOAD_STEP=10000 TARGET_FINAL_STEP=10500 RUN_EVAL=1 STAMP=20260804_gmvc_v2_500 bash scripts/experiments/gmvc_v2_symmetric_profile_500.sh
+SCENE=panama VARIANT=S1 GPU=7 LOAD_STEP=10000 TARGET_FINAL_STEP=10500 RUN_EVAL=1 STAMP=20260804_gmvc_v2_500 bash scripts/experiments/gmvc_v2_symmetric_profile_500.sh
+SCENE=panama VARIANT=S2 GPU=8 LOAD_STEP=10000 TARGET_FINAL_STEP=10500 RUN_EVAL=1 STAMP=20260804_gmvc_v2_500 bash scripts/experiments/gmvc_v2_symmetric_profile_500.sh
+SCENE=panama VARIANT=S3 GPU=9 LOAD_STEP=10000 TARGET_FINAL_STEP=10500 RUN_EVAL=1 STAMP=20260804_gmvc_v2_500 bash scripts/experiments/gmvc_v2_symmetric_profile_500.sh
+```
+
+Low-profile follow-up:
+
+```bash
+SCENE=curasao VARIANT=S2 LAMBDA_GMVC_PROFILE=0.5 EXPERIMENT_NAME=gmvc_v2_s2_profile05_curasao_seed42_step10000_to_10500 STAMP=20260804_gmvc_v2_profile05_500 bash scripts/experiments/gmvc_v2_symmetric_profile_500.sh
+SCENE=curasao VARIANT=S6 LAMBDA_GMVC_PROFILE=0.5 EXPERIMENT_NAME=gmvc_v2_s6_profile05_closure_curasao_seed42_step10000_to_10500 STAMP=20260804_gmvc_v2_profile05_500 bash scripts/experiments/gmvc_v2_symmetric_profile_500.sh
+SCENE=panama VARIANT=S2 LAMBDA_GMVC_PROFILE=0.5 EXPERIMENT_NAME=gmvc_v2_s2_profile05_panama_seed42_step10000_to_10500 STAMP=20260804_gmvc_v2_profile05_500 bash scripts/experiments/gmvc_v2_symmetric_profile_500.sh
+SCENE=panama VARIANT=S6 LAMBDA_GMVC_PROFILE=0.5 EXPERIMENT_NAME=gmvc_v2_s6_profile05_closure_panama_seed42_step10000_to_10500 STAMP=20260804_gmvc_v2_profile05_500 bash scripts/experiments/gmvc_v2_symmetric_profile_500.sh
+```
+
+Checkpoint decoupling diagnostic:
+
+```bash
+/opt/anaconda3/envs/water_splatting/bin/python scripts/diagnostics/diagnose_gmvc_checkpoint_tracks.py \
+  --load-config <RUN_CONFIG> \
+  --load-step 10500 \
+  --test-mode inference \
+  --split train \
+  --samples-per-view 4096 \
+  --max-tracks 30000 \
+  --output-dir renders/gmvc_v2_checkpoint_diag_20260804_gmvc_v2_500/<scene_variant>
+```
+
+### 22.7 Image metrics
+
+Relative to each scene S0 M1 continuation:
+
+| Scene | Run | PSNR | ΔPSNR | SSIM | ΔSSIM | LPIPS | ΔLPIPS | Image gate |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| Curasao | S1 symmetric closure | 32.7090 | +0.1149 | 0.957952 | +0.000273 | 0.107950 | -0.000162 | pass |
+| Curasao | S2 profile, lambda 1.0 | 32.3168 | -0.2773 | 0.956500 | -0.001179 | 0.108387 | +0.000275 | fail PSNR |
+| Curasao | S2 profile, lambda 0.5 | 32.4308 | -0.1633 | 0.957052 | -0.000627 | 0.108219 | +0.000107 | fail PSNR |
+| Curasao | S3 bounded only | 9.9653 | -22.6288 | 0.666375 | -0.291304 | 0.412123 | +0.304011 | fail |
+| Curasao | S6 profile 0.5 + closure | 32.4344 | -0.1597 | 0.957193 | -0.000486 | 0.108138 | +0.000026 | fail PSNR |
+| Panama | S1 symmetric closure | 32.3406 | +0.0268 | 0.950163 | +0.000111 | 0.073914 | +0.000034 | pass |
+| Panama | S2 profile, lambda 1.0 | 32.3912 | +0.0773 | 0.950053 | +0.000001 | 0.073774 | -0.000105 | pass |
+| Panama | S2 profile, lambda 0.5 | 32.3273 | +0.0134 | 0.950071 | +0.000019 | 0.073922 | +0.000043 | pass |
+| Panama | S3 bounded only | 26.3908 | -5.9230 | 0.937792 | -0.012259 | 0.097067 | +0.023187 | fail |
+| Panama | S6 profile 0.5 + closure | 32.3337 | +0.0198 | 0.950135 | +0.000083 | 0.073710 | -0.000170 | pass |
+
+Image gate:
+
+```text
+PSNR drop <= 0.15 dB
+SSIM drop <= 0.0015
+LPIPS increase <= 0.003
+```
+
+### 22.8 Checkpoint-level decoupling metrics
+
+Relative to each scene S0 M1 continuation:
+
+| Scene | Run | transfer Δ | object-J var Δ | raw closure Δ | fixed closure Δ | old norm closure Δ | Decoupling gate |
+|---|---|---:|---:|---:|---:|---:|---|
+| Curasao | S1 symmetric closure | -1.01% | -3.36% | -2.01% | -0.67% | -1.77% | fail |
+| Curasao | S2 profile, lambda 1.0 | -3.38% | -5.80% | -3.52% | -4.73% | -5.69% | fail |
+| Curasao | S2 profile, lambda 0.5 | -2.89% | -6.37% | -2.70% | -2.73% | -3.76% | fail |
+| Curasao | S3 bounded only | +37.11% | -34.74% | +119.22% | +75.28% | +58.16% | fail |
+| Curasao | S6 profile 0.5 + closure | -2.77% | -4.23% | -3.72% | -3.12% | -0.22% | fail |
+| Panama | S1 symmetric closure | +0.55% | -3.34% | -0.91% | -0.38% | +0.23% | fail |
+| Panama | S2 profile, lambda 1.0 | -2.40% | -6.43% | -2.23% | -1.23% | -1.43% | fail |
+| Panama | S2 profile, lambda 0.5 | +2.18% | +0.24% | +2.13% | +1.26% | +0.97% | fail |
+| Panama | S3 bounded only | +28.65% | +52.47% | +17.14% | +32.69% | +31.19% | fail |
+| Panama | S6 profile 0.5 + closure | -3.37% | -5.85% | -4.36% | -0.89% | -0.27% | fail |
+
+Decoupling gate:
+
+```text
+held-out transfer降低 >= 5%
+object-J variance降低 >= 10%
+raw closure不恶化超过 5%
+fixed closure不恶化超过 5%
+```
+
+### 22.9 Gradient diagnostics
+
+| Scene | Run | profile/RGB medium grad mean | profile max | closure/RGB medium grad mean | closure max |
+|---|---|---:|---:|---:|---:|
+| Curasao | S1 closure | 0.000 | 0.000 | 0.0185 | 0.0376 |
+| Curasao | S2 profile 1.0 | 0.0752 | 0.1362 | 0.000 | 0.000 |
+| Curasao | S2 profile 0.5 | 0.0406 | 0.0711 | 0.000 | 0.000 |
+| Curasao | S6 profile 0.5 + closure | 0.0431 | 0.0821 | 0.0184 | 0.0312 |
+| Panama | S1 closure | 0.000 | 0.000 | 0.0195 | 0.0538 |
+| Panama | S2 profile 1.0 | 0.0441 | 0.1261 | 0.000 | 0.000 |
+| Panama | S2 profile 0.5 | 0.0207 | 0.0650 | 0.000 | 0.000 |
+| Panama | S6 profile 0.5 + closure | 0.0191 | 0.0396 | 0.0177 | 0.0336 |
+
+`lambda=0.5` 让 Curasao profile 梯度落入建议区间，但 RGB PSNR 仍略低于 image gate，说明 Curasao 的失败不是单纯梯度过强。Panama 对 profile 更稳定，`lambda=1.0` 是当前最好的 image candidate。
+
+### 22.10 Conclusions
+
+1. **V2 profile 有真实解耦信号，但未达到正式 gate。** Curasao S2 profile 1.0 同时降低 transfer、object-J variance、raw/fixed closure，但 PSNR 下降 `0.277 dB`；profile 0.5 仍差 `0.163 dB`，刚好超过 image gate。Panama profile 1.0 同时改善 image metrics 和部分 decoupling metrics，但 transfer 只降低 `2.4%`，object-J variance 只降低 `6.4%`，未达 `5%/10%` decoupling gate。
+
+2. **Symmetric closure 是安全但弱的辅助项。** Curasao/Panama S1 都通过 image gate，Curasao RGB 还提升 `+0.115 dB`，但 decoupling 改善幅度只有约 `1%–3%`，不能作为进入 15k 的核心方法。
+
+3. **Explicit bounded medium projection 当前不可用。** S3 在 Curasao 和 Panama 都造成大幅 RGB 崩坏。Curasao 虽然 object-J variance 下降 `34.7%`，但 transfer、closure 和图像指标严重恶化；Panama 则所有 decoupling 指标也恶化。因此 S4/S5 bounded combinations 不应继续运行。
+
+4. **不进入 JapaneseGradens/IUI3 或 15k。** 按原计划，只有 Curasao/Panama 500-step 同时通过 image + decoupling gate 才扩展压力场景。当前没有任何 V2 run 同时满足两个 gate。
+
+当前 gate 结论：
+
+```text
+进入 15k: No
+进入 JapaneseGradens/IUI3: No
+最佳 image candidate: Panama S2 profile lambda=1.0
+最佳 Curasao image candidate: S1 symmetric closure
+最佳 decoupling candidate: none
+是否确认 V2 核心信号存在: Yes, profile loss can reduce held-out decoupling metrics
+是否确认 V2 已成为成功模块: No
+下一步: 不继续 bounded；若继续 GMVC，应重新设计低扰动 profile schedule 或 medium-only freeze/ramp，再考虑 object-step active DC proxy
+```
