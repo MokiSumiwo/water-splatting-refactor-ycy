@@ -342,6 +342,8 @@ class WaterSplattingModelConfig(ModelConfig):
     """Number of object DC calibration steps in each GMVC-V3 alternation cycle."""
     gmvc_v3_freeze_medium_on_object_phase: bool = False
     """Detach medium outputs during GMVC-V3 object phase for strict block-coordinate alternation."""
+    gmvc_v3_object_phase_medium_grad_scale: float = 1.0
+    """Gradient multiplier for medium outputs during GMVC-V3 object phase. Values are unchanged."""
     gmvc_v3_target_current_camera_tracks: bool = False
     """In object phase, sample GMVC tracks that contain the current training camera."""
     gmvc_v3_object_source: Literal["J_proxy_raw"] = "J_proxy_raw"
@@ -1483,18 +1485,29 @@ class WaterSplattingModel(Model):
             return False
         return ((int(self.step) - start) % cycle) >= medium_steps
 
-    def _maybe_detach_gmvc_v3_object_medium(self, medium: MediumFieldOutput) -> MediumFieldOutput:
-        if not bool(getattr(self.config, "gmvc_v3_freeze_medium_on_object_phase", False)):
-            return medium
+    @staticmethod
+    def _scale_gradient(value: torch.Tensor, scale: float) -> torch.Tensor:
+        return value.detach() + float(scale) * (value - value.detach())
+
+    def _maybe_scale_gmvc_v3_object_medium_grad(self, medium: MediumFieldOutput) -> MediumFieldOutput:
         if not self._gmvc_v3_object_phase_active():
             return medium
+        if bool(getattr(self.config, "gmvc_v3_freeze_medium_on_object_phase", False)):
+            scale = 0.0
+        else:
+            scale = float(getattr(self.config, "gmvc_v3_object_phase_medium_grad_scale", 1.0))
+        scale = max(0.0, min(scale, 1.0))
+        if scale >= 1.0:
+            return medium
         return MediumFieldOutput(
-            rgb=medium.rgb.detach(),
-            bs=medium.bs.detach(),
-            attn=medium.attn.detach(),
-            directions=medium.directions.detach(),
-            b_inf=medium.b_inf.detach() if medium.b_inf is not None else None,
-            b_inf_residual=medium.b_inf_residual.detach() if medium.b_inf_residual is not None else None,
+            rgb=self._scale_gradient(medium.rgb, scale),
+            bs=self._scale_gradient(medium.bs, scale),
+            attn=self._scale_gradient(medium.attn, scale),
+            directions=medium.directions,
+            b_inf=self._scale_gradient(medium.b_inf, scale) if medium.b_inf is not None else None,
+            b_inf_residual=self._scale_gradient(medium.b_inf_residual, scale)
+            if medium.b_inf_residual is not None
+            else None,
         )
 
     @staticmethod
@@ -2501,7 +2514,7 @@ class WaterSplattingModel(Model):
             b_inf_residual_scale=getattr(self.config, "b_inf_residual_scale", 0.02),
         )
         medium = self._apply_gmvc_bounded_medium(medium)
-        return self._maybe_detach_gmvc_v3_object_medium(medium)
+        return self._maybe_scale_gmvc_v3_object_medium_grad(medium)
 
     def _uses_medium_depth_context(self) -> bool:
         return "depth" in getattr(self.config, "medium_context_mode", "dir_only")

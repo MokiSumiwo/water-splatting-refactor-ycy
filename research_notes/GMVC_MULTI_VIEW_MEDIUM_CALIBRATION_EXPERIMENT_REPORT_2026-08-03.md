@@ -2916,3 +2916,142 @@ Next concrete step:
 Run Curasao C2/C3 at lower object/profile strength or slower ramp.
 For Panama, do not continue profile-weight escalation; only revisit if a new fixed-bank objective directly improves J-var.
 ```
+
+### 24.10 Curasao object-phase medium gradient-scale sweep
+
+Motivation:
+
+```text
+The C2/C3 comparison suggested that object-phase RGB gradients into the medium branch may be too strong.
+This sweep tests whether an internal Pareto point exists between object target stability and RGB medium adaptability.
+Only object-phase RGB gradients through medium outputs are scaled.
+Medium output values are unchanged.
+Geometry, opacity, SH-rest, and the object auxiliary loss route are not scaled.
+```
+
+Implementation:
+
+```text
+Added WaterSplattingModelConfig.gmvc_v3_object_phase_medium_grad_scale, default 1.0.
+During GMVC-V3 object phase, medium.rgb, medium.bs, medium.attn, b_inf, and b_inf_residual use a straight-through gradient scale:
+value.detach() + scale * (value - value.detach()).
+gmvc_v3_freeze_medium_on_object_phase still forces scale 0.0.
+directions are not detached or scaled.
+```
+
+Sweep wrapper:
+
+```text
+scripts/experiments/gmvc_v3_curasao_medium_grad_sweep_1000.sh
+
+Common setup:
+scene=curasao
+start=M1 step 10000
+target step=11000
+seed=42
+medium_context_mode=dir_xy_camera
+b_inf_mode=tied
+lambda_gmvc_profile=40
+lambda_gmvc_object=0.004
+gmvc_v3_target_current_camera_tracks=True
+gmvc_grad_log_every=49
+```
+
+Runs:
+
+| Run | Object-phase medium RGB grad scale |
+|---|---:|
+| G100 | 1.00 |
+| G075 | 0.75 |
+| G050 | 0.50 |
+| G025 | 0.25 |
+| G000 | 0.00 |
+
+Smoke:
+
+```text
+G050 5-step smoke passed.
+Config recorded gmvc_v3_object_phase_medium_grad_scale=0.50 and targeted current-camera tracks.
+No CUDA/autograd error.
+Gradient log was written to logs/gmvc_v3_grad_a2_alternating_object_curasao_20260804_gmvc_v3_gradscale_smoke_g050.jsonl.
+```
+
+Image metrics:
+
+| Run | PSNR | dPSNR vs A0 | dPSNR vs C0 | SSIM | dSSIM vs A0 | LPIPS | dLPIPS vs A0 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A0 | 32.9690 | +0.0000 | +0.1345 | 0.957966 | +0.000000 | 0.106611 | +0.000000 |
+| C0 | 32.8345 | -0.1345 | +0.0000 | 0.957266 | -0.000699 | 0.106992 | +0.000381 |
+| C2 | 32.8408 | -0.1282 | +0.0063 | 0.957269 | -0.000697 | 0.106971 | +0.000359 |
+| C3 | 32.8169 | -0.1522 | -0.0177 | 0.957333 | -0.000633 | 0.106882 | +0.000271 |
+| G100 | 32.8370 | -0.1320 | +0.0025 | 0.957277 | -0.000689 | 0.106910 | +0.000298 |
+| G075 | 32.8350 | -0.1340 | +0.0005 | 0.957265 | -0.000700 | 0.106915 | +0.000303 |
+| G050 | 32.8427 | -0.1264 | +0.0081 | 0.957270 | -0.000696 | 0.106937 | +0.000326 |
+| G025 | 32.8406 | -0.1285 | +0.0061 | 0.957256 | -0.000710 | 0.106928 | +0.000316 |
+| G000 | 32.8183 | -0.1507 | -0.0162 | 0.957343 | -0.000623 | 0.106901 | +0.000289 |
+
+Fixed-bank metrics, percent change versus phase-matched C0:
+
+Eval-F:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| C2 | -0.00% | -0.20% | -0.06% | -0.44% | +0.36% | -0.28% |
+| C3 | -0.17% | -0.71% | -0.12% | +0.04% | -1.32% | +0.28% |
+| G100 | +0.00% | -0.17% | -0.04% | -0.28% | +0.21% | -0.18% |
+| G075 | +0.00% | -0.20% | -0.05% | -0.38% | +0.28% | -0.23% |
+| G050 | -0.01% | -0.27% | -0.02% | -0.53% | +0.25% | -0.31% |
+| G025 | -0.02% | -0.25% | -0.00% | -0.67% | +0.29% | -0.41% |
+| G000 | -0.17% | -0.73% | -0.14% | +0.01% | -1.42% | +0.27% |
+
+Eval-G:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| C2 | -0.00% | -0.24% | -0.03% | -0.96% | +0.09% | -0.40% |
+| C3 | -0.21% | -1.34% | -0.09% | -0.80% | -1.27% | +0.14% |
+| G100 | +0.00% | -0.20% | -0.02% | -0.80% | +0.11% | -0.31% |
+| G075 | +0.00% | -0.24% | -0.02% | -0.85% | +0.22% | -0.33% |
+| G050 | -0.01% | -0.31% | +0.01% | -1.06% | +0.13% | -0.45% |
+| G025 | -0.02% | -0.33% | +0.02% | -1.24% | +0.26% | -0.56% |
+| G000 | -0.21% | -1.36% | -0.10% | -0.78% | -1.37% | +0.16% |
+
+Gradient route audit:
+
+| Run | Object log rows | RGB medium grad mean in object rows | Object aux DC grad mean | Object aux / RGB DC ratio mean | Object aux medium max | Object aux geometry max | Object aux opacity max |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| G100 | 4 | 0.455006 | 0.000013030290 | 0.020167 | 0.000000 | 0.000000 | 0.000000 |
+| G075 | 4 | 0.341295 | 0.000013027328 | 0.020251 | 0.000000 | 0.000000 | 0.000000 |
+| G050 | 4 | 0.227001 | 0.000013028543 | 0.020260 | 0.000000 | 0.000000 | 0.000000 |
+| G025 | 4 | 0.112840 | 0.000013016824 | 0.020266 | 0.000000 | 0.000000 | 0.000000 |
+| G000 | 4 | 0.000000 | 0.000013025069 | 0.019436 | 0.000000 | 0.000000 | 0.000000 |
+
+Control reproduction:
+
+```text
+G100 approximately reproduces C2 targeted object.
+G000 approximately reproduces C3 strict medium-freeze behavior.
+The implementation therefore passes the first control check.
+The object auxiliary gradient remains DC-only; medium, geometry, and opacity object-aux gradients stay zero in logged object rows.
+The object-phase RGB medium gradient decreases monotonically with the requested scale.
+```
+
+Interpretation:
+
+```text
+No clean internal Pareto point was found.
+G050 is the best image-safe run in this sweep and improves PSNR versus both C0 and C2, but it does not inherit the C3/G000 DC-var improvement.
+G025 gives the strongest object-fit and recomposition gains, but DC-var remains worse than C0 and RGB is not better than G050.
+G000 keeps the transfer/J-var/DC-var direction of C3, but still carries the same PSNR safety problem.
+The main tradeoff therefore still looks like direct competition between medium adaptability and strict object-medium decoupling, not a simple medium-gradient-scale sweet spot.
+```
+
+Updated decision:
+
+```text
+进入 15k: No
+扩展 JapaneseGradens/IUI3/Panama: No
+Best image-safe candidate: G050
+Best decoupling candidate: G000/C3, but PSNR unsafe
+Next single-factor experiment, if continuing GMVC-V3: adjust ramp or object lambda rather than fine-grained medium gradient scale.
+```
