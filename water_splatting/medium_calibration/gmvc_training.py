@@ -16,9 +16,19 @@ def load_gmvc_training_bank(path: str | Path) -> Dict[str, Any]:
     """Load a CPU GMVC track bank built by scripts/diagnostics/build_gmvc_tracks.py."""
 
     try:
-        return torch.load(Path(path), map_location="cpu", weights_only=False)
+        bank = torch.load(Path(path), map_location="cpu", weights_only=False)
     except TypeError:
-        return torch.load(Path(path), map_location="cpu")
+        bank = torch.load(Path(path), map_location="cpu")
+    observations = bank.get("observations", {})
+    if "camera_to_track_ids" not in bank and "camera_index" in observations and "track_id" in observations:
+        camera_to_track_ids = {}
+        camera_index = observations["camera_index"].long()
+        track_id = observations["track_id"].long()
+        for camera in camera_index.unique(sorted=True).tolist():
+            rows = camera_index == int(camera)
+            camera_to_track_ids[str(int(camera))] = track_id[rows].unique(sorted=True).long()
+        bank["camera_to_track_ids"] = camera_to_track_ids
+    return bank
 
 
 def _camera_key(outputs: Dict[str, Tensor]) -> str | None:
@@ -103,6 +113,7 @@ def _sample_v2_track_rows(
     max_tracks: int,
     step: int,
     seed: int,
+    eligible_track_ids: Optional[Tensor] = None,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     track_ids = observations.get("track_ids")
     starts = observations.get("track_starts")
@@ -111,13 +122,20 @@ def _sample_v2_track_rows(
         empty = torch.empty((0,), dtype=torch.long)
         return empty, empty, empty
 
-    track_count = int(track_ids.shape[0])
+    if eligible_track_ids is not None and int(eligible_track_ids.numel()) > 0:
+        chosen_pool = eligible_track_ids.long().cpu()
+    else:
+        chosen_pool = torch.arange(int(track_ids.shape[0]), dtype=torch.long)
+    track_count = int(chosen_pool.shape[0])
+    if track_count == 0:
+        empty = torch.empty((0,), dtype=torch.long)
+        return empty, empty, empty
     if max_tracks <= 0 or track_count <= max_tracks:
-        chosen = torch.arange(track_count, dtype=torch.long)
+        chosen = chosen_pool
     else:
         generator = torch.Generator(device="cpu")
         generator.manual_seed(int(seed) + int(step) * 7919)
-        chosen = torch.randperm(track_count, generator=generator)[:max_tracks]
+        chosen = chosen_pool[torch.randperm(track_count, generator=generator)[:max_tracks]]
 
     row_chunks = []
     local_chunks = []
@@ -214,11 +232,23 @@ def _compute_gmvc_v2_terms(
             "gmvc_v2_sampled_observations": zero,
         }
 
+    object_phase = _gmvc_v3_object_phase(config, step)
+    eligible_track_ids = None
+    if (
+        object_phase
+        and bool(getattr(config, "gmvc_v3_target_current_camera_tracks", False))
+        and outputs is not None
+    ):
+        camera_key = _camera_key(outputs)
+        if camera_key is not None:
+            eligible_track_ids = bank.get("camera_to_track_ids", {}).get(str(camera_key))
+
     rows_cpu, local_cpu, _ = _sample_v2_track_rows(
         observations=observations,
         max_tracks=int(getattr(config, "gmvc_v2_max_tracks_per_step", 512)),
         step=step,
         seed=int(getattr(config, "gmvc_seed", 42)) + 44497,
+        eligible_track_ids=eligible_track_ids,
     )
     if int(rows_cpu.numel()) == 0:
         return {}, {
@@ -350,7 +380,6 @@ def _compute_gmvc_v2_terms(
         j_variance = zero
         j_star = gt_img.new_zeros((sampled_track_count, 3))
 
-    object_phase = _gmvc_v3_object_phase(config, step)
     object_loss = zero
     object_valid_observation_fraction = zero
     object_valid_tracks = zero

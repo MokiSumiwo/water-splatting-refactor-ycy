@@ -2604,3 +2604,315 @@ Compare V2 filtered bank vs V3 geometry-only bank under the same IRLS profile ob
 and separately compare Charbonnier profile vs IRLS-L2 on the same bank.
 This isolates whether Panama regression comes from bank construction or objective scaling.
 ```
+
+## 24. Fixed-bank evaluation and phase-matched V3 controls
+
+日期：2026-08-04
+
+### 24.1 Motivation
+
+Section 23 used `diagnose_gmvc_checkpoint_tracks.py`, which rebuilds tracks for every evaluated checkpoint. That means A0 and A3 can be evaluated on different 3D points, different observation rows, different weights, and a different held-out split. For 1-3% transfer changes this is not reliable enough.
+
+This round fixes the evaluation surface first:
+
+```text
+Eval-F = fixed M1-filtered bank
+Eval-G = fixed geometry-only bank
+```
+
+Both are generated once from the M1 step-10000 checkpoint and then reused for all checkpoints. The fixed diagnostic never rebuilds correspondences from the evaluated model.
+
+### 24.2 Code changes
+
+New diagnostic:
+
+```text
+scripts/diagnostics/diagnose_gmvc_fixed_bank.py
+```
+
+It loads:
+
+```text
+--load-config <checkpoint config>
+--track-bank <fixed bank .pt>
+```
+
+and evaluates all checkpoints on fixed:
+
+```text
+track_id
+observation rows
+GT RGB
+fixed propagation depth
+camera context
+geometry confidence weights
+held-out split
+```
+
+New fixed-bank metrics:
+
+```text
+transfer_l1
+object_j_variance
+closure_signal_floor_l1
+consensus_j_reconstruction_l1
+object_target_l1
+dc_cross_view_variance
+dc_recomposition_l1
+track_profile_residual p50/p75/p90/p95
+IRLS effective weight ratio
+J* outside [-0.1, 1.1] ratio
+valid hessian / transmission-span / depth-span ratios
+```
+
+`object_target_l1`, `dc_cross_view_variance`, and `dc_recomposition_l1` use rendered `J_proxy_raw`, so they actually measure the Gaussian DC/object branch. This fixes the Section 23 issue where `object_j_variance` only measured GT inverted through current medium and did not include Gaussian appearance.
+
+Additional training flags:
+
+```text
+gmvc_v3_freeze_medium_on_object_phase: bool = False
+gmvc_v3_target_current_camera_tracks: bool = False
+```
+
+`gmvc_v3_freeze_medium_on_object_phase=True` detaches medium outputs during object phase. This approximates strict block-coordinate alternation where object phase does not update the medium through the RGB loss.
+
+`gmvc_v3_target_current_camera_tracks=True` samples object-phase tracks from tracks that contain the current training camera. This reduces wasted object-loss samples after the current-camera mask.
+
+Wrapper update:
+
+```text
+VARIANT=A1C
+```
+
+means:
+
+```text
+4 profile steps + 1 auxiliary-off step
+object loss = 0
+```
+
+This is the phase-matched control for A2.
+
+### 24.3 Fixed-bank commands
+
+Curasao A0-A3 fixed re-evaluation:
+
+```bash
+/opt/anaconda3/envs/water_splatting/bin/python scripts/diagnostics/diagnose_gmvc_fixed_bank.py \
+  --load-config <Curasao A0/A1/A2/A3 config> \
+  --track-bank renders/gmvc_v2_track_banks/curasao_m1_step10000_train_s4096/gmvc_track_bank.pt \
+  --max-tracks 30000 \
+  --output-dir renders/gmvc_fixed_bank_diag_20260804/curasao_profile40/<run>/evalf
+
+/opt/anaconda3/envs/water_splatting/bin/python scripts/diagnostics/diagnose_gmvc_fixed_bank.py \
+  --load-config <Curasao A0/A1/A2/A3 config> \
+  --track-bank renders/gmvc_v3_geometry_track_banks/curasao_m1_step10000_train_s4096/gmvc_track_bank.pt \
+  --max-tracks 30000 \
+  --output-dir renders/gmvc_fixed_bank_diag_20260804/curasao_profile40/<run>/evalg
+```
+
+Panama fixed re-evaluation uses the analogous Panama Eval-F and Eval-G banks.
+
+### 24.4 Fixed-bank Curasao profile40 results
+
+Relative to fixed-bank A0 M1 continuation:
+
+| Bank | Run | Transfer Δ | J-var Δ | Closure Δ | Obj-fit Δ | DC-var Δ | Recomp Δ |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Eval-F | A1 profile | -2.19% | -6.97% | -1.46% | -2.50% | -1.64% | -1.89% |
+| Eval-F | A2 object | -1.83% | -6.04% | -1.29% | -2.43% | -1.14% | -1.80% |
+| Eval-F | A3 object+closure | -1.77% | -5.31% | -1.31% | -1.72% | -0.68% | -1.54% |
+| Eval-G | A1 profile | -2.15% | -7.38% | -1.06% | -2.63% | -1.84% | -1.58% |
+| Eval-G | A2 object | -1.82% | -6.49% | -0.95% | -3.01% | -1.56% | -1.68% |
+| Eval-G | A3 object+closure | -1.78% | -5.74% | -1.04% | -2.25% | -0.91% | -1.39% |
+
+Interpretation:
+
+```text
+Fixed Eval-F/Eval-G confirms Curasao profile40 is a real partial success.
+The original checkpoint-rebuild diagnostic under-estimated A1/A2 transfer and J-var gains.
+Object metrics are now meaningful: A2 improves object_target_l1 and dc_recomposition_l1 on both fixed banks.
+```
+
+### 24.5 Fixed-bank Panama profile80 results
+
+Relative to fixed-bank A0 M1 continuation:
+
+| Bank | Run | Transfer Δ | J-var Δ | Closure Δ | Obj-fit Δ | DC-var Δ | Recomp Δ |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Eval-F | A1 profile | -0.73% | -1.98% | -1.63% | +0.07% | -1.01% | -0.19% |
+| Eval-F | A2 object | -0.63% | -1.49% | -1.52% | +0.55% | -0.79% | +0.04% |
+| Eval-F | A3 object+closure | -0.73% | +0.01% | -0.59% | +0.70% | +0.83% | -0.35% |
+| Eval-G | A1 profile | -0.94% | -1.58% | -1.76% | -0.06% | -0.97% | -0.51% |
+| Eval-G | A2 object | -0.82% | -1.15% | -1.64% | +0.18% | -0.59% | -0.39% |
+| Eval-G | A3 object+closure | -0.88% | +0.75% | -1.01% | +0.10% | +1.03% | -0.88% |
+
+Interpretation:
+
+```text
+Fixed evaluation changes the Panama conclusion.
+Profile80 is not directionless; A1/A2 reduce transfer and J-var slightly on both fixed banks.
+However, the magnitude remains far below the full 5%/10% gate.
+A3 closure hurts Panama J-var and DC-var, so closure should not be preferred here.
+```
+
+### 24.6 Curasao phase-matched object controls
+
+Runs:
+
+| Label | Run | Schedule |
+|---|---|---|
+| C0 | A1C | 4 profile + 1 auxiliary-off |
+| C1 | Existing A2 | 4 profile + 1 object |
+| C2 | Targeted A2 | 4 profile + 1 object, current-camera track sampling |
+| C3 | Targeted strict A2 | C2 + medium detached during object phase |
+
+Image metrics versus A0:
+
+| Run | ΔPSNR | ΔSSIM | ΔLPIPS |
+|---|---:|---:|---:|
+| C0 A1C | -0.1345 | -0.000699 | +0.000381 |
+| C1 existing A2 | -0.1330 | -0.000696 | +0.000341 |
+| C2 targeted A2 | -0.1282 | -0.000697 | +0.000359 |
+| C3 targeted strict A2 | -0.1522 | -0.000633 | +0.000271 |
+
+Gradient diagnostics:
+
+| Run | profile/RGB-medium mean | object/RGB-DC mean | object route |
+|---|---:|---:|---|
+| C0 A1C | 0.0077 | 0.0000 | no object loss |
+| C2 targeted A2 | 0.0077 | 0.0040 | DC only; geometry/opacity/medium zero |
+| C3 targeted strict A2 | 0.0068 | 0.0039 | DC only; geometry/opacity/medium zero |
+
+Fixed-bank object-control metrics versus A0:
+
+| Bank | Run | Transfer Δ | J-var Δ | Closure Δ | Obj-fit Δ | DC-var Δ | Recomp Δ |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Eval-F | C0 A1C | -1.83% | -5.85% | -1.26% | -2.06% | -1.40% | -1.57% |
+| Eval-F | C2 targeted | -1.84% | -6.04% | -1.32% | -2.49% | -1.05% | -1.85% |
+| Eval-F | C3 targeted strict | -2.00% | -6.52% | -1.39% | -2.02% | -2.70% | -1.30% |
+| Eval-G | C0 A1C | -1.82% | -6.25% | -0.94% | -2.18% | -1.48% | -1.33% |
+| Eval-G | C2 targeted | -1.82% | -6.48% | -0.97% | -3.12% | -1.39% | -1.73% |
+| Eval-G | C3 targeted strict | -2.02% | -7.50% | -1.02% | -2.97% | -2.72% | -1.19% |
+
+Interpretation:
+
+```text
+C2 is the best object calibration variant so far.
+Against phase-matched C0, C2 slightly improves PSNR, object-fit, and recomposition.
+Targeted sampling raises object/RGB-DC gradient visibility from logging-zero to about 0.4% mean.
+C3 strict medium freeze improves transfer/J-var and DC-var, but PSNR falls just outside the -0.15 dB safety line.
+Strict alternation is promising for decoupling but needs lower strength or slower schedule.
+```
+
+### 24.7 Panama P0-P4 single-factor matrix
+
+All runs:
+
+```text
+start checkpoint: Panama M1 step 10000
+length: 500 steps
+object loss: off
+closure: off
+profile gates: hessian=0, transmission-span=0, depth-span=0
+```
+
+Matrix:
+
+| Run | Bank | Profile loss | Averaging |
+|---|---|---|---|
+| P0 | filtered | Charbonnier | observation-balanced |
+| P1 | geometry-only | Charbonnier | observation-balanced |
+| P2 | filtered | IRLS-L2 | observation-balanced |
+| P3 | filtered | Charbonnier | track-balanced |
+| P4 | geometry-only | IRLS-L2 | track-balanced |
+
+Image metrics versus A0:
+
+| Run | ΔPSNR | ΔSSIM | ΔLPIPS |
+|---|---:|---:|---:|
+| P0 | -0.0327 | -0.000237 | +0.000828 |
+| P1 | -0.0621 | -0.000223 | +0.000974 |
+| P2 | -0.1137 | -0.000260 | +0.000410 |
+| P3 | -0.1152 | -0.000277 | +0.000733 |
+| P4 | -0.0988 | -0.000298 | +0.000664 |
+
+Fixed-bank metrics versus A0:
+
+| Bank | Run | Transfer Δ | J-var Δ | Closure Δ | Obj-fit Δ | DC-var Δ | Recomp Δ |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Eval-F | P0 | -0.38% | -0.10% | -0.36% | -3.51% | +1.92% | -2.31% |
+| Eval-F | P1 | -0.62% | +0.85% | -0.41% | -0.38% | +1.32% | -0.57% |
+| Eval-F | P2 | -0.71% | +0.42% | +0.72% | -2.61% | +1.71% | -2.05% |
+| Eval-F | P3 | -0.52% | +0.46% | -0.70% | +0.19% | +0.81% | -0.06% |
+| Eval-F | P4 | -0.52% | +0.75% | +0.09% | -0.22% | +1.34% | -0.56% |
+| Eval-G | P0 | -0.07% | +0.73% | -0.03% | -4.61% | +1.00% | -2.60% |
+| Eval-G | P1 | -0.72% | +0.67% | -0.69% | -1.82% | +0.38% | -1.24% |
+| Eval-G | P2 | -0.48% | +1.16% | +0.64% | -4.45% | +1.07% | -2.72% |
+| Eval-G | P3 | -0.34% | +0.55% | -0.49% | -1.39% | -0.17% | -0.59% |
+| Eval-G | P4 | -0.56% | +1.23% | -0.23% | -1.10% | +0.50% | -1.03% |
+
+Important note:
+
+```text
+P0-P4 accidentally reused the same default gradient JSONL path because VARIANT=A1 and STAMP were identical.
+The final P4 run overwrote the P0-P3 gradient logs.
+Image and fixed-bank JSON metrics are unaffected.
+Future factor-matrix runs must use unique STAMP or GMVC_GRAD_LOG_PATH per run.
+```
+
+Interpretation:
+
+```text
+The Panama V2-to-V3 regression is not caused only by geometry-only banks.
+P0, which should be closest to V2 filtered Charbonnier observation-balanced, no longer reproduces the old V2 S2 -2.40% transfer / -6.43% J-var signal under this fixed 500-step/gates-off setup.
+Geometry-only bank alone improves transfer more than P0 but worsens J-var.
+IRLS-L2 and track-balanced variants also do not recover J-var.
+The most stable Panama gain across P0-P4 is object/recomposition proxy improvement, not medium-object J-var decoupling.
+```
+
+### 24.8 Historical V2 S2 under fixed-bank evaluation
+
+To check whether P0 failed because it differed from the historical V2 implementation, the existing historical Panama V2 S2 checkpoints were also evaluated on fixed Eval-F/Eval-G:
+
+| Historical run | Bank | Transfer Δ | J-var Δ | Closure Δ | Obj-fit Δ | Recomp Δ |
+|---|---|---:|---:|---:|---:|---:|
+| V2 S2 profile 1.0 | Eval-F | -0.41% | -0.13% | -0.33% | -3.54% | -2.33% |
+| V2 S2 profile 1.0 | Eval-G | -0.10% | +0.70% | -0.01% | -4.81% | -2.71% |
+| V2 S2 profile 0.5 | Eval-F | -0.32% | +2.25% | +0.06% | +1.14% | +0.26% |
+| V2 S2 profile 0.5 | Eval-G | -0.12% | +2.78% | +0.03% | +0.22% | -0.05% |
+
+This changes the interpretation of the old V2 result:
+
+```text
+The previously reported Panama V2 S2 -2.40% transfer / -6.43% J-var improvement does not survive fixed-bank evaluation.
+The old checkpoint-rebuild diagnostic likely mixed true model change with evaluation-set drift.
+Therefore Panama should not be treated as a lost strong-positive V2 case.
+Under fixed evaluation, Panama profile losses mostly give small transfer/closure or object-proxy gains, not robust J-var gains.
+```
+
+### 24.9 Updated decision
+
+Current gate status:
+
+```text
+进入 15k: No
+进入 JapaneseGradens/IUI3: No
+继续 Curasao V3 object line: Yes, but only as 1000-step refinement
+继续 Panama V3 line: No 15k; fixed evaluation shows no strong V2/V3 decoupling signal
+```
+
+Best candidates:
+
+```text
+Curasao decoupling: C3 targeted strict object, but PSNR just fails safety
+Curasao balanced: C2 targeted object
+Panama image-safe: profile80 A2 or P0, but decoupling is too weak
+```
+
+Next concrete step:
+
+```text
+Run Curasao C2/C3 at lower object/profile strength or slower ramp.
+For Panama, do not continue profile-weight escalation; only revisit if a new fixed-bank objective directly improves J-var.
+```
