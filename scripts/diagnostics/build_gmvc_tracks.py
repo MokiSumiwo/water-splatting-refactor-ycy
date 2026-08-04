@@ -81,11 +81,23 @@ def _track_bank_entries(observations: List[Dict[str, torch.Tensor]], cfg: GMVCTr
     attn_log_center = (torch.log(medium_attn.clamp_min(cfg.eps)) * weights[:, None]).sum(dim=0) / denom
     bs_log_center = (torch.log(medium_bs.clamp_min(cfg.eps)) * weights[:, None]).sum(dim=0) / denom
     b_inf_center = (b_inf * weights[:, None]).sum(dim=0) / denom
+    valid_indices = torch.nonzero(valid, as_tuple=False).reshape(-1)
+    valid_depth = depth[valid_indices]
+    near_idx = int(valid_indices[int(torch.argmin(valid_depth).item())].item())
+    far_idx = int(valid_indices[int(torch.argmax(valid_depth).item())].item())
+    depth_mid = 0.5 * (depth[near_idx] + depth[far_idx])
+    baseline_t, baseline_b = _medium_terms(depth, medium_attn, medium_bs, b_inf)
 
     entries: List[Dict[str, torch.Tensor]] = []
-    for obs, weight in zip(observations, weights):
+    for row_idx, (obs, weight) in enumerate(zip(observations, weights)):
         if float(weight.item()) <= 0.0:
             continue
+        partner_idx = far_idx if depth[row_idx] <= depth_mid else near_idx
+        partner_weight = weights[partner_idx].clamp_min(0.0)
+        closure_weight = torch.sqrt(weight.clamp_min(0.0) * partner_weight)
+        left0 = (gt[row_idx] - baseline_b[row_idx]) * baseline_t[partner_idx]
+        right0 = (gt[partner_idx] - baseline_b[partner_idx]) * baseline_t[row_idx]
+        closure_denom_fixed = (left0.abs() + right0.abs()).float()
         entries.append(
             {
                 "camera_index": obs["camera_index"].long(),
@@ -96,6 +108,14 @@ def _track_bank_entries(observations: List[Dict[str, torch.Tensor]], cfg: GMVCTr
                 "medium_bs_log_center": bs_log_center.float(),
                 "b_inf_center": b_inf_center.float(),
                 "weight": weight.float(),
+                "closure_partner_gt": gt[partner_idx].float(),
+                "closure_partner_depth": depth[partner_idx].reshape(()).float(),
+                "closure_partner_medium_attn": medium_attn[partner_idx].float(),
+                "closure_partner_medium_bs": medium_bs[partner_idx].float(),
+                "closure_partner_b_inf": b_inf[partner_idx].float(),
+                "closure_denom_fixed": closure_denom_fixed.float(),
+                "closure_weight": closure_weight.reshape(()).float(),
+                "closure_depth_span": (depth[partner_idx] - depth[row_idx]).abs().reshape(()).float(),
             }
         )
     return entries
@@ -105,6 +125,19 @@ def _stack_or_empty(values: List[torch.Tensor], shape: tuple[int, ...]) -> torch
     if not values:
         return torch.empty(shape, dtype=torch.float32)
     return torch.stack(values).float()
+
+
+def _medium_terms(
+    depth: torch.Tensor,
+    medium_attn: torch.Tensor,
+    medium_bs: torch.Tensor,
+    b_inf: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if depth.ndim == 1:
+        depth = depth[:, None]
+    transmission = torch.exp(-(medium_attn * depth).clamp_min(0.0))
+    backscatter = b_inf * (1.0 - torch.exp(-(medium_bs * depth).clamp_min(0.0)))
+    return transmission, backscatter
 
 
 def build_bank(args: argparse.Namespace) -> Dict[str, Any]:
@@ -225,6 +258,14 @@ def build_bank(args: argparse.Namespace) -> Dict[str, Any]:
                         "medium_bs_log_center": [],
                         "b_inf_center": [],
                         "weight": [],
+                        "closure_partner_gt": [],
+                        "closure_partner_depth": [],
+                        "closure_partner_medium_attn": [],
+                        "closure_partner_medium_bs": [],
+                        "closure_partner_b_inf": [],
+                        "closure_denom_fixed": [],
+                        "closure_weight": [],
+                        "closure_depth_span": [],
                     },
                 )
                 for name in bucket:
@@ -239,6 +280,14 @@ def build_bank(args: argparse.Namespace) -> Dict[str, Any]:
             "medium_bs_log_center": _stack_or_empty(bucket["medium_bs_log_center"], (0, 3)),
             "b_inf_center": _stack_or_empty(bucket["b_inf_center"], (0, 3)),
             "weight": _stack_or_empty(bucket["weight"], (0,)),
+            "closure_partner_gt": _stack_or_empty(bucket["closure_partner_gt"], (0, 3)),
+            "closure_partner_depth": _stack_or_empty(bucket["closure_partner_depth"], (0,)),
+            "closure_partner_medium_attn": _stack_or_empty(bucket["closure_partner_medium_attn"], (0, 3)),
+            "closure_partner_medium_bs": _stack_or_empty(bucket["closure_partner_medium_bs"], (0, 3)),
+            "closure_partner_b_inf": _stack_or_empty(bucket["closure_partner_b_inf"], (0, 3)),
+            "closure_denom_fixed": _stack_or_empty(bucket["closure_denom_fixed"], (0, 3)),
+            "closure_weight": _stack_or_empty(bucket["closure_weight"], (0,)),
+            "closure_depth_span": _stack_or_empty(bucket["closure_depth_span"], (0,)),
         }
         if args.max_observations_per_camera > 0:
             n = int(per_camera[key]["xy"].shape[0])

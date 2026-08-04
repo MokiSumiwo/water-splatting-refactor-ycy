@@ -1823,3 +1823,269 @@ object-J variance降低 >= 10%
 robust closure不变差超过 5%，最好降低
 residual saturation <= 15%
 ```
+
+---
+
+## 21. Closure denominator audit and online V1
+
+### 21.1 代码更新
+
+本轮在 `research/gmvc-medium-calibration` 上实现了最小在线 V1，不替换 M1 medium forward 参数化，只在训练期加入 medium-only 约束：
+
+- `scripts/diagnostics/build_gmvc_tracks.py`
+  - 为每个 GMVC observation 增加 nearest/farthest closure partner；
+  - 保存 `closure_partner_gt/depth/medium_attn/medium_bs/b_inf`；
+  - 保存 M1 baseline 固定分母 `closure_denom_fixed` 和 `closure_weight`。
+- `scripts/diagnostics/fit_gmvc_lowdim_oracle.py`
+  - 增加 `closure_denominator={current,detach,fixed}`；
+  - 修复 `--o1-variants` 解包；
+  - residual regularization 改为约束 `tanh(delta)`；
+  - 增加 actual weighted mean residual 统计。
+- `water_splatting/medium_calibration/gmvc_training.py`
+  - 增加在线 scene-center residual budget；
+  - 增加 fixed-denominator cross-view closure；
+  - 记录 residual、closure、transmission、backscatter 诊断。
+- `water_splatting/water_splatting.py`
+  - 新增 V1 config flags；
+  - 将 `_gmvc_online_state` 传入训练项；
+  - 扩展 GMVC gradient JSONL，记录 residual/closure 相对 RGB 的 medium-gradient ratio。
+- `scripts/diagnostics/diagnose_gmvc_checkpoint_tracks.py`
+  - 新增 checkpoint-level GMVC cross-view diagnostic；
+  - 直接评估 checkpoint 当前 medium 输出的 held-out transfer、raw closure、fixed-normalized closure 和 object-J variance，不拟合 oracle。
+- `scripts/experiments/gmvc_v1_online_500.sh`
+  - 新增 Panama/JapaneseGradens 的 500-step V1 continuation runner；
+  - 默认从 M1 step-10000 checkpoint 继续，旧 GMVC/TBAP/TACMD/TMICA/J/cleanup/capacity 分支全部关闭。
+
+### 21.2 新增 config flags
+
+```text
+lambda_gmvc_residual_budget: float = 0.0
+lambda_gmvc_fixed_closure: float = 0.0
+gmvc_residual_beta_log_scale: float = 0.15
+gmvc_residual_binf_logit_scale: float = 0.10
+gmvc_residual_ema_momentum: float = 0.99
+gmvc_closure_signal_floor: float = 0.03
+```
+
+这些 flag 默认关闭。V1 loss 仅在 `gmvc_enabled=True` 且 `gmvc_diagnostic_only=False` 时进入 loss dict。
+
+### 21.3 Closure denominator audit
+
+运行：
+
+```bash
+# 代表命令；四个场景分别运行
+/opt/anaconda3/envs/water_splatting/bin/python scripts/diagnostics/fit_gmvc_lowdim_oracle.py \
+  --load-config <M1_CONFIG> \
+  --load-step <M1_STEP> \
+  --test-mode inference \
+  --split train \
+  --samples-per-view 4096 \
+  --max-tracks 30000 \
+  --models O0,O1 \
+  --o1-variants "C1_current:0.15:0.10:0.0005:0.0001:0.01:current;C1_detach:0.15:0.10:0.0005:0.0001:0.01:detach;C1_fixed:0.15:0.10:0.0005:0.0001:0.01:fixed" \
+  --output-dir renders/gmvc_oracle_denominator_audit_20260804/<scene>
+```
+
+输出：
+
+```text
+renders/gmvc_oracle_denominator_audit_20260804/curasao_m1_step10000_train_s4096/gmvc_lowdim_oracle.json
+renders/gmvc_oracle_denominator_audit_20260804/iui3_m1_step14999_train_s4096/gmvc_lowdim_oracle.json
+renders/gmvc_oracle_denominator_audit_20260804/japanesegradens_m1_step10000_train_s4096/gmvc_lowdim_oracle.json
+renders/gmvc_oracle_denominator_audit_20260804/panama_m1_step10000_train_s4096/gmvc_lowdim_oracle.json
+```
+
+相对 O0 held-out：
+
+| Scene | Variant | transfer Δ | J-var Δ | raw closure Δ | fixed closure Δ | old norm closure Δ | saturation |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Curasao | C1_current | -29.9% | -43.9% | -36.3% | -27.7% | -17.1% | 9.3% |
+| Curasao | C1_fixed | -31.0% | -38.3% | -41.3% | -22.1% | -11.9% | 9.3% |
+| IUI3 | C1_current | -6.6% | -33.5% | +3.7% | -8.9% | -11.8% | 1.3% |
+| IUI3 | C1_fixed | -6.7% | -7.6% | -10.2% | +18.7% | +38.7% | 5.8% |
+| JapaneseGradens | C1_current | -4.0% | -28.7% | +7.7% | -39.7% | -55.9% | 5.2% |
+| JapaneseGradens | C1_fixed | -5.6% | +13.0% | -16.0% | +14.1% | +17.9% | 1.3% |
+| Panama | C1_current | -4.9% | -28.2% | +9.2% | -40.5% | -55.8% | 3.7% |
+| Panama | C1_fixed | -7.3% | +7.5% | -15.0% | -13.7% | -6.6% | 0.7% |
+
+结论：
+
+- `current` denominator 的 normalized closure 改善包含明显分母投机，JapaneseGradens/Panama 的 raw closure 反而变差。
+- `fixed` denominator 能保留 transfer/raw-closure 信号，特别是 Curasao、Panama，但会让 JapaneseGradens/Panama 的 held-out object-J variance 变差。
+- 正式 V1 只能使用 fixed denominator；不能再用 current differentiable denominator 作为成功证据。
+
+### 21.4 GMVC V1 track banks
+
+训练 bank 使用 M1 step-10000 的 train views 构建：
+
+```text
+renders/gmvc_v1_track_banks/japanesegradens_redsea_m1_step10000_train_s4096/gmvc_track_bank.pt
+renders/gmvc_v1_track_banks/panama_m1_step10000_train_s4096/gmvc_track_bank.pt
+```
+
+统计：
+
+| Scene | accepted tracks | accepted observations | cap |
+|---|---:|---:|---:|
+| JapaneseGradens | 53,397 | 580,275 | 20,000 per camera |
+| Panama | 47,918 | 400,203 | 20,000 per camera |
+
+### 21.5 Online V1 500-step matrix
+
+所有 run 从 M1 step-10000 checkpoint 继续到 step-10500：
+
+| Run | Setting |
+|---|---|
+| V0 | M1 continuation |
+| V1 | residual budget only, `lambda_gmvc_residual_budget=0.001` |
+| V2 | fixed closure only, JG `0.0005`, Panama `0.0010` |
+| V3 | budget `0.001` + low closure |
+| V4 | budget `0.001` + mid closure, JG `0.0015`, Panama `0.0025` |
+| T1 | tuned budget `0.003` + closure, JG `0.020`, Panama `0.050` |
+| T2 | tuned budget `0.003` + closure, JG `0.050`, Panama `0.100` |
+
+代表命令：
+
+```bash
+SCENE=japanesegradens VARIANT=V3 GPU=6 \
+  TARGET_FINAL_STEP=10500 \
+  STAMP=20260804_gmvc_v1_online_500 \
+  bash scripts/experiments/gmvc_v1_online_500.sh
+
+SCENE=panama VARIANT=V3 GPU=9 \
+  TARGET_FINAL_STEP=10500 \
+  STAMP=20260804_gmvc_v1_online_500_tuned \
+  LAMBDA_GMVC_RESIDUAL_BUDGET=0.0030 \
+  LAMBDA_GMVC_FIXED_CLOSURE=0.1000 \
+  GMVC_GRAD_LOG_PATH=logs/gmvc_v1_t2_budget003_closure010_panama_seed42_step10000_to_10500/gmvc_grad.jsonl \
+  GMVC_GRAD_LOG_EVERY=100 \
+  bash scripts/experiments/gmvc_v1_online_500.sh
+```
+
+Eval JSONs：
+
+```text
+renders/gmvc_v1_*_20260804_gmvc_v1_online_500/output.json
+renders/gmvc_v1_*_20260804_gmvc_v1_online_500_tuned/output.json
+```
+
+Checkpoint diagnostics：
+
+```text
+renders/gmvc_v1_checkpoint_diag_20260804/*/gmvc_checkpoint_tracks.json
+renders/gmvc_v1_checkpoint_diag_20260804_tuned/*/gmvc_checkpoint_tracks.json
+```
+
+### 21.6 Image metrics
+
+相对同场景 V0：
+
+| Scene | Run | PSNR Δ | SSIM Δ | LPIPS Δ | Image gate |
+|---|---|---:|---:|---:|---|
+| JapaneseGradens | V1 | +0.0052 | +0.00001 | -0.00013 | pass |
+| JapaneseGradens | V2 | -0.0039 | -0.00013 | +0.00012 | pass |
+| JapaneseGradens | V3 | -0.0014 | -0.00008 | +0.00037 | pass |
+| JapaneseGradens | V4 | +0.0014 | +0.00003 | -0.00004 | pass |
+| JapaneseGradens | T1 | +0.0105 | -0.00005 | +0.00023 | pass |
+| JapaneseGradens | T2 | +0.0122 | -0.00003 | +0.00043 | pass |
+| Panama | V1 | -0.0191 | +0.00001 | -0.00005 | pass |
+| Panama | V2 | -0.0171 | -0.00003 | +0.00005 | pass |
+| Panama | V3 | +0.0059 | +0.00003 | +0.00002 | pass |
+| Panama | V4 | -0.0127 | +0.00002 | -0.00013 | pass |
+| Panama | T1 | -0.0171 | +0.00009 | -0.00025 | pass |
+| Panama | T2 | +0.0448 | +0.00022 | -0.00008 | pass |
+
+所有 V1/Tuned run 都满足 image safety gate：
+
+```text
+PSNR drop <= 0.15 dB
+SSIM drop <= 0.0015
+LPIPS increase <= 0.0030
+```
+
+### 21.7 Checkpoint-level decoupling metrics
+
+相对同场景 V0 held-out cross-view metrics：
+
+| Scene | Run | transfer Δ | object-J var Δ | raw closure Δ | fixed closure Δ | old norm closure Δ | Decoupling gate |
+|---|---|---:|---:|---:|---:|---:|---|
+| JapaneseGradens | V1 | +1.10% | +3.12% | +0.22% | +1.41% | +1.31% | fail |
+| JapaneseGradens | V2 | +0.07% | +1.91% | -0.05% | +2.02% | +2.64% | fail |
+| JapaneseGradens | V3 | -1.90% | -0.20% | -2.53% | +1.91% | +4.14% | fail |
+| JapaneseGradens | V4 | -1.15% | +4.02% | -1.89% | +2.42% | +4.45% | fail |
+| JapaneseGradens | T1 | +1.69% | +3.71% | -0.08% | +0.88% | +4.30% | fail |
+| JapaneseGradens | T2 | -2.88% | +2.57% | -5.74% | +2.22% | +4.57% | fail |
+| Panama | V1 | -4.26% | -3.69% | -4.94% | -1.15% | -0.81% | fail |
+| Panama | V2 | -1.32% | +0.43% | -1.44% | -2.63% | -2.68% | fail |
+| Panama | V3 | +1.79% | +6.44% | +1.09% | -0.02% | +0.39% | fail |
+| Panama | V4 | -3.71% | -1.70% | -4.47% | -2.67% | -2.92% | fail |
+| Panama | T1 | -0.84% | +5.26% | -2.91% | +0.76% | +0.89% | fail |
+| Panama | T2 | +0.36% | +8.13% | -2.68% | +0.79% | +2.16% | fail |
+
+Decoupling gate 使用：
+
+```text
+held-out transfer降低 >= 5%
+object-J variance降低 >= 10%
+raw closure不恶化超过 5%
+fixed-normalized closure降低，或不恶化超过 5%
+residual saturation <= 15%
+```
+
+没有任何在线 V1 run 同时满足 decoupling gate。
+
+### 21.8 Gradient calibration
+
+旧低权重 V3 的 20-step smoke：
+
+```text
+JapaneseGradens V3, lambda_R=0.001, lambda_C=0.0005
+step 10020: residual/RGB-medium grad ratio = 0.0030
+step 10020: closure/RGB-medium grad ratio  = 0.000006
+```
+
+closure 梯度几乎为零，解释了 V0-V4 的 online decoupling 变化很弱。
+
+tuned probe：
+
+| Scene | Setting | step | residual/RGB medium grad | closure/RGB medium grad |
+|---|---|---:|---:|---:|
+| JapaneseGradens | R=0.003, C=0.050 | 10020 | 0.0138 | 0.0111 |
+| Panama | R=0.003, C=0.100 | 10020 | 0.0041 | 0.0062 |
+| JapaneseGradens T1 | R=0.003, C=0.020 | 10400 | 0.0104 | 0.0306 |
+| JapaneseGradens T2 | R=0.003, C=0.050 | 10400 | 0.0108 | 0.0753 |
+| Panama T1 | R=0.003, C=0.050 | 10400 | 0.0361 | 0.0214 |
+| Panama T2 | R=0.003, C=0.100 | 10400 | 0.0492 | 0.0647 |
+
+tuned 权重已经进入或超过建议梯度比例区间，但仍未改善 held-out object-J variance。这说明失败不是单纯由于 `lambda_C` 太小。
+
+### 21.9 结论
+
+1. **Oracle-Pareto 的跨视图信号不是假的，但当前 online V1 没有复现 oracle 解耦收益。** fixed-denominator audit 证明 Curasao/Panama 仍有真实 transfer/raw-closure 信号，但在线训练中这些信号没有稳定转化为 held-out object-J variance 改善。
+
+2. **当前 V1 可以安全训练，但不是成功模块。** 所有 V1/Tuned run 都通过 image safety gate；T2 甚至使 Panama PSNR 增加 `+0.0448 dB`，JapaneseGradens 增加 `+0.0122 dB`。但这些提升不伴随 decoupling gate 改善，不能作为 GMVC 成功证据。
+
+3. **fixed closure 的在线梯度方向可能过于局部。** 当前训练只对当前 camera 的 medium 输出反向传播，partner observation 使用 track bank 中的 M1 detached partner medium。这能避免重渲染 partner view，但也可能把 closure 变成单视角对 M1 partner 的局部校正，难以推动真正的跨视角 scene-center 分解。
+
+4. **object-J variance 是主要失败项。** tuned run 提高了 closure 梯度比例，但 JapaneseGradens/Panama 的 object-J variance 都没有达到 `-10%`，多数还变差。因此不应进入 15k，也不应接 active DC proxy。
+
+### 21.10 下一步建议
+
+停止当前 online V1 作为正式方法进入 15k。保留代码和诊断作为可复现实验基础。
+
+如果继续 GMVC，应优先测试下面两个方向，而不是继续盲目加大 `lambda_C`：
+
+1. **Symmetric pair minibatch closure.** 每步同时渲染 source 与 partner camera，closure 两端都使用当前模型 medium 输出，仍固定 denominator，并只让 medium 分支吃辅助梯度。
+
+2. **Scene-center residual parameterization.** 不再只对当前 M1 output 做 budget loss，而是显式把 medium field 写成 scene center + bounded camera residual，使 optimizer 不能靠原 M1 MLP 自由度绕开 residual center。
+
+当前 gate 结论：
+
+```text
+进入 15k: No
+最佳 image candidate: Panama T2, JapaneseGradens T2
+最佳 decoupling candidate: None
+是否确认 GMVC online V1 成功: No
+是否确认 oracle 信号完全失败: No
+```

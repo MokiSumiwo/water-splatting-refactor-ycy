@@ -320,6 +320,7 @@ class OracleFitVariant:
     lambda_res: float = 0.0
     lambda_sat: float = 0.0
     lambda_closure: float = 0.0
+    closure_denominator: str = "current"
 
 
 def _parse_o1_variants(args: argparse.Namespace) -> List[OracleFitVariant]:
@@ -334,16 +335,21 @@ def _parse_o1_variants(args: argparse.Namespace) -> List[OracleFitVariant]:
                 lambda_res=float(args.lambda_res),
                 lambda_sat=float(args.lambda_sat),
                 lambda_closure=float(args.lambda_closure),
+                closure_denominator=str(args.closure_denominator),
             )
         ]
     variants: List[OracleFitVariant] = []
     for entry in entries:
         parts = [part.strip() for part in entry.split(":")]
-        if len(parts) != 6:
+        if len(parts) not in {6, 7}:
             raise ValueError(
-                "Each --o1-variants entry must be name:beta_scale:binf_scale:lambda_res:lambda_sat:lambda_closure"
+                "Each --o1-variants entry must be "
+                "name:beta_scale:binf_scale:lambda_res:lambda_sat:lambda_closure[:closure_denominator]"
             )
-        name, beta_scale, binf_scale, lambda_res, lambda_sat, lambda_closure = parts
+        name, beta_scale, binf_scale, lambda_res, lambda_sat, lambda_closure = parts[:6]
+        closure_denominator = parts[6] if len(parts) == 7 else str(args.closure_denominator)
+        if closure_denominator not in {"current", "detach", "fixed"}:
+            raise ValueError(f"Unknown closure denominator mode: {closure_denominator}")
         variants.append(
             OracleFitVariant(
                 name=name,
@@ -353,6 +359,7 @@ def _parse_o1_variants(args: argparse.Namespace) -> List[OracleFitVariant]:
                 lambda_res=float(lambda_res),
                 lambda_sat=float(lambda_sat),
                 lambda_closure=float(lambda_closure),
+                closure_denominator=closure_denominator,
             )
         )
     return variants
@@ -468,14 +475,24 @@ class LowDimOracle(torch.nn.Module):
                 "saturation_ratio_abs_tanh_gt_095": 0.0,
             }
         delta_d, delta_b, delta_inf = [value.detach() for value in self._centered_deltas()]
-        tanh_d = torch.tanh(delta_d).abs()
-        tanh_b = torch.tanh(delta_b).abs()
-        tanh_inf = torch.tanh(delta_inf).abs()
-        beta_d_resid = (self.beta_residual_scale * tanh_d).abs()
-        beta_b_resid = (self.beta_residual_scale * tanh_b).abs()
-        binf_resid = (self.binf_residual_scale * tanh_inf).abs()
+        tanh_d_signed = torch.tanh(delta_d)
+        tanh_b_signed = torch.tanh(delta_b)
+        tanh_inf_signed = torch.tanh(delta_inf)
+        tanh_d = tanh_d_signed.abs()
+        tanh_b = tanh_b_signed.abs()
+        tanh_inf = tanh_inf_signed.abs()
+        beta_d_resid_signed = self.beta_residual_scale * tanh_d_signed
+        beta_b_resid_signed = self.beta_residual_scale * tanh_b_signed
+        binf_resid_signed = self.binf_residual_scale * tanh_inf_signed
+        beta_d_resid = beta_d_resid_signed.abs()
+        beta_b_resid = beta_b_resid_signed.abs()
+        binf_resid = binf_resid_signed.abs()
         beta_resid = torch.cat([beta_d_resid, beta_b_resid], dim=0)
         tanh_abs = torch.cat([tanh_d.reshape(-1), tanh_b.reshape(-1), tanh_inf.reshape(-1)])
+        weights = self.camera_weights.to(beta_d_resid_signed.device)
+        beta_d_mean = (beta_d_resid_signed * weights).sum(dim=0)
+        beta_b_mean = (beta_b_resid_signed * weights).sum(dim=0)
+        binf_mean = (binf_resid_signed * weights).sum(dim=0)
         channel_sat = {
             "r": float((tanh_abs[0::3] > 0.95).float().mean().item()) if tanh_abs.numel() >= 3 else 0.0,
             "g": float((tanh_abs[1::3] > 0.95).float().mean().item()) if tanh_abs.numel() >= 3 else 0.0,
@@ -487,6 +504,21 @@ class LowDimOracle(torch.nn.Module):
             "beta_b_log_residual_abs": _stats(beta_b_resid),
             "beta_log_residual_abs": _stats(beta_resid),
             "b_inf_logit_residual_abs": _stats(binf_resid),
+            "weighted_mean_residual": {
+                "beta_d_log_rgb": [float(v) for v in beta_d_mean.detach().cpu()],
+                "beta_b_log_rgb": [float(v) for v in beta_b_mean.detach().cpu()],
+                "b_inf_logit_rgb": [float(v) for v in binf_mean.detach().cpu()],
+                "l2": float(
+                    (
+                        beta_d_mean.square().mean()
+                        + beta_b_mean.square().mean()
+                        + binf_mean.square().mean()
+                    )
+                    .detach()
+                    .cpu()
+                    .item()
+                ),
+            },
             "saturation_ratio_abs_tanh_gt_095": float((tanh_abs > 0.95).float().mean().item()),
             "saturation_ratio_by_parameter": {
                 "beta_d": float((tanh_d > 0.95).float().mean().item()),
@@ -499,19 +531,31 @@ class LowDimOracle(torch.nn.Module):
     def regularization_terms(self, sat_threshold: float, sat_temp: float) -> Dict[str, Tensor]:
         zero = self.log_beta_d_center.new_tensor(0.0)
         if self.model_name != "O1":
-            return {"residual_l2": zero, "saturation_softplus": zero}
+            return {"residual_l2": zero, "saturation_softplus": zero, "mean_residual_l2": zero}
         delta_d, delta_b, delta_inf = self._centered_deltas()
-        residual_l2 = delta_d.square().mean() + delta_b.square().mean() + delta_inf.square().mean()
+        tanh_d = torch.tanh(delta_d)
+        tanh_b = torch.tanh(delta_b)
+        tanh_inf = torch.tanh(delta_inf)
+        residual_l2 = tanh_d.square().mean() + tanh_b.square().mean() + tanh_inf.square().mean()
+        weights = self.camera_weights.to(delta_d.device)
+        beta_d_mean = (self.beta_residual_scale * tanh_d * weights).sum(dim=0)
+        beta_b_mean = (self.beta_residual_scale * tanh_b * weights).sum(dim=0)
+        binf_mean = (self.binf_residual_scale * tanh_inf * weights).sum(dim=0)
+        mean_residual_l2 = beta_d_mean.square().mean() + beta_b_mean.square().mean() + binf_mean.square().mean()
         tanh_abs = torch.cat(
             [
-                torch.tanh(delta_d).abs().reshape(-1),
-                torch.tanh(delta_b).abs().reshape(-1),
-                torch.tanh(delta_inf).abs().reshape(-1),
+                tanh_d.abs().reshape(-1),
+                tanh_b.abs().reshape(-1),
+                tanh_inf.abs().reshape(-1),
             ]
         )
         temp = max(float(sat_temp), self.eps)
         saturation = torch.nn.functional.softplus((tanh_abs - float(sat_threshold)) / temp).mean() * temp
-        return {"residual_l2": residual_l2, "saturation_softplus": saturation}
+        return {
+            "residual_l2": residual_l2,
+            "saturation_softplus": saturation,
+            "mean_residual_l2": mean_residual_l2,
+        }
 
     def fitted_parameters(self, camera_index_values: List[int]) -> Dict[str, Any]:
         camera_id = torch.arange(len(camera_index_values), dtype=torch.long, device=self.log_beta_d_center.device)
@@ -608,6 +652,7 @@ def _closure_loss_for_pairs(
     eps: float,
     signal_floor: float,
     charbonnier_eps: float,
+    denominator_mode: str,
 ) -> Tensor:
     if src_indices.numel() == 0:
         return obs["gt"].new_tensor(0.0)
@@ -615,7 +660,27 @@ def _closure_loss_for_pairs(
     _, transmission_dst, backscatter_dst, gt_dst = model.predict(obs, dst_indices)
     left = (gt_src - backscatter_src) * transmission_dst
     right = (gt_dst - backscatter_dst) * transmission_src
-    denom = torch.clamp(left.abs() + right.abs(), min=float(signal_floor))
+    if denominator_mode == "current":
+        denom_source = left.abs() + right.abs()
+    elif denominator_mode == "detach":
+        denom_source = (left.abs() + right.abs()).detach()
+    elif denominator_mode == "fixed":
+        src_depth = obs["depth"][src_indices]
+        dst_depth = obs["depth"][dst_indices]
+        src_t0 = torch.exp(-(obs["medium_attn"][src_indices] * src_depth).clamp_min(0.0))
+        dst_t0 = torch.exp(-(obs["medium_attn"][dst_indices] * dst_depth).clamp_min(0.0))
+        src_b0 = obs["b_inf"][src_indices] * (
+            1.0 - torch.exp(-(obs["medium_bs"][src_indices] * src_depth).clamp_min(0.0))
+        )
+        dst_b0 = obs["b_inf"][dst_indices] * (
+            1.0 - torch.exp(-(obs["medium_bs"][dst_indices] * dst_depth).clamp_min(0.0))
+        )
+        left0 = (gt_src.detach() - src_b0.detach()) * dst_t0.detach()
+        right0 = (gt_dst.detach() - dst_b0.detach()) * src_t0.detach()
+        denom_source = left0.abs() + right0.abs()
+    else:
+        raise ValueError(f"Unknown closure denominator mode: {denominator_mode}")
+    denom = torch.clamp(denom_source, min=float(signal_floor))
     residual = (left - right) / denom.clamp_min(float(eps))
     pair_weights = torch.sqrt(obs["weight"][src_indices] * obs["weight"][dst_indices]).clamp_min(0.0)
     return _weighted_loss(residual, pair_weights, charbonnier_eps)
@@ -653,6 +718,7 @@ def _fit_model(
         total_closure = 0.0
         total_res = 0.0
         total_sat = 0.0
+        total_mean_res = 0.0
         total_weight = 0.0
         for batch_indices in _iter_minibatches(train_indices, args.batch_size, args.seed, step):
             optimizer.zero_grad(set_to_none=True)
@@ -668,10 +734,12 @@ def _fit_model(
                 args.eps,
                 args.closure_signal_floor,
                 args.charbonnier_eps,
+                variant.closure_denominator,
             )
             loss = (
                 recon_loss
                 + float(variant.lambda_res) * reg_terms["residual_l2"]
+                + float(args.lambda_mean_res) * reg_terms["mean_residual_l2"]
                 + float(variant.lambda_sat) * reg_terms["saturation_softplus"]
                 + float(variant.lambda_closure) * closure_loss
             )
@@ -681,6 +749,9 @@ def _fit_model(
             total_recon += float(recon_loss.detach().cpu().item()) * float(weights.sum().detach().cpu().item())
             total_closure += float(closure_loss.detach().cpu().item()) * float(weights.sum().detach().cpu().item())
             total_res += float(reg_terms["residual_l2"].detach().cpu().item()) * float(weights.sum().detach().cpu().item())
+            total_mean_res += float(reg_terms["mean_residual_l2"].detach().cpu().item()) * float(
+                weights.sum().detach().cpu().item()
+            )
             total_sat += float(reg_terms["saturation_softplus"].detach().cpu().item()) * float(
                 weights.sum().detach().cpu().item()
             )
@@ -693,6 +764,7 @@ def _fit_model(
                     "reconstruction_charbonnier": total_recon / max(total_weight, 1e-8),
                     "closure_robust": total_closure / max(total_weight, 1e-8),
                     "residual_l2": total_res / max(total_weight, 1e-8),
+                    "mean_residual_l2": total_mean_res / max(total_weight, 1e-8),
                     "saturation_softplus": total_sat / max(total_weight, 1e-8),
                     "train_weighted_l1": _weighted_l1_for_indices(model, obs, train_indices),
                 }
@@ -986,6 +1058,8 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             "lambda_res": args.lambda_res,
             "lambda_sat": args.lambda_sat,
             "lambda_closure": args.lambda_closure,
+            "lambda_mean_res": args.lambda_mean_res,
+            "closure_denominator": args.closure_denominator,
             "closure_signal_floor": args.closure_signal_floor,
             "sat_threshold": args.sat_threshold,
             "sat_temp": args.sat_temp,
@@ -1039,7 +1113,10 @@ def main() -> None:
     parser.add_argument(
         "--o1-variants",
         default="",
-        help="Semicolon-separated O1 variants: name:beta_scale:binf_scale:lambda_res:lambda_sat:lambda_closure.",
+        help=(
+            "Semicolon-separated O1 variants: "
+            "name:beta_scale:binf_scale:lambda_res:lambda_sat:lambda_closure[:closure_denominator]."
+        ),
     )
     parser.add_argument("--train-fraction", type=float, default=0.80)
     parser.add_argument("--iters", type=int, default=600)
@@ -1054,6 +1131,8 @@ def main() -> None:
     parser.add_argument("--lambda-res", type=float, default=0.0)
     parser.add_argument("--lambda-sat", type=float, default=0.0)
     parser.add_argument("--lambda-closure", type=float, default=0.0)
+    parser.add_argument("--lambda-mean-res", type=float, default=0.0)
+    parser.add_argument("--closure-denominator", choices=["current", "detach", "fixed"], default="current")
     parser.add_argument("--closure-signal-floor", type=float, default=0.03)
     parser.add_argument("--sat-threshold", type=float, default=0.80)
     parser.add_argument("--sat-temp", type=float, default=0.05)

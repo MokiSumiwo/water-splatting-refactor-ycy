@@ -305,6 +305,18 @@ class WaterSplattingModelConfig(ModelConfig):
     """Weight for weak B_inf/medium_rgb scene-center consistency."""
     lambda_gmvc_intrinsic: float = 0.0
     """Weight for renderer intrinsic Gaussian color consistency against detached track consensus."""
+    lambda_gmvc_residual_budget: float = 0.0
+    """Weight for online scene-center residual budget on medium attenuation/backscatter/B_inf."""
+    lambda_gmvc_fixed_closure: float = 0.0
+    """Weight for online fixed-denominator cross-view medium closure."""
+    gmvc_residual_beta_log_scale: float = 0.15
+    """Log residual budget scale for beta_D and beta_B."""
+    gmvc_residual_binf_logit_scale: float = 0.10
+    """Logit residual budget scale for tied B_inf/medium_rgb."""
+    gmvc_residual_ema_momentum: float = 0.99
+    """EMA momentum for online GMVC scene centers."""
+    gmvc_closure_signal_floor: float = 0.03
+    """Fixed-denominator closure signal floor."""
     gmvc_intrinsic_source: Literal["J_proxy_raw", "J_gaussian_raw", "J_raw", "J"] = "J_proxy_raw"
     """Rendered intrinsic output used by lambda_gmvc_intrinsic. J_proxy_raw has an active color backward path."""
     gmvc_intrinsic_use_dc_proxy: bool = True
@@ -807,6 +819,7 @@ class WaterSplattingModel(Model):
         self._gmvc_training_bank = None
         self._gmvc_training_bank_path = None
         self._gmvc_warned_missing_bank = False
+        self._gmvc_online_state: Dict[str, torch.Tensor] = {}
 
         self.crop_box: Optional[OrientedBox] = None
         if self.config.background_color == "random":
@@ -1374,9 +1387,12 @@ class WaterSplattingModel(Model):
         every = max(int(getattr(self.config, "gmvc_grad_log_every", 100)), 1)
         if int(self.step) % every != 0:
             return
-        intrinsic_loss = loss_dict.get("gmvc_intrinsic_loss")
         main_loss = loss_dict.get("main_loss")
-        if intrinsic_loss is None or not bool(getattr(intrinsic_loss, "requires_grad", False)):
+        intrinsic_loss = loss_dict.get("gmvc_intrinsic_loss")
+        residual_loss = loss_dict.get("gmvc_residual_budget_loss")
+        closure_loss = loss_dict.get("gmvc_fixed_closure_loss")
+        gmvc_losses = [intrinsic_loss, residual_loss, closure_loss]
+        if not any(loss is not None and bool(getattr(loss, "requires_grad", False)) for loss in gmvc_losses):
             return
 
         def _safe_grad(loss: Optional[torch.Tensor], params: List[torch.Tensor]) -> Tuple[Optional[torch.Tensor], ...]:
@@ -1413,6 +1429,9 @@ class WaterSplattingModel(Model):
         intrinsic_geom = _safe_grad(intrinsic_loss, geom_params)
         intrinsic_opacity = _safe_grad(intrinsic_loss, opacity_params)
         intrinsic_medium = _safe_grad(intrinsic_loss, medium_params)
+        residual_medium = _safe_grad(residual_loss, medium_params)
+        closure_medium = _safe_grad(closure_loss, medium_params)
+        rgb_medium = _safe_grad(main_loss, medium_params)
 
         if xys_grad_abs_before is not None and self.xys_grad_abs is not None:
             self.xys_grad_abs = xys_grad_abs_before
@@ -1421,20 +1440,84 @@ class WaterSplattingModel(Model):
 
         intrinsic_dc_norm = self._grad_norm(intrinsic_dc)
         rgb_dc_norm = self._grad_norm(rgb_dc)
+        intrinsic_medium_norm = self._grad_norm(intrinsic_medium)
+        residual_medium_norm = self._grad_norm(residual_medium)
+        closure_medium_norm = self._grad_norm(closure_medium)
+        rgb_medium_norm = self._grad_norm(rgb_medium)
         row = {
             "step": int(self.step),
             "gmvc_intrinsic_raw": float(
-                metrics_dict.get("gmvc_intrinsic_raw", intrinsic_loss.detach()).detach().float().item()
+                metrics_dict.get(
+                    "gmvc_intrinsic_raw",
+                    intrinsic_loss.detach()
+                    if intrinsic_loss is not None
+                    else torch.zeros((), device=self.device),
+                )
+                .detach()
+                .float()
+                .item()
                 if metrics_dict is not None
-                else intrinsic_loss.detach().float().item()
+                else (
+                    intrinsic_loss.detach().float().item()
+                    if intrinsic_loss is not None
+                    else 0.0
+                )
             ),
-            "gmvc_intrinsic_weighted": float(intrinsic_loss.detach().float().item()),
+            "gmvc_residual_budget_raw": float(
+                metrics_dict.get(
+                    "gmvc_residual_budget_raw",
+                    residual_loss.detach()
+                    if residual_loss is not None
+                    else torch.zeros((), device=self.device),
+                )
+                .detach()
+                .float()
+                .item()
+                if metrics_dict is not None
+                else (
+                    residual_loss.detach().float().item()
+                    if residual_loss is not None
+                    else 0.0
+                )
+            ),
+            "gmvc_fixed_closure_raw": float(
+                metrics_dict.get(
+                    "gmvc_fixed_closure_raw",
+                    closure_loss.detach()
+                    if closure_loss is not None
+                    else torch.zeros((), device=self.device),
+                )
+                .detach()
+                .float()
+                .item()
+                if metrics_dict is not None
+                else (
+                    closure_loss.detach().float().item()
+                    if closure_loss is not None
+                    else 0.0
+                )
+            ),
+            "gmvc_intrinsic_weighted": float(
+                intrinsic_loss.detach().float().item() if intrinsic_loss is not None else 0.0
+            ),
+            "gmvc_residual_budget_weighted": float(
+                residual_loss.detach().float().item() if residual_loss is not None else 0.0
+            ),
+            "gmvc_fixed_closure_weighted": float(
+                closure_loss.detach().float().item() if closure_loss is not None else 0.0
+            ),
             "gmvc_intrinsic_grad_norm_dc": intrinsic_dc_norm,
             "rgb_grad_norm_dc": rgb_dc_norm,
             "intrinsic_to_rgb_dc_grad_ratio": intrinsic_dc_norm / (rgb_dc_norm + 1e-12),
             "gmvc_intrinsic_grad_norm_geometry": self._grad_norm(intrinsic_geom),
             "gmvc_intrinsic_grad_norm_opacity": self._grad_norm(intrinsic_opacity),
-            "gmvc_intrinsic_grad_norm_medium": self._grad_norm(intrinsic_medium),
+            "gmvc_intrinsic_grad_norm_medium": intrinsic_medium_norm,
+            "gmvc_residual_grad_norm_medium": residual_medium_norm,
+            "gmvc_closure_grad_norm_medium": closure_medium_norm,
+            "rgb_grad_norm_medium": rgb_medium_norm,
+            "gmvc_intrinsic_to_rgb_medium_grad_ratio": intrinsic_medium_norm / (rgb_medium_norm + 1e-12),
+            "gmvc_residual_to_rgb_medium_grad_ratio": residual_medium_norm / (rgb_medium_norm + 1e-12),
+            "gmvc_closure_to_rgb_medium_grad_ratio": closure_medium_norm / (rgb_medium_norm + 1e-12),
             "gmvc_intrinsic_source": str(getattr(self.config, "gmvc_intrinsic_source", "J_proxy_raw")),
             "gmvc_intrinsic_use_dc_proxy": bool(getattr(self.config, "gmvc_intrinsic_use_dc_proxy", True)),
         }
@@ -1454,6 +1537,7 @@ class WaterSplattingModel(Model):
             return self._gmvc_training_bank
         self._gmvc_training_bank = load_gmvc_training_bank(path)
         self._gmvc_training_bank_path = path
+        self._gmvc_online_state = {}
         metadata = self._gmvc_training_bank.get("metadata", {})
         counts = metadata.get("per_camera_counts", {})
         CONSOLE.log(
@@ -3359,6 +3443,7 @@ class WaterSplattingModel(Model):
                     bank=gmvc_bank,
                     step=int(self.step),
                     config=self.config,
+                    state=self._gmvc_online_state,
                 )
                 if metrics_dict is not None:
                     for name, value in gmvc_metrics.items():
