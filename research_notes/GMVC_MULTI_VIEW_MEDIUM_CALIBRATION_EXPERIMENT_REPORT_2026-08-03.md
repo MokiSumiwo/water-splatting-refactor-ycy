@@ -4785,3 +4785,205 @@ Compare A0 / P30-13k / STOP-15k / MHOLD-15k:
 ```
 
 If MHOLD's RGB gain remains under DC-only or mostly DC-supported rendering, then MHOLD is a strong candidate for the formal GMVC continuation rule. If the gain is mostly SH-rest compensation, then the next module should constrain Gaussian appearance adaptation after medium freeze rather than changing the medium schedule.
+
+## 34. Curasao MHOLD catch-up and SH-rest no-training audits
+
+Date: 2026-08-05
+
+Commit before this section:
+
+```text
+3a90929 Add GMVC medium hold continuation experiment
+```
+
+New diagnostic scripts:
+
+```text
+scripts/diagnostics/summarize_gmvc_catchup_audit.py
+scripts/diagnostics/diagnose_gmvc_sh_rest_contribution.py
+```
+
+Outputs:
+
+```text
+renders/gmvc_fixed_bank_diag_20260805/curasao_mhold_catchup_audit/gmvc_catchup_audit_summary.json
+renders/gmvc_fixed_bank_diag_20260805/curasao_mhold_catchup_audit/gmvc_catchup_audit_summary.md
+renders/gmvc_sh_rest_audit_20260805/curasao_full/gmvc_sh_rest_contribution_summary.json
+```
+
+Commands:
+
+```bash
+/opt/anaconda3/envs/water_splatting/bin/python scripts/diagnostics/summarize_gmvc_catchup_audit.py \
+  --output-dir renders/gmvc_fixed_bank_diag_20260805/curasao_mhold_catchup_audit
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=6 /opt/anaconda3/envs/water_splatting/bin/python scripts/diagnostics/diagnose_gmvc_sh_rest_contribution.py \
+  --run P30_13K=outputs/gmvc_v3_r500_p30_profile_persistence3k_curasao_seed42_step10000_to_13000/water-splatting/gmvc_v3_r500_p30_profile_persistence3k_curasao_seed42_step10000_to_13000_20260805_gmvc_v3_curasao_r500_profile_persistence_3k_p30_p30_r500_g000/config.yml:13000 \
+  --run MHOLD_15K=outputs/gmvc_v3_p30_release_mhold_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_mhold_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_mhold/config.yml:15000 \
+  --run A0_15K=outputs/gmvc_v3_p30_release_a0_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_a0_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_a0/config.yml:15000 \
+  --track-bank EVALF=renders/gmvc_v2_track_banks/curasao_m1_step10000_train_s4096/gmvc_track_bank.pt \
+  --track-bank EVALG=renders/gmvc_v3_geometry_track_banks/curasao_m1_step10000_train_s4096/gmvc_track_bank.pt \
+  --test-mode test --max-images -1 --max-tracks 30000 \
+  --output-dir renders/gmvc_sh_rest_audit_20260805/curasao_full
+```
+
+### 34.1 A0 catch-up audit
+
+The audit used only existing fixed-bank JSON/checkpoints. Lower is better for all fixed-bank metrics.
+
+Eval-F absolute values:
+
+| Run | transfer | J-var | closure | consensus-J | obj-target | DC-var | recomp |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A0-13k | 0.02111963 | 0.00657435 | 0.10122827 | 0.01447284 | 0.07345321 | 0.00188982 | 0.02264931 |
+| A0-14k | 0.02094264 | 0.00633670 | 0.10173087 | 0.01436557 | 0.06510883 | 0.00189892 | 0.02099976 |
+| A0-15k | 0.02086218 | 0.00639501 | 0.10113202 | 0.01431394 | 0.06904572 | 0.00193389 | 0.02162616 |
+| P30-13k | 0.02064424 | 0.00581974 | 0.10014221 | 0.01415097 | 0.06578295 | 0.00183853 | 0.02126446 |
+| MHOLD-15k | 0.02064424 | 0.00581974 | 0.10014221 | 0.01415097 | 0.06494885 | 0.00184273 | 0.02111380 |
+
+Eval-G absolute values:
+
+| Run | transfer | J-var | closure | consensus-J | obj-target | DC-var | recomp |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A0-13k | 0.02038126 | 0.01236850 | 0.08841901 | 0.01410909 | 0.09512940 | 0.00202648 | 0.02462047 |
+| A0-14k | 0.02028283 | 0.01210805 | 0.08896773 | 0.01407697 | 0.08530914 | 0.00204093 | 0.02291383 |
+| A0-15k | 0.02018684 | 0.01213915 | 0.08842448 | 0.01401308 | 0.09050732 | 0.00208890 | 0.02368240 |
+| P30-13k | 0.01992675 | 0.01079966 | 0.08801936 | 0.01379083 | 0.08333792 | 0.00195394 | 0.02297537 |
+| MHOLD-15k | 0.01992675 | 0.01079966 | 0.08801936 | 0.01379083 | 0.08199851 | 0.00197246 | 0.02280215 |
+
+Relative shrinkage is:
+
+```text
+delta_relative = (MHOLD_15K - A0_15K) - (P30_13K - A0_13K)
+```
+
+Positive values mean the relative advantage shrank.
+
+| Eval | Metric | P30-13k advantage | MHOLD-15k advantage | delta_relative | A0 13k->15k improvement |
+|---|---|---:|---:|---:|---:|
+| F | transfer | -0.00047539 | -0.00021794 | +0.00025745 | +0.00025745 |
+| F | J-var | -0.00075461 | -0.00057527 | +0.00017934 | +0.00017934 |
+| F | closure | -0.00108606 | -0.00098982 | +0.00009624 | +0.00009624 |
+| F | consensus-J | -0.00032188 | -0.00016297 | +0.00015890 | +0.00015890 |
+| F | obj-target | -0.00767026 | -0.00409687 | +0.00357340 | +0.00440749 |
+| F | DC-var | -0.00005129 | -0.00009116 | -0.00003987 | -0.00004407 |
+| F | recomp | -0.00138486 | -0.00051236 | +0.00087250 | +0.00102316 |
+| G | transfer | -0.00045450 | -0.00026008 | +0.00019442 | +0.00019442 |
+| G | J-var | -0.00156883 | -0.00133949 | +0.00022935 | +0.00022935 |
+| G | closure | -0.00039965 | -0.00040512 | -0.00000546 | -0.00000546 |
+| G | consensus-J | -0.00031825 | -0.00022224 | +0.00009601 | +0.00009601 |
+| G | obj-target | -0.01179148 | -0.00850881 | +0.00328267 | +0.00462208 |
+| G | DC-var | -0.00007254 | -0.00011643 | -0.00004389 | -0.00006242 |
+| G | recomp | -0.00164510 | -0.00088025 | +0.00076485 | +0.00093807 |
+
+Catch-up conclusion:
+
+```text
+For transfer, J-var, closure, and consensus-J, MHOLD-15k exactly retains P30-13k.
+The relative advantage shrinkage is therefore almost exactly A0's own 13k-to-15k movement.
+GMVC currently looks more like a medium calibration accelerator than a proven better asymptotic decomposition.
+```
+
+Object/DC metrics remain more favorable for MHOLD than A0 in several places, especially object-target and DC-var. This leaves a weaker possibility that GMVC changes responsibility allocation, but the strongest fixed-medium metrics no longer show a large same-step advantage.
+
+### 34.2 SH-rest contribution audit
+
+The SH audit renders every Curasao test eval view twice from each checkpoint:
+
+```text
+Full-SH: normal model._get_active_sh_degree()
+DC-only: temporary diagnostic override model._get_active_sh_degree() = 0
+```
+
+The override is used only during forward rendering. Checkpoints are not modified.
+
+Mean eval metrics:
+
+| Run | Full PSNR | DC-only PSNR | dPSNR Full-DC | Full SSIM | DC SSIM | dLPIPS Full-DC | RGB L1 gain | Luma gain | Chroma gain | SH abs mean |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| P30-13k | 32.2673 | 29.8909 | +2.3764 | 0.956042 | 0.939543 | -0.029750 | +0.003621 | +0.003961 | +0.000457 | 0.010570 |
+| MHOLD-15k | 32.2156 | 29.9081 | +2.3075 | 0.955745 | 0.939329 | -0.030218 | +0.003327 | +0.003642 | +0.000420 | 0.010986 |
+| A0-15k | 32.1800 | 29.7598 | +2.4202 | 0.955931 | 0.939225 | -0.030393 | +0.003559 | +0.003952 | +0.000453 | 0.011241 |
+
+Track-level SH variance:
+
+| Run | Bank | E_SH-var | corr depth | corr T | corr B | corr residual | corr ray-z |
+|---|---|---:|---:|---:|---:|---:|---:|
+| P30-13k | Eval-F | 0.00005163 | -0.3161 | +0.3099 | -0.2743 | +0.2250 | -0.1754 |
+| P30-13k | Eval-G | 0.00004860 | -0.3406 | +0.2757 | -0.3630 | +0.3513 | -0.3245 |
+| MHOLD-15k | Eval-F | 0.00005423 | -0.3087 | +0.3086 | -0.2664 | +0.2222 | -0.1630 |
+| MHOLD-15k | Eval-G | 0.00005127 | -0.3374 | +0.2746 | -0.3591 | +0.3441 | -0.3177 |
+| A0-15k | Eval-F | 0.00005273 | -0.3014 | +0.2967 | -0.2616 | +0.2210 | -0.1646 |
+| A0-15k | Eval-G | 0.00005055 | -0.3273 | +0.2534 | -0.3486 | +0.3473 | -0.3171 |
+
+Per-view summary:
+
+| Run | View | dPSNR Full-DC | SH abs mean | corr depth | corr T | corr B | corr residual |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| P30-13k | 0 | -0.6176 | 0.009528 | -0.4432 | +0.2427 | -0.4637 | -0.0365 |
+| P30-13k | 1 | +5.4106 | 0.013433 | -0.3956 | +0.3289 | -0.4514 | +0.4913 |
+| P30-13k | 2 | +2.3361 | 0.008749 | -0.3857 | +0.3808 | -0.3815 | +0.2943 |
+| MHOLD-15k | 0 | -0.7851 | 0.010472 | -0.4232 | +0.2104 | -0.4586 | -0.0141 |
+| MHOLD-15k | 1 | +5.4236 | 0.013594 | -0.3909 | +0.3197 | -0.4455 | +0.4953 |
+| MHOLD-15k | 2 | +2.2842 | 0.008893 | -0.3789 | +0.3753 | -0.3741 | +0.2960 |
+| A0-15k | 0 | -0.9447 | 0.010761 | -0.4250 | +0.2236 | -0.4414 | +0.0537 |
+| A0-15k | 1 | +5.8294 | 0.013931 | -0.3855 | +0.2870 | -0.4366 | +0.4847 |
+| A0-15k | 2 | +2.3760 | 0.009031 | -0.3653 | +0.3603 | -0.3580 | +0.3005 |
+
+Cross-run residual relation using MHOLD SH magnitude:
+
+| Comparison | mean corr with residual improvement | mean residual improvement |
+|---|---:|---:|
+| MHOLD-15k vs P30-13k | -0.0525 | -0.00028753 |
+| MHOLD-15k vs A0-15k | +0.1070 | -0.00022399 |
+
+SH audit interpretation:
+
+```text
+Full-SH is important for all three checkpoints.
+MHOLD is not more dependent on SH-rest than A0-15k or P30-13k.
+The water-parameter correlations of SH contribution are similar across all three checkpoints.
+The residual-improvement correlation with MHOLD SH magnitude is weak and not a clean sign of water-error reabsorption.
+```
+
+The strongest evidence against an immediate RESTFREEZE run is that A0-15k has a larger Full-SH over DC-only PSNR gain than MHOLD-15k:
+
+```text
+A0-15k:    +2.4202 dB
+P30-13k:   +2.3764 dB
+MHOLD-15k: +2.3075 dB
+```
+
+MHOLD's track-level E_SH-var is slightly higher than A0/P30, but the increase is small:
+
+```text
+Eval-F: MHOLD 0.00005423 vs A0 0.00005273
+Eval-G: MHOLD 0.00005127 vs A0 0.00005055
+```
+
+This is not enough to claim that MHOLD's RGB recovery mainly comes from a new SH-rest water-compensation path.
+
+### 34.3 RESTFREEZE gate
+
+RESTFREEZE was not run.
+
+Reason:
+
+```text
+The trigger condition was not met.
+The audit shows generic SH-rest dependence already present in A0 and P30, not a distinct MHOLD-specific recovery channel.
+The correlations with propagation depth, transmission, and backscatter are systematic but shared across runs.
+Running RESTFREEZE now would test a broad "freeze all high-order appearance" question rather than the intended conditional control.
+```
+
+Updated conclusion:
+
+```text
+MHOLD remains the strongest GMVC mechanism result.
+It proves calibrated-medium hold is compatible with RGB recovery.
+The same-step medium advantage shrinks mainly because A0 catches up between 13k and 15k.
+The SH audit does not show that MHOLD succeeds by uniquely hiding water residuals in high-order SH.
+No further profile scheduling, cross-scene expansion, or >15k training is justified from this branch yet.
+```
