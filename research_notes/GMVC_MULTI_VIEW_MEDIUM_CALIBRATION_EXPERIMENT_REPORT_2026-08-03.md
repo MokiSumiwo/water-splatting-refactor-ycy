@@ -3483,3 +3483,202 @@ Best conservative decoupling candidate: P35.
 Current recommended next step: Curasao-only 3k persistence check for P30 and P35 against P40/A0, still no cross-scene expansion.
 If only one candidate can be carried forward, prefer P30 because it restores most RGB loss while keeping fixed-bank metrics positive.
 ```
+
+## 29. Curasao R500 profile 3k persistence
+
+Date: 2026-08-05
+
+Goal:
+
+```text
+Run the minimal Curasao-only persistence check before any 15k or cross-scene expansion.
+All runs start from the same Curasao M1 step-10000 checkpoint and continue to step-13000.
+Evaluate every run at step-11000, step-12000, and step-13000 against the same-step A0 continuation.
+```
+
+Code additions:
+
+```text
+scripts/experiments/gmvc_v3_curasao_r500_profile_persistence_3000.sh
+scripts/experiments/gmvc_v3_curasao_r500_profile_persistence_eval.sh
+scripts/diagnostics/evaluate_checkpoint_metrics.py
+scripts/diagnostics/summarize_gmvc_persistence.py
+```
+
+Training matrix:
+
+| Run | Profile lambda | GMVC setup |
+|---|---:|---|
+| A0 | 0 | M1 continuation, GMVC off |
+| P40 | 40 | R500, O004, object-phase medium grad scale 0 |
+| P35 | 35 | R500, O004, object-phase medium grad scale 0 |
+| P30 | 30 | R500, O004, object-phase medium grad scale 0 |
+
+Fixed conditions:
+
+```text
+scene=Curasao
+start_checkpoint=outputs/cross_scene_curasao_m1_seed42_15000/.../step-000010000.ckpt
+target_final_step=13000
+max_num_iterations=3000
+steps_per_save=1000
+save_only_latest_checkpoint=False
+object_lambda=0.004
+ramp_steps=500
+object_phase_medium_grad_scale=0.00
+cycle=4 medium : 1 object
+target_current_camera_tracks=True
+train_bank=renders/gmvc_v3_geometry_track_banks/curasao_m1_step10000_train_s4096/gmvc_track_bank.pt
+Eval-F bank=renders/gmvc_v2_track_banks/curasao_m1_step10000_train_s4096/gmvc_track_bank.pt
+Eval-G bank=renders/gmvc_v3_geometry_track_banks/curasao_m1_step10000_train_s4096/gmvc_track_bank.pt
+```
+
+Commands:
+
+```bash
+GPU=6 VARIANT=A0 scripts/experiments/gmvc_v3_curasao_r500_profile_persistence_3000.sh
+GPU=7 VARIANT=P40 scripts/experiments/gmvc_v3_curasao_r500_profile_persistence_3000.sh
+GPU=8 VARIANT=P35 scripts/experiments/gmvc_v3_curasao_r500_profile_persistence_3000.sh
+GPU=9 VARIANT=P30 scripts/experiments/gmvc_v3_curasao_r500_profile_persistence_3000.sh
+
+GPU=6 VARIANTS=A0 RUN_SUMMARY=0 scripts/experiments/gmvc_v3_curasao_r500_profile_persistence_eval.sh
+GPU=7 VARIANTS=P40 RUN_SUMMARY=0 scripts/experiments/gmvc_v3_curasao_r500_profile_persistence_eval.sh
+GPU=8 VARIANTS=P35 RUN_SUMMARY=0 scripts/experiments/gmvc_v3_curasao_r500_profile_persistence_eval.sh
+GPU=9 VARIANTS=P30 RUN_SUMMARY=0 scripts/experiments/gmvc_v3_curasao_r500_profile_persistence_eval.sh
+
+/opt/anaconda3/envs/water_splatting/bin/python scripts/diagnostics/summarize_gmvc_persistence.py \
+  --root renders/gmvc_fixed_bank_diag_20260805/curasao_r500_profile_persistence_3k \
+  --variants A0,P40,P35,P30 \
+  --steps 11000,12000,13000 \
+  --output renders/gmvc_fixed_bank_diag_20260805/curasao_r500_profile_persistence_3k/summary.json
+```
+
+Outputs:
+
+```text
+outputs/gmvc_v3_a0_profile_persistence3k_curasao_seed42_step10000_to_13000
+outputs/gmvc_v3_r500_p40_profile_persistence3k_curasao_seed42_step10000_to_13000
+outputs/gmvc_v3_r500_p35_profile_persistence3k_curasao_seed42_step10000_to_13000
+outputs/gmvc_v3_r500_p30_profile_persistence3k_curasao_seed42_step10000_to_13000
+renders/gmvc_fixed_bank_diag_20260805/curasao_r500_profile_persistence_3k/summary.json
+```
+
+All four runs saved step-11000, step-12000, and step-13000 checkpoints.
+
+RGB metrics:
+
+| Step | Run | PSNR | dPSNR | SSIM | dSSIM | LPIPS | dLPIPS |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 11000 | A0 | 32.9731 | +0.0000 | 0.957970 | +0.000000 | 0.106627 | +0.000000 |
+| 11000 | P40 | 32.8651 | -0.1080 | 0.957492 | -0.000478 | 0.106849 | +0.000222 |
+| 11000 | P35 | 32.8911 | -0.0819 | 0.957577 | -0.000393 | 0.106827 | +0.000199 |
+| 11000 | P30 | 32.9229 | -0.0502 | 0.957666 | -0.000304 | 0.106736 | +0.000109 |
+| 12000 | A0 | 32.1031 | +0.0000 | 0.957241 | +0.000000 | 0.108162 | +0.000000 |
+| 12000 | P40 | 32.0497 | -0.0534 | 0.956766 | -0.000475 | 0.107706 | -0.000456 |
+| 12000 | P35 | 32.0667 | -0.0365 | 0.956841 | -0.000399 | 0.107632 | -0.000530 |
+| 12000 | P30 | 32.0832 | -0.0199 | 0.956913 | -0.000327 | 0.107652 | -0.000510 |
+| 13000 | A0 | 32.2263 | +0.0000 | 0.956923 | +0.000000 | 0.107986 | +0.000000 |
+| 13000 | P40 | 32.2513 | +0.0250 | 0.955700 | -0.001223 | 0.108110 | +0.000124 |
+| 13000 | P35 | 32.2522 | +0.0259 | 0.955864 | -0.001059 | 0.108055 | +0.000069 |
+| 13000 | P30 | 32.2673 | +0.0410 | 0.956042 | -0.000880 | 0.107933 | -0.000054 |
+
+Fixed-bank percent change versus same-step A0. Lower is better for all listed fixed-bank metrics.
+
+Step 11000 Eval-F:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| P40 | -1.70% | -5.85% | -1.08% | -2.26% | -2.58% | -1.32% |
+| P35 | -1.52% | -5.42% | -0.89% | -2.42% | -2.49% | -1.33% |
+| P30 | -1.32% | -4.90% | -0.71% | -2.54% | -2.43% | -1.34% |
+
+Step 11000 Eval-G:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| P40 | -1.73% | -6.91% | -0.75% | -3.07% | -2.62% | -1.12% |
+| P35 | -1.55% | -6.52% | -0.59% | -3.31% | -2.40% | -1.21% |
+| P30 | -1.37% | -6.02% | -0.45% | -3.44% | -2.35% | -1.26% |
+
+Step 12000 Eval-F:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| P40 | -2.16% | -8.78% | -1.62% | -3.05% | -2.62% | -1.58% |
+| P35 | -1.95% | -8.23% | -1.46% | -2.90% | -2.54% | -1.42% |
+| P30 | -1.73% | -7.57% | -1.31% | -2.67% | -2.43% | -1.23% |
+
+Step 12000 Eval-G:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| P40 | -2.15% | -10.68% | -0.95% | -4.86% | -3.24% | -1.96% |
+| P35 | -1.92% | -9.94% | -0.82% | -4.57% | -3.13% | -1.80% |
+| P30 | -1.67% | -9.11% | -0.70% | -4.29% | -3.07% | -1.62% |
+
+Step 13000 Eval-F:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| P40 | -2.77% | -13.44% | -1.06% | -13.13% | -3.32% | -7.84% |
+| P35 | -2.54% | -12.39% | -1.13% | -11.54% | -2.99% | -6.84% |
+| P30 | -2.25% | -11.48% | -1.07% | -10.44% | -2.71% | -6.11% |
+
+Step 13000 Eval-G:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| P40 | -2.80% | -15.13% | -0.38% | -15.17% | -4.10% | -8.43% |
+| P35 | -2.54% | -13.80% | -0.48% | -13.48% | -3.77% | -7.41% |
+| P30 | -2.23% | -12.68% | -0.45% | -12.40% | -3.58% | -6.68% |
+
+Step-13000 absolute fixed-bank metrics:
+
+Eval-F:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| A0 | 0.021120 | 0.006574 | 0.101228 | 0.073453 | 0.001890 | 0.022649 |
+| P40 | 0.020535 | 0.005691 | 0.100153 | 0.063808 | 0.001827 | 0.020874 |
+| P35 | 0.020582 | 0.005760 | 0.100085 | 0.064978 | 0.001833 | 0.021100 |
+| P30 | 0.020644 | 0.005820 | 0.100142 | 0.065783 | 0.001839 | 0.021264 |
+
+Eval-G:
+
+| Run | Transfer | J-var | Closure | Obj-fit | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| A0 | 0.020381 | 0.012368 | 0.088419 | 0.095129 | 0.002026 | 0.024620 |
+| P40 | 0.019810 | 0.010497 | 0.088081 | 0.080702 | 0.001943 | 0.022544 |
+| P35 | 0.019863 | 0.010661 | 0.087994 | 0.082304 | 0.001950 | 0.022796 |
+| P30 | 0.019927 | 0.010800 | 0.088019 | 0.083338 | 0.001954 | 0.022975 |
+
+Gradient log facts:
+
+| Run | Rows | Last logged step | Last profile lambda | Last profile grad norm | Last profile/RGB medium ratio | Object grad DC mean | Object/RGB DC mean | Late J* drift mean |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| P40 | 61 | 12985 | 40 | 0.003829 | 0.004783 | 0.0000119 | 0.016854 | 0.017188 |
+| P35 | 61 | 12985 | 35 | 0.003315 | 0.004153 | 0.0000119 | 0.016848 | 0.017338 |
+| P30 | 61 | 12985 | 30 | 0.002843 | 0.003586 | 0.0000119 | 0.016882 | 0.017325 |
+
+Interpretation:
+
+```text
+The 3k persistence result supports the profile signal as persistent on Curasao.
+Fixed Eval-F and Eval-G improvements do not decay after step-11000. They become stronger by step-13000 for transfer, J-var, object-fit, DC-var, and recomposition.
+P40 remains the strongest decoupling configuration, but it has worse RGB tradeoff.
+P30 is the best RGB/Pareto point at step-13000: +0.0410 dB PSNR versus A0 and slightly better LPIPS, while retaining positive fixed-bank improvements on both banks.
+The remaining problem is SSIM. P30 still drops -0.000880 SSIM versus same-step A0 at step-13000, while P35 and P40 drop even more.
+Therefore the persistence test passes the decoupling-signal requirement, but it is not a clean RGB safety pass.
+```
+
+Gate decision:
+
+```text
+进入 15k: No.
+扩展场景: No.
+Best current candidate: P30.
+Reason: P30 has the best RGB tradeoff and retains persistent fixed-bank transfer/J-var/DC-var/object-fit/recomposition gains.
+Blocking issue: same-step SSIM drop remains too large for a clean safety claim.
+Next step should stay Curasao-only and single-factor. Do not tune profile lambda further yet. First identify whether the step-13000 SSIM drop is from eval-view texture/edge degradation, Gaussian appearance drift, or medium over-calibration.
+Recommended next diagnostic: generate Curasao step-13000 contact sheets/residual maps for A0 and P30 on the three eval views, plus per-view RGB metrics, before deciding any 15k run.
+```
