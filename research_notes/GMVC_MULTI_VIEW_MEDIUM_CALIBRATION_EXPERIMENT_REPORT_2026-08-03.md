@@ -3682,3 +3682,162 @@ Blocking issue: same-step SSIM drop remains too large for a clean safety claim.
 Next step should stay Curasao-only and single-factor. Do not tune profile lambda further yet. First identify whether the step-13000 SSIM drop is from eval-view texture/edge degradation, Gaussian appearance drift, or medium over-calibration.
 Recommended next diagnostic: generate Curasao step-13000 contact sheets/residual maps for A0 and P30 on the three eval views, plus per-view RGB metrics, before deciding any 15k run.
 ```
+
+## 30. Curasao P30 per-view diagnosis and 13k to 15k continuation
+
+Date: 2026-08-05
+
+Correction to the previous gate:
+
+```text
+The step-13000 P30 SSIM delta is -0.000880 versus same-step A0.
+This is below the predefined safety limit of -0.0015, so it should not block a Curasao-only 15k continuation.
+The correct 13k decision is: run the per-view residual diagnosis, then continue only A0 and P30 from the matched step-13000 checkpoints to step-15000.
+No cross-scene expansion is allowed before the 15k Curasao RGB and fixed-bank gates are checked.
+```
+
+Code additions:
+
+```text
+scripts/diagnostics/diagnose_gmvc_per_view_residuals.py
+scripts/experiments/gmvc_v3_curasao_p30_13k_to_15k.sh
+scripts/experiments/gmvc_v3_curasao_p30_15k_eval.sh
+```
+
+The continuation wrapper uses Nerfstudio `--load-checkpoint` through `LOAD_CHECKPOINT`, not model-only loading. Nerfstudio `Trainer._load_checkpoint()` restores the pipeline, optimizers, schedulers when enabled, and grad scaler. The P30 wrapper also pins the train bank to:
+
+```text
+renders/gmvc_v3_geometry_track_banks/curasao_m1_step10000_train_s4096/gmvc_track_bank.pt
+```
+
+This avoids accidentally constructing or loading a `curasao_m1_step13000` bank when `LOAD_STEP=13000`.
+
+13k per-view diagnostic command:
+
+```bash
+/opt/anaconda3/envs/water_splatting/bin/python scripts/diagnostics/diagnose_gmvc_per_view_residuals.py \
+  --a0-config outputs/gmvc_v3_a0_profile_persistence3k_curasao_seed42_step10000_to_13000/water-splatting/gmvc_v3_a0_profile_persistence3k_curasao_seed42_step10000_to_13000_20260805_gmvc_v3_curasao_r500_profile_persistence_3k_a0/config.yml \
+  --a0-step 13000 \
+  --p30-config outputs/gmvc_v3_r500_p30_profile_persistence3k_curasao_seed42_step10000_to_13000/water-splatting/gmvc_v3_r500_p30_profile_persistence3k_curasao_seed42_step10000_to_13000_20260805_gmvc_v3_curasao_r500_profile_persistence_3k_p30_p30_r500_g000/config.yml \
+  --p30-step 13000 \
+  --test-mode test \
+  --output-dir renders/gmvc_per_view_residuals_20260805/curasao_a0_vs_p30_step13000
+```
+
+13k per-view summary:
+
+| View | Image | dPSNR | dSSIM | dLPIPS | dRGB L1 | dLuma L1 | dChroma L1 |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 0 | MTN_1288.png | -0.6093 | -0.003634 | +0.001219 | +0.003249 | +0.003817 | -0.000293 |
+| 1 | MTN_1296.png | +0.4687 | +0.000574 | -0.000732 | -0.000690 | -0.000971 | +0.000175 |
+| 2 | MTN_1304.png | +0.2635 | +0.000419 | -0.000648 | -0.000426 | -0.000628 | -0.000248 |
+| Mean | all | +0.0410 | -0.000880 | -0.000054 | +0.000711 | +0.000739 | -0.000122 |
+
+13k interpretation:
+
+```text
+The 13k SSIM drop is dominated by view 0, while views 1 and 2 improve in PSNR, SSIM, and LPIPS.
+This supports the updated decision that P30 was safe enough for Curasao-only 15k.
+The diagnostic output is:
+renders/gmvc_per_view_residuals_20260805/curasao_a0_vs_p30_step13000/per_view_residual_summary.json
+```
+
+15k continuation commands:
+
+```bash
+GPU=6 VARIANT=A0 scripts/experiments/gmvc_v3_curasao_p30_13k_to_15k.sh
+GPU=9 VARIANT=P30 scripts/experiments/gmvc_v3_curasao_p30_13k_to_15k.sh
+
+GPU=6 VARIANTS=A0 RUN_SUMMARY=0 scripts/experiments/gmvc_v3_curasao_p30_15k_eval.sh
+GPU=9 VARIANTS=P30 RUN_SUMMARY=0 scripts/experiments/gmvc_v3_curasao_p30_15k_eval.sh
+
+/opt/anaconda3/envs/water_splatting/bin/python scripts/diagnostics/summarize_gmvc_persistence.py \
+  --root renders/gmvc_fixed_bank_diag_20260805/curasao_p30_15k \
+  --variants A0,P30 \
+  --steps 14000,15000 \
+  --output renders/gmvc_fixed_bank_diag_20260805/curasao_p30_15k/summary.json
+```
+
+Continuation outputs:
+
+```text
+outputs/gmvc_v3_a0_15k_curasao_seed42_step13000_to_15000
+outputs/gmvc_v3_r500_p30_15k_curasao_seed42_step13000_to_15000
+renders/gmvc_fixed_bank_diag_20260805/curasao_p30_15k/summary.json
+```
+
+Both runs saved:
+
+```text
+step-000014000.ckpt
+step-000015000.ckpt
+```
+
+RGB metrics:
+
+| Step | Run | PSNR | dPSNR | SSIM | dSSIM | LPIPS | dLPIPS |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 14000 | A0 | 32.3610 | +0.0000 | 0.955977 | +0.000000 | 0.108265 | +0.000000 |
+| 14000 | P30 | 32.0915 | -0.2695 | 0.955008 | -0.000969 | 0.108525 | +0.000260 |
+| 15000 | A0 | 32.1818 | +0.0000 | 0.955928 | +0.000000 | 0.107999 | +0.000000 |
+| 15000 | P30 | 31.9670 | -0.2148 | 0.955133 | -0.000795 | 0.108302 | +0.000303 |
+
+Fixed-bank percent change versus same-step A0. Lower is better for all listed fixed-bank metrics.
+
+Step 14000:
+
+| Eval | Transfer | J-var | Closure | Obj-target | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| Eval-F | -2.64% | -10.19% | -0.94% | -2.77% | -4.20% | -1.54% |
+| Eval-G | -2.80% | -11.92% | -0.51% | -4.81% | -4.67% | -1.56% |
+
+Step 15000:
+
+| Eval | Transfer | J-var | Closure | Obj-target | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|
+| Eval-F | -2.23% | -12.16% | -0.78% | -7.07% | -5.30% | -3.40% |
+| Eval-G | -2.61% | -15.80% | -0.06% | -9.87% | -6.27% | -4.08% |
+
+15k per-view diagnostic command:
+
+```bash
+/opt/anaconda3/envs/water_splatting/bin/python scripts/diagnostics/diagnose_gmvc_per_view_residuals.py \
+  --a0-config outputs/gmvc_v3_a0_15k_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_a0_15k_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_curasao_p30_13k_to_15k_a0/config.yml \
+  --a0-step 15000 \
+  --p30-config outputs/gmvc_v3_r500_p30_15k_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_r500_p30_15k_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_curasao_p30_13k_to_15k_p30_p30_r500_g000/config.yml \
+  --p30-step 15000 \
+  --test-mode test \
+  --output-dir renders/gmvc_per_view_residuals_20260805/curasao_a0_vs_p30_step15000
+```
+
+15k per-view summary:
+
+| View | Image | dPSNR | dSSIM | dLPIPS | dRGB L1 | dLuma L1 | dChroma L1 |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 0 | MTN_1288.png | -0.3133 | -0.001990 | +0.001005 | +0.002250 | +0.002643 | +0.000118 |
+| 1 | MTN_1296.png | -0.2558 | -0.000211 | -0.000230 | +0.000371 | +0.000382 | -0.000021 |
+| 2 | MTN_1304.png | -0.0752 | -0.000183 | +0.000134 | +0.000223 | +0.000216 | -0.000015 |
+| Mean | all | -0.2148 | -0.000795 | +0.000303 | +0.000948 | +0.001080 | +0.000027 |
+
+15k interpretation:
+
+```text
+P30 preserves the fixed-bank decoupling signal through step-15000.
+J-var improves strongly on both Eval-F and Eval-G, and transfer remains positive but limited to roughly 2-3%.
+The signal does not collapse from 14k to 15k; however, the RGB penalty persists.
+The 15k P30 run fails the RGB safety gate because dPSNR=-0.2148 dB, which is worse than the -0.15 dB limit.
+SSIM and LPIPS remain within the predefined safety limits, but PSNR is enough to block cross-scene expansion.
+The 15k PSNR drop is no longer a single-view issue: all three eval views lose PSNR, with view 0 still the largest SSIM contributor.
+The increase in RGB L1 is mostly luminance L1; chroma L1 is nearly unchanged.
+```
+
+Gate decision:
+
+```text
+进入四场景或跨场景扩展: No.
+15k success claim: No.
+Best Curasao candidate: P30 at step-13000, not step-15000.
+Reason: step-13000 passes RGB safety and has persistent fixed-bank gains; step-15000 keeps decoupling gains but fails PSNR safety.
+Current conclusion: GMVC profile calibration has a real Curasao medium-decoupling signal, but the current 15k schedule over-trades RGB fidelity for calibration.
+Next action should remain Curasao-only and single-factor. Prefer testing profile stop/decay or best-checkpoint selection around 13k before any scene expansion. Do not increase profile lambda.
+```
