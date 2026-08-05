@@ -5208,3 +5208,268 @@ GMVC should be split into two factors:
 ```
 
 This means P30-MHOLD should not yet enter cross-scene as a final candidate. The next step should not be another profile schedule sweep. A better next control would isolate whether A0 medium hold alone, without GMVC object auxiliary, produces the same RGB gain, because A0-MHOLD currently differs from normal A0 by both medium freezing and the GMVC object auxiliary/phase structure.
+
+## 36. Curasao A0-PHASE phase-matched no-hold control
+
+Date: 2026-08-05
+
+Purpose:
+
+```text
+Separate the RGB contribution of generic medium hold from the 4:1 phase schedule,
+object auxiliary, and object-phase medium-gradient ownership.
+```
+
+Code change:
+
+```text
+scripts/experiments/gmvc_v3_curasao_p30_profile_release_13k_to_15k.sh
+scripts/experiments/gmvc_v3_curasao_p30_profile_release_eval.sh
+```
+
+Both scripts now accept:
+
+```text
+VARIANT=A0_PHASE
+```
+
+Configuration:
+
+```text
+start checkpoint = A0 step-13000
+profile lambda = 0
+medium hold = False
+4:1 medium/object phase = enabled
+object lambda = 0.004
+object-phase medium grad scale = 0
+target_current_camera_tracks = True
+same geometry-only train bank as A0-MHOLD/P30-MHOLD
+```
+
+Training command:
+
+```bash
+VARIANT=A0_PHASE GPU=6 RUN_EVAL=0 RUN_CLOSURE_DIAG=0 \
+SAVE_ONLY_LATEST_CHECKPOINT=False STEPS_PER_SAVE=500 \
+/bin/bash scripts/experiments/gmvc_v3_curasao_p30_profile_release_13k_to_15k.sh
+```
+
+Evaluation commands:
+
+```bash
+VARIANTS=A0_PHASE STEPS=14000,15000 GPU=6 RUN_SUMMARY=0 \
+/bin/bash scripts/experiments/gmvc_v3_curasao_p30_profile_release_eval.sh
+```
+
+```bash
+/opt/anaconda3/envs/water_splatting/bin/python scripts/diagnostics/summarize_gmvc_persistence.py \
+  --root renders/gmvc_fixed_bank_diag_20260805/curasao_p30_profile_release_15k \
+  --variants A0,A0_PHASE,A0_MHOLD,MHOLD \
+  --steps 14000,15000 \
+  --reference-variant A0_MHOLD \
+  --start-root renders/gmvc_fixed_bank_diag_20260805/curasao_r500_profile_persistence_3k \
+  --start-step 13000 \
+  --start-variant P30 \
+  --output renders/gmvc_fixed_bank_diag_20260805/curasao_p30_profile_release_15k/summary_with_a0_phase.json
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=6 /opt/anaconda3/envs/water_splatting/bin/python scripts/diagnostics/diagnose_gmvc_per_view_residuals.py \
+  --a0-config outputs/gmvc_v3_p30_release_a0_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_a0_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_a0/config.yml \
+  --a0-step 15000 \
+  --run A0_PHASE=outputs/gmvc_v3_p30_release_a0_phase_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_a0_phase_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_a0_phase/config.yml:15000 \
+  --run A0_MHOLD=outputs/gmvc_v3_p30_release_a0_mhold_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_a0_mhold_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_a0_mhold/config.yml:15000 \
+  --run P30_MHOLD=outputs/gmvc_v3_p30_release_mhold_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_mhold_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_mhold/config.yml:15000 \
+  --reference-run A0 \
+  --test-mode test --max-images -1 \
+  --output-dir renders/gmvc_per_view_residuals_20260805/curasao_a0_phase_step15000
+```
+
+Main outputs:
+
+```text
+outputs/gmvc_v3_p30_release_a0_phase_curasao_seed42_step13000_to_15000/...
+logs/gmvc_v3_p30_release_a0_phase_20260805_gmvc_v3_p30_profile_release_13k_to_15k.jsonl
+renders/gmvc_fixed_bank_diag_20260805/curasao_p30_profile_release_15k/a0_phase/
+renders/gmvc_fixed_bank_diag_20260805/curasao_p30_profile_release_15k/summary_with_a0_phase.json
+renders/gmvc_per_view_residuals_20260805/curasao_a0_phase_step15000/per_view_residual_summary.json
+```
+
+### 36.1 Gradient and medium-change audit
+
+Grad-log facts:
+
+```text
+gmvc_medium_hold_enabled = False
+max(gmvc_medium_hold_active) = 0
+profile lambda = 0 throughout
+object lambda = 0.004 on object rows
+```
+
+Phase-wise gradient audit:
+
+| Phase | Rows | RGB->medium grad mean | RGB->medium grad max | Object->medium grad max | Profile->medium grad max |
+|---|---:|---:|---:|---:|---:|
+| medium | 37 | 0.430548 | 0.867105 | 0.0 | 0.0 |
+| object | 10 | 0.000000 | 0.000000 | 0.0 | 0.0 |
+
+Medium output change relative to the fixed train bank:
+
+| Phase | Attn delta mean | BS delta mean | B_inf delta mean | T delta mean |
+|---|---:|---:|---:|---:|
+| medium rows | 0.007198 | 0.004253 | 0.001783 | 0.004293 |
+| object rows | 0.006890 | 0.003941 | 0.001715 | 0.004183 |
+
+Checkpoint parameter delta versus A0-13k:
+
+| Run | Medium param mean abs | Medium param max abs | Medium param L2 | Shape mismatch |
+|---|---:|---:|---:|---:|
+| A0-PHASE-15k | 0.009857 | 0.391574 | 1.579257 | 0 |
+| A0-MHOLD-15k | 0.000000 | 0.000000 | 0.000000 | 0 |
+
+Audit conclusion:
+
+```text
+A0-PHASE is the intended no-hold control.
+Medium updates occur in medium phase through RGB loss.
+Object phase does not send medium gradient.
+The checkpoint-level medium parameters changed substantially by 15k.
+```
+
+### 36.2 RGB metrics
+
+| Step | Run | PSNR | dPSNR vs A0 | SSIM | dSSIM vs A0 | LPIPS | dLPIPS vs A0 |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 14000 | A0 | 32.3633 | +0.0000 | 0.955980 | +0.000000 | 0.108264 | +0.000000 |
+| 14000 | A0-PHASE | 32.1779 | -0.1853 | 0.955876 | -0.000104 | 0.108205 | -0.000059 |
+| 14000 | A0-MHOLD | 32.5347 | +0.1715 | 0.956992 | +0.001012 | 0.107449 | -0.000815 |
+| 14000 | P30-MHOLD | 32.3094 | -0.0539 | 0.955918 | -0.000061 | 0.107920 | -0.000344 |
+| 15000 | A0 | 32.1800 | +0.0000 | 0.955931 | +0.000000 | 0.108039 | +0.000000 |
+| 15000 | A0-PHASE | 32.0280 | -0.1520 | 0.955760 | -0.000171 | 0.108075 | +0.000036 |
+| 15000 | A0-MHOLD | 32.4629 | +0.2829 | 0.956852 | +0.000922 | 0.107474 | -0.000566 |
+| 15000 | P30-MHOLD | 32.2156 | +0.0356 | 0.955745 | -0.000186 | 0.108008 | -0.000032 |
+
+Factor decomposition at 15k:
+
+| Comparison | dPSNR | dSSIM | dLPIPS |
+|---|---:|---:|---:|
+| A0-PHASE - A0 | -0.1520 | -0.000171 | +0.000036 |
+| A0-MHOLD - A0-PHASE | +0.4349 | +0.001093 | -0.000602 |
+| P30-MHOLD - A0-PHASE | +0.1876 | -0.000015 | -0.000068 |
+
+RGB conclusion:
+
+```text
+The phase/object structure without hold does not explain the A0-MHOLD RGB gain.
+A0-PHASE is worse than normal A0 by 0.1520 dB.
+A0-MHOLD is better than A0-PHASE by 0.4349 dB.
+This confirms medium hold is the dominant RGB factor.
+```
+
+### 36.3 Fixed-bank absolute metrics at 15k
+
+Eval-F:
+
+| Run | transfer | J-var | closure | consensus-J | obj-target | DC-var | recomp |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A0 | 0.02086218 | 0.00639501 | 0.10113202 | 0.01431394 | 0.06904572 | 0.00193389 | 0.02162616 |
+| A0-PHASE | 0.02082148 | 0.00611821 | 0.10143623 | 0.01428498 | 0.06706463 | 0.00188205 | 0.02143956 |
+| A0-MHOLD | 0.02111963 | 0.00657435 | 0.10122827 | 0.01447284 | 0.06984047 | 0.00194658 | 0.02187263 |
+| P30-MHOLD | 0.02064424 | 0.00581974 | 0.10014221 | 0.01415097 | 0.06494885 | 0.00184273 | 0.02111380 |
+
+Eval-G:
+
+| Run | transfer | J-var | closure | consensus-J | obj-target | DC-var | recomp |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A0 | 0.02018684 | 0.01213915 | 0.08842448 | 0.01401308 | 0.09050732 | 0.00208890 | 0.02368240 |
+| A0-PHASE | 0.02013297 | 0.01143222 | 0.08905960 | 0.01396957 | 0.08646556 | 0.00202743 | 0.02340211 |
+| A0-MHOLD | 0.02038126 | 0.01236850 | 0.08841901 | 0.01410909 | 0.08973609 | 0.00209275 | 0.02372395 |
+| P30-MHOLD | 0.01992675 | 0.01079966 | 0.08801936 | 0.01379083 | 0.08199851 | 0.00197246 | 0.02280215 |
+
+A0-PHASE versus normal A0:
+
+| Eval | transfer | J-var | closure | consensus-J | obj-target | DC-var | recomp |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| F | -0.20% | -4.33% | +0.30% | -0.20% | -2.87% | -2.68% | -0.86% |
+| G | -0.27% | -5.82% | +0.72% | -0.31% | -4.47% | -2.94% | -1.18% |
+
+P30-MHOLD versus A0-PHASE:
+
+| Eval | transfer abs | J-var abs | closure abs | consensus-J abs | obj-target abs | DC-var abs | recomp abs |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| F | -0.00017724 | -0.00029847 | -0.00129402 | -0.00013401 | -0.00211578 | -0.00003932 | -0.00032577 |
+| G | -0.00020621 | -0.00063256 | -0.00104024 | -0.00017874 | -0.00446705 | -0.00005497 | -0.00059996 |
+
+Fixed-bank conclusion:
+
+```text
+Phase/object training without profile already improves J-var, object-target, DC-var, and recomposition versus normal A0.
+It also worsens closure slightly.
+P30-MHOLD remains better than A0-PHASE on every listed fixed-bank metric in Eval-F/G.
+```
+
+This means part of the earlier GMVC fixed-bank gain can come from phase-wise gradient ownership, but profile calibration plus hold still provides additional decomposition improvement.
+
+### 36.4 Per-view RGB residuals at 15k
+
+Mean deltas versus normal A0-15k:
+
+| Run | dPSNR | dSSIM | dLPIPS | dRGB L1 | dLuma L1 | dChroma L1 |
+|---|---:|---:|---:|---:|---:|---:|
+| A0-PHASE | -0.1520 | -0.000171 | +0.000036 | +0.000315 | +0.000291 | +0.000069 |
+| A0-MHOLD | +0.2829 | +0.000922 | -0.000566 | -0.000919 | -0.000985 | -0.000011 |
+| P30-MHOLD | +0.0356 | -0.000186 | -0.000032 | +0.000224 | +0.000318 | -0.000044 |
+
+Per-view deltas versus normal A0-15k:
+
+| View | Image | A0-PHASE dPSNR | A0-MHOLD dPSNR | P30-MHOLD dPSNR | A0-PHASE dRGB L1 | A0-MHOLD dRGB L1 |
+|---:|---|---:|---:|---:|---:|---:|
+| 0 | MTN_1288.png | -0.1645 | +0.4248 | -0.1168 | +0.000575 | -0.001817 |
+| 1 | MTN_1296.png | -0.2576 | +0.2277 | +0.1384 | +0.000284 | -0.000424 |
+| 2 | MTN_1304.png | -0.0339 | +0.1961 | +0.0852 | +0.000087 | -0.000516 |
+
+Per-view conclusion:
+
+```text
+A0-PHASE loses PSNR on all three eval views.
+A0-MHOLD gains PSNR and lowers RGB L1 on all three eval views.
+The hold contribution is not a single-view artifact.
+```
+
+### 36.5 Updated mechanism and gate decision
+
+This control matches case one with an added fixed-bank nuance:
+
+```text
+A0-PHASE is close to or below normal A0 in RGB and far below A0-MHOLD.
+A0-PHASE nevertheless improves several decomposition metrics.
+```
+
+Therefore:
+
+```text
+medium hold is independently responsible for the large A0-MHOLD RGB gain;
+4:1 phase/object ownership alone is not an RGB improvement mechanism;
+phase/object ownership can still improve some decomposition metrics even without profile;
+P30 profile calibration plus hold adds decomposition gains beyond A0-PHASE;
+A0-MHOLD remains the best Curasao RGB candidate;
+P30-MHOLD remains the best physical decomposition candidate.
+```
+
+Current method positioning:
+
+```text
+GMVC should be described as two separable contributions:
+1. phase-wise/object-owned training and medium hold, which stabilize late RGB optimization;
+2. multi-view profile calibration, which pushes the medium toward better transfer/J-var/object consistency.
+```
+
+The Pareto remains:
+
+```text
+A0-MHOLD: best RGB, weaker physical decomposition.
+P30-MHOLD: best fixed-bank decomposition, acceptable but lower RGB.
+A0-PHASE: confirms phase/object alone changes decomposition but harms RGB without hold.
+```
+
+No cross-scene or >15k run is triggered by this result. The clean next question is no longer whether hold matters; it does. The next design decision is whether the paper target should prioritize RGB quality with medium hold, physical decomposition with P30-MHOLD, or report both as a Pareto.

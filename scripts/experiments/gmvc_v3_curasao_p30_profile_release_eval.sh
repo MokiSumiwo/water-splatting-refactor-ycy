@@ -22,6 +22,7 @@ variant_slug() {
   case "$1" in
     A0|a0) echo "a0" ;;
     A0_MHOLD|a0_mhold|A0-MHOLD|a0-mhold) echo "a0_mhold" ;;
+    A0_PHASE|a0_phase|A0-PHASE|a0-phase|A0_STOP|a0_stop|A0-STOP|a0-stop) echo "a0_phase" ;;
     C30|c30) echo "c30" ;;
     STOP|stop) echo "stop" ;;
     H500|h500|H500_STOP|h500_stop) echo "h500" ;;

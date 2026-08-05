@@ -40,6 +40,16 @@ case "${VARIANT}" in
     MEDIUM_HOLD_ENABLED="True"
     DEFAULT_STEPS_PER_SAVE="500"
     ;;
+  A0_PHASE|a0_phase|A0-PHASE|a0-phase|A0_STOP|a0_stop|A0-STOP|a0-stop)
+    SLUG="a0_phase"
+    SOURCE_CKPT="${A0_SOURCE_CKPT}"
+    GMVC_ON="True"
+    PROFILE_SCHEDULE="stop"
+    PROFILE_LAMBDA="0.0"
+    OBJECT_LAMBDA="0.004"
+    PROFILE_DECAY_START_STEP="13000"
+    DEFAULT_STEPS_PER_SAVE="500"
+    ;;
   C30|c30)
     SLUG="c30"
     SOURCE_CKPT="${P30_SOURCE_CKPT}"
@@ -88,7 +98,7 @@ case "${VARIANT}" in
     PROFILE_DECAY_START_STEP="13000"
     ;;
   *)
-    echo "Unknown VARIANT=${VARIANT}. Use A0, A0_MHOLD, C30, STOP, H500, MHOLD, or DECAY." >&2
+    echo "Unknown VARIANT=${VARIANT}. Use A0, A0_MHOLD, A0_PHASE, C30, STOP, H500, MHOLD, or DECAY." >&2
     exit 2
     ;;
 esac
