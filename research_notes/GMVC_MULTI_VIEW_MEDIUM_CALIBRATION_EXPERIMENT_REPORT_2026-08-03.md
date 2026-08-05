@@ -4165,3 +4165,280 @@ Keep all other settings unchanged.
 ```
 
 Do not increase the profile base lambda and do not tune object lambda, ramp, cycle, bank, thresholds, or renderer.
+
+## 32. Curasao P30 H500-STOP profile timing test
+
+Date: 2026-08-05
+
+### Code facts
+
+No renderer, densification, refinement, loss routing, object auxiliary, or GMVC core equation was changed in this round. The existing `gmvc_v3_profile_schedule=stop` implementation was reused with a later global stop step:
+
+```text
+gmvc_v3_profile_schedule=stop
+gmvc_v3_profile_decay_start_step=13501
+gmvc_v3_profile_decay_final_scale=0.0
+```
+
+This gives the intended H500-STOP behavior:
+
+```text
+step 13001-13500: effective profile lambda = 30
+step 13501-15000: effective profile lambda = 0
+```
+
+The experiment wrappers now accept:
+
+```text
+VARIANT=H500
+```
+
+The H500 run used `STEPS_PER_SAVE=500`, so the saved checkpoints are:
+
+```text
+step-000013500.ckpt
+step-000014000.ckpt
+step-000014500.ckpt
+step-000015000.ckpt
+```
+
+### Experiment facts
+
+Training command:
+
+```bash
+GPU=6 VARIANT=H500 STEPS_PER_SAVE=500 \
+  scripts/experiments/gmvc_v3_curasao_p30_profile_release_13k_to_15k.sh
+```
+
+Evaluation command:
+
+```bash
+GPU=6 VARIANTS=H500 STEPS=13500,14000,15000 RUN_SUMMARY=0 \
+  scripts/experiments/gmvc_v3_curasao_p30_profile_release_eval.sh
+```
+
+Summary command:
+
+```bash
+/opt/anaconda3/envs/water_splatting/bin/python \
+  scripts/diagnostics/summarize_gmvc_persistence.py \
+  --root renders/gmvc_fixed_bank_diag_20260805/curasao_p30_profile_release_15k \
+  --variants A0,C30,STOP,DECAY,H500 \
+  --steps 14000,15000 \
+  --reference-variant DECAY \
+  --start-root renders/gmvc_fixed_bank_diag_20260805/curasao_r500_profile_persistence_3k \
+  --start-step 13000 \
+  --start-variant P30 \
+  --output renders/gmvc_fixed_bank_diag_20260805/curasao_p30_profile_release_15k/summary_with_h500.json
+```
+
+Per-view command:
+
+```bash
+CUDA_VISIBLE_DEVICES=6 /opt/anaconda3/envs/water_splatting/bin/python \
+  scripts/diagnostics/diagnose_gmvc_per_view_residuals.py \
+  --a0-config outputs/gmvc_v3_p30_release_a0_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_a0_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_a0/config.yml \
+  --a0-step 15000 \
+  --run C30=outputs/gmvc_v3_p30_release_c30_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_c30_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_c30/config.yml:15000 \
+  --run STOP=outputs/gmvc_v3_p30_release_stop_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_stop_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_stop/config.yml:15000 \
+  --run DECAY=outputs/gmvc_v3_p30_release_decay_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_decay_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_decay/config.yml:15000 \
+  --run H500=outputs/gmvc_v3_p30_release_h500_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_h500_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_h500/config.yml:15000 \
+  --reference-run DECAY \
+  --test-mode test \
+  --output-dir renders/gmvc_per_view_residuals_20260805/curasao_p30_profile_h500_step15000
+```
+
+Main outputs:
+
+```text
+renders/gmvc_fixed_bank_diag_20260805/curasao_p30_profile_release_15k/summary_with_h500.json
+renders/gmvc_per_view_residuals_20260805/curasao_p30_profile_h500_step15000/per_view_residual_summary.json
+logs/gmvc_v3_p30_release_h500_20260805_gmvc_v3_p30_profile_release_13k_to_15k.jsonl
+```
+
+### H500 resume and schedule audit
+
+Forced JSONL rows:
+
+| Step | Phase | Config lambda | Scheduled lambda | Effective lambda | Schedule scale | Object lambda | Object ramp | Medium grad scale | medium LR | DC LR | scaler |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 13001 | medium | 30.0 | 30.0 | 30.0 | 1.0 | 0.000 | 1.0 | 0.0 | 0.0001931 | 0.0025 | 1.0 |
+| 13004 | object | 30.0 | 30.0 | 0.0 | 1.0 | 0.004 | 1.0 | 0.0 | 0.0001931 | 0.0025 | 1.0 |
+| 13500 | medium | 30.0 | 30.0 | 30.0 | 1.0 | 0.000 | 1.0 | 0.0 | 0.0001813 | 0.0025 | 1.0 |
+| 13501 | medium | 30.0 | 0.0 | 0.0 | 0.0 | 0.000 | 1.0 | 0.0 | 0.0001813 | 0.0025 | 1.0 |
+| 14000 | medium | 30.0 | 0.0 | 0.0 | 0.0 | 0.000 | 1.0 | 0.0 | 0.0001702 | 0.0025 | 1.0 |
+| 15000 | medium | 30.0 | 0.0 | 0.0 | 0.0 | 0.000 | 0.0 | 0.0 | 0.0001500 | 0.0025 | 1.0 |
+
+Audit conclusion:
+
+```text
+H500 keeps profile active through step 13500 and removes profile gradient from step 13501 onward.
+The run keeps the same global phase arithmetic, optimizer/scheduler/scaler restoration, object ramp, object lambda, and object-phase medium gradient scale as the previous release sweep.
+```
+
+### H500 13500 checkpoint
+
+There are no A0/C30/STOP/DECAY step-13500 checkpoints from the prior matched-control sweep because those controls were saved at 1000-step intervals. To preserve the single-new-experiment constraint, controls were not rerun only to add 13500 checkpoints. Therefore step 13500 is used as an H500 internal transition diagnostic; formal matched comparisons remain at 14000 and 15000.
+
+H500 absolute metrics at step 13500:
+
+| Eval | PSNR | SSIM | LPIPS | Transfer | J-var | Closure | Consensus-J | Obj-target | DC-var | Recomp |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| RGB/F/G | 32.4999 | 0.956194 | 0.107571 | F 0.0206047 / G 0.0198591 | F 0.0058084 / G 0.0106750 | F 0.1010187 / G 0.0886265 | F 0.0141219 / G 0.0137341 | F 0.0622242 / G 0.0786250 | F 0.0018676 / G 0.0019827 | F 0.0205290 / G 0.0221621 |
+
+### RGB metrics
+
+| Step | Run | PSNR | dPSNR vs A0 | dPSNR vs DECAY | SSIM | dSSIM vs A0 | LPIPS | dLPIPS vs A0 |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 14000 | A0 | 32.3633 | +0.0000 | +0.2512 | 0.955980 | +0.000000 | 0.108264 | +0.000000 |
+| 14000 | C30 | 32.0949 | -0.2683 | -0.0171 | 0.955015 | -0.000965 | 0.108530 | +0.000266 |
+| 14000 | STOP | 32.1442 | -0.2191 | +0.0321 | 0.955490 | -0.000490 | 0.108237 | -0.000027 |
+| 14000 | DECAY | 32.1120 | -0.2512 | +0.0000 | 0.955209 | -0.000771 | 0.108437 | +0.000173 |
+| 14000 | H500 | 32.1146 | -0.2486 | +0.0026 | 0.955224 | -0.000756 | 0.108418 | +0.000154 |
+| 15000 | A0 | 32.1800 | +0.0000 | +0.1539 | 0.955931 | +0.000000 | 0.108039 | +0.000000 |
+| 15000 | C30 | 31.9695 | -0.2106 | -0.0566 | 0.955143 | -0.000787 | 0.108258 | +0.000218 |
+| 15000 | STOP | 32.0353 | -0.1447 | +0.0093 | 0.955601 | -0.000330 | 0.108005 | -0.000034 |
+| 15000 | DECAY | 32.0261 | -0.1539 | +0.0000 | 0.955511 | -0.000420 | 0.108028 | -0.000011 |
+| 15000 | H500 | 32.0229 | -0.1571 | -0.0031 | 0.955513 | -0.000418 | 0.108041 | +0.000002 |
+
+RGB gate:
+
+```text
+H500 fails PSNR by about 0.0071 dB at 15k.
+H500 passes SSIM and LPIPS.
+H500 is almost identical to DECAY at 15k: -0.0031 dB PSNR, +0.0000019 SSIM, +0.000013 LPIPS versus DECAY.
+```
+
+### Fixed-bank metrics versus same-step A0
+
+Percent change. Lower is better.
+
+Step 14000:
+
+| Run | Eval | Transfer | J-var | Closure | Consensus-J | Obj-target | DC-var | Recomp |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| C30 | F | -2.64% | -10.17% | -0.95% | -2.69% | -2.75% | -4.24% | -1.52% |
+| C30 | G | -2.80% | -11.89% | -0.52% | -3.02% | -4.78% | -4.66% | -1.56% |
+| STOP | F | -1.78% | -7.58% | -0.58% | -1.79% | -0.93% | -3.76% | -0.22% |
+| STOP | G | -1.80% | -8.04% | -0.28% | -1.90% | -2.60% | -4.25% | -0.31% |
+| DECAY | F | -2.25% | -8.97% | -0.77% | -2.27% | -2.08% | -3.95% | -1.01% |
+| DECAY | G | -2.29% | -9.83% | -0.40% | -2.41% | -3.85% | -4.42% | -1.05% |
+| H500 | F | -2.22% | -9.00% | -0.75% | -2.23% | -2.07% | -4.14% | -0.98% |
+| H500 | G | -2.24% | -9.76% | -0.36% | -2.36% | -3.79% | -4.38% | -1.01% |
+
+Step 15000:
+
+| Run | Eval | Transfer | J-var | Closure | Consensus-J | Obj-target | DC-var | Recomp |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| C30 | F | -2.23% | -12.15% | -0.78% | -2.26% | -7.10% | -5.35% | -3.42% |
+| C30 | G | -2.61% | -15.78% | -0.06% | -2.88% | -9.89% | -6.21% | -4.11% |
+| STOP | F | -1.15% | -9.40% | -0.24% | -1.15% | -5.80% | -5.05% | -2.25% |
+| STOP | G | -1.33% | -11.70% | +0.39% | -1.44% | -8.41% | -5.61% | -3.04% |
+| DECAY | F | -1.40% | -10.28% | -0.34% | -1.40% | -6.31% | -5.29% | -2.58% |
+| DECAY | G | -1.61% | -12.83% | +0.34% | -1.74% | -8.97% | -5.95% | -3.38% |
+| H500 | F | -1.41% | -10.33% | -0.30% | -1.41% | -6.35% | -5.33% | -2.61% |
+| H500 | G | -1.62% | -12.88% | +0.37% | -1.74% | -9.03% | -6.04% | -3.40% |
+
+Relative to DECAY at step 15000:
+
+| Run | Eval | Transfer | J-var | Closure | Consensus-J | Obj-target | DC-var | Recomp |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| H500 | F | -0.0039% | -0.0455% | +0.0338% | -0.0038% | -0.0459% | -0.0445% | -0.0306% |
+| H500 | G | -0.0053% | -0.0595% | +0.0306% | +0.0001% | -0.0668% | -0.1021% | -0.0234% |
+
+### Gradient and medium-change diagnostics
+
+H500 JSONL interval means:
+
+| Interval | Rows | Effective profile lambda | Profile medium grad | Profile/RGB medium grad | RGB medium grad | J* drift | attn delta | bs delta | B_inf delta | transmission delta |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 13001-13500 | 13 | 23.08 | 0.002169 | 0.00889 | 0.2394 | 0.01257 | 0.00499 | 0.00362 | 0.00149 | 0.00303 |
+| 13501-13999 | 11 | 0.00 | 0.000000 | 0.00000 | 0.3924 | 0.01637 | 0.00686 | 0.00445 | 0.00185 | 0.00414 |
+| 14000-14999 | 22 | 0.00 | 0.000000 | 0.00000 | 0.3552 | 0.01883 | 0.00815 | 0.00463 | 0.00192 | 0.00501 |
+
+This confirms the intended temporal redistribution: H500 uses full profile pressure until 13500 and then behaves like a zero-profile release run. After release, medium/RGB gradients and medium delta magnitudes are close to the prior DECAY/STOP release phase.
+
+### Per-view residual diagnosis at 15k
+
+Mean deltas versus A0:
+
+| Run | dPSNR | dSSIM | dLPIPS | dRGB L1 | dLuma L1 | dChroma L1 |
+|---|---:|---:|---:|---:|---:|---:|
+| C30 | -0.2106 | -0.000787 | +0.000218 | +0.000943 | +0.001079 | +0.000023 |
+| STOP | -0.1447 | -0.000330 | -0.000034 | +0.000440 | +0.000488 | +0.000033 |
+| DECAY | -0.1539 | -0.000420 | -0.000011 | +0.000530 | +0.000597 | +0.000032 |
+| H500 | -0.1571 | -0.000418 | +0.000002 | +0.000526 | +0.000593 | +0.000031 |
+
+H500 versus DECAY:
+
+| View | Image | dPSNR | dSSIM | dLPIPS | dRGB L1 | dLuma L1 | dChroma L1 |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 0 | MTN_1288.png | +0.0075 | +0.000008 | +0.000024 | -0.000031 | -0.000030 | -0.000003 |
+| 1 | MTN_1296.png | -0.0121 | -0.000004 | +0.000051 | +0.000011 | +0.000011 | -0.000001 |
+| 2 | MTN_1304.png | -0.0047 | +0.000002 | -0.000035 | +0.000007 | +0.000008 | +0.000001 |
+
+Per-view interpretation:
+
+```text
+H500 is not separated from DECAY by a single catastrophic view.
+The average H500-vs-DECAY difference is tiny and mixed across views.
+The main residual pattern remains luminance-dominated, as in the previous release sweep.
+```
+
+### Gate decision
+
+15k gate:
+
+| Run | RGB gate | Transfer threshold | J-var threshold | DC/recomp/object | Closure | Decision |
+|---|---|---|---|---|---|---|
+| STOP | Pass | Fail, F=-1.15%, G=-1.33% | Pass | Pass | Eval-G worsens +0.39% | Not final |
+| DECAY | Fail PSNR by 0.0039 dB | Fail, F=-1.40%, G=-1.61% | Pass | Pass | Eval-G worsens +0.34% | Not final |
+| H500 | Fail PSNR by 0.0071 dB | Fail, F=-1.41%, G=-1.62% | Pass | Pass | Eval-G worsens +0.37% | Not final |
+
+### Reasonable inference
+
+The H500 result does not support the hypothesis that concentrating the same profile budget into the first 500 resumed steps is better than linear decay:
+
+```text
+H500 is nearly identical to DECAY at both 14k and 15k.
+At 15k, H500 slightly improves transfer/J-var over DECAY by only about 0.004%-0.060%, while losing about 0.0031 dB PSNR.
+```
+
+Thus, for the current Curasao P30 setting, the profile effect appears dominated more by cumulative post-13k profile budget than by this coarse 500-step-vs-linear time distribution. The proposed "calibrate, hold briefly, then release" mechanism is not validated by H500.
+
+### Unverified hypotheses
+
+This does not prove that all timing schedules are irrelevant. It only rejects this specific same-budget H500-STOP schedule as a better Pareto candidate. A different budget, a smoother two-stage schedule, or an earlier stop could still behave differently, but these would be new single-factor experiments.
+
+### Next decision
+
+Do not enter cross-scene expansion, longer-than-15k training, or final-candidate reporting from H500.
+
+The current best practical checkpoint remains:
+
+```text
+P30 step-13000
+```
+
+The best completed 15k RGB-safe run remains:
+
+```text
+STOP
+```
+
+but STOP does not retain enough transfer to be a GMVC final candidate.
+
+If GMVC continues, the next minimal test should not be H750-STOP yet, because H500 did not show transfer advantage over DECAY. A more informative next single-factor choice is either:
+
+```text
+DECAY with slightly earlier full release, e.g. 13000-13750 then zero
+```
+
+or:
+
+```text
+explicit best-checkpoint strategy around 13k-14k, with matched 13.5k controls if that checkpoint-selection route is acceptable.
+```
+
+Do not increase profile lambda, do not tune object lambda, and do not expand scenes until a Curasao 15k strategy passes both RGB and transfer gates.
