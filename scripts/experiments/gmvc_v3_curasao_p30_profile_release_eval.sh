@@ -21,6 +21,7 @@ START_ROOT="${START_ROOT:-${REPO_DIR}/renders/gmvc_fixed_bank_diag_20260805/cura
 variant_slug() {
   case "$1" in
     A0|a0) echo "a0" ;;
+    A0_MHOLD|a0_mhold|A0-MHOLD|a0-mhold) echo "a0_mhold" ;;
     C30|c30) echo "c30" ;;
     STOP|stop) echo "stop" ;;
     H500|h500|H500_STOP|h500_stop) echo "h500" ;;
