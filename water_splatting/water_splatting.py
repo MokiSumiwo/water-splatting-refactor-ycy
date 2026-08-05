@@ -342,6 +342,12 @@ class WaterSplattingModelConfig(ModelConfig):
     """Global step where linear_decay reaches the final profile scale."""
     gmvc_v3_profile_decay_final_scale: float = 0.0
     """Final profile scale for stop/linear_decay schedules."""
+    gmvc_medium_hold_enabled: bool = False
+    """Freeze all medium-owned parameters during a GMVC calibrated-medium hold interval."""
+    gmvc_medium_hold_start_step: int = 13001
+    """First global step where GMVC medium-hold freezing is active."""
+    gmvc_medium_hold_stop_step: int = 15000
+    """Last global step where GMVC medium-hold freezing is active."""
     lambda_gmvc_object: float = 0.0
     """Weight for online DC-only object calibration against profiled J*."""
     gmvc_v3_medium_steps: int = 4
@@ -901,6 +907,9 @@ class WaterSplattingModel(Model):
         self._gmvc_online_state: Dict[str, torch.Tensor] = {}
         self._gmvc_latest_learning_rates: Dict[str, float] = {}
         self._gmvc_latest_grad_scaler_scale = 0.0
+        self._gmvc_medium_hold_reference_step = -1
+        self._gmvc_medium_hold_reference: Optional[Dict[str, torch.Tensor]] = None
+        self._gmvc_gaussian_hold_reference: Optional[Dict[str, torch.Tensor]] = None
 
         self.crop_box: Optional[OrientedBox] = None
         if self.config.background_color == "random":
@@ -1285,6 +1294,7 @@ class WaterSplattingModel(Model):
             self.gauss_params[name] = torch.nn.Parameter(param[~culls])
         self._sync_gaussian_lineage_ids_for_cull(culls)
         self._sync_background_candidate_mask_for_cull(culls)
+        self._sync_gmvc_hold_gaussian_reference_for_cull(culls)
 
         CONSOLE.log(
             f"Culled {n_bef - self.num_points} gaussians "
@@ -1383,7 +1393,157 @@ class WaterSplattingModel(Model):
                 self._gmvc_latest_grad_scaler_scale = float(grad_scaler.get_scale())
             except Exception:
                 self._gmvc_latest_grad_scaler_scale = 0.0
+        self._update_gmvc_medium_hold_freeze()
         self._ensure_background_gradient_surgery_hook()
+
+    def _gmvc_medium_hold_active(self, step: Optional[int] = None) -> bool:
+        if not bool(getattr(self.config, "gmvc_medium_hold_enabled", False)):
+            return False
+        current_step = int(self.step if step is None else step)
+        start = int(getattr(self.config, "gmvc_medium_hold_start_step", 13001))
+        stop = int(getattr(self.config, "gmvc_medium_hold_stop_step", 15000))
+        return start <= current_step <= stop
+
+    def _named_medium_parameters_for_hold(self) -> List[Tuple[str, Parameter]]:
+        params: List[Tuple[str, Parameter]] = []
+        params.extend((f"medium_mlp.{name}", param) for name, param in self.medium_mlp.named_parameters())
+        params.extend(
+            (f"direction_encoding.{name}", param) for name, param in self.direction_encoding.named_parameters()
+        )
+        params.extend(
+            [
+                ("gmvc_bounded_log_attn_center", self.gmvc_bounded_log_attn_center),
+                ("gmvc_bounded_log_bs_center", self.gmvc_bounded_log_bs_center),
+                ("gmvc_bounded_binf_logit_center", self.gmvc_bounded_binf_logit_center),
+            ]
+        )
+        return params
+
+    @staticmethod
+    def _snapshot_parameters_cpu(params: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        return {name: param.detach().float().cpu().clone() for name, param in params.items()}
+
+    def _ensure_gmvc_medium_hold_references(self) -> None:
+        if self._gmvc_medium_hold_reference is not None:
+            return
+        self._gmvc_medium_hold_reference_step = int(self.step)
+        self._gmvc_medium_hold_reference = self._snapshot_parameters_cpu(
+            {name: param for name, param in self._named_medium_parameters_for_hold()}
+        )
+        self._gmvc_gaussian_hold_reference = self._snapshot_parameters_cpu(
+            {
+                "features_dc": self.features_dc,
+                "features_rest": self.features_rest,
+                "opacities": self.opacities,
+                "means": self.means,
+                "scales": self.scales,
+                "quats": self.quats,
+            }
+        )
+
+    def _update_gmvc_medium_hold_freeze(self) -> None:
+        dual_color_freeze_medium = bool(getattr(self.config, "dual_color_enabled", False)) and bool(
+            getattr(self.config, "dual_color_freeze_medium", True)
+        )
+        hold_active = self._gmvc_medium_hold_active()
+        medium_trainable = not (dual_color_freeze_medium or hold_active)
+        bounded_param_ids = {
+            id(self.gmvc_bounded_log_attn_center),
+            id(self.gmvc_bounded_log_bs_center),
+            id(self.gmvc_bounded_binf_logit_center),
+        }
+        for _, param in self._named_medium_parameters_for_hold():
+            is_bounded_center = id(param) in bounded_param_ids
+            trainable = medium_trainable
+            if is_bounded_center:
+                trainable = medium_trainable and bool(getattr(self.config, "gmvc_bounded_medium_enabled", False))
+            param.requires_grad_(trainable)
+            if not trainable:
+                param.grad = None
+        if hold_active:
+            self._ensure_gmvc_medium_hold_references()
+
+    @staticmethod
+    def _delta_stats_from_reference(
+        params: Dict[str, torch.Tensor],
+        reference: Optional[Dict[str, torch.Tensor]],
+    ) -> Dict[str, float]:
+        if reference is None:
+            return {"mean_abs": 0.0, "max_abs": 0.0, "l2": 0.0, "count": 0.0, "shape_mismatch": 0.0}
+        total_abs = 0.0
+        total_sq = 0.0
+        total_count = 0
+        max_abs = 0.0
+        shape_mismatch = False
+        for name, param in params.items():
+            ref = reference.get(name)
+            if ref is None:
+                shape_mismatch = True
+                continue
+            current = param.detach().float().cpu()
+            if tuple(current.shape) != tuple(ref.shape):
+                shape_mismatch = True
+                continue
+            delta = current - ref
+            abs_delta = delta.abs()
+            total_abs += float(abs_delta.sum().item())
+            total_sq += float(delta.square().sum().item())
+            total_count += int(delta.numel())
+            if delta.numel() > 0:
+                max_abs = max(max_abs, float(abs_delta.max().item()))
+        mean_abs = total_abs / max(total_count, 1)
+        return {
+            "mean_abs": mean_abs,
+            "max_abs": max_abs,
+            "l2": math.sqrt(total_sq),
+            "count": float(total_count),
+            "shape_mismatch": float(shape_mismatch),
+        }
+
+    def _gmvc_hold_delta_stats(self) -> Dict[str, float]:
+        medium_stats = self._delta_stats_from_reference(
+            {name: param for name, param in self._named_medium_parameters_for_hold()},
+            self._gmvc_medium_hold_reference,
+        )
+        gaussian_ref = self._gmvc_gaussian_hold_reference
+        dc_stats = self._delta_stats_from_reference({"features_dc": self.features_dc}, gaussian_ref)
+        rest_stats = self._delta_stats_from_reference({"features_rest": self.features_rest}, gaussian_ref)
+        opacity_stats = self._delta_stats_from_reference({"opacities": self.opacities}, gaussian_ref)
+        geometry_stats = self._delta_stats_from_reference(
+            {"means": self.means, "scales": self.scales, "quats": self.quats},
+            gaussian_ref,
+        )
+        return {
+            "gmvc_medium_hold_reference_step": float(self._gmvc_medium_hold_reference_step),
+            "gmvc_medium_param_delta_mean_abs": medium_stats["mean_abs"],
+            "gmvc_medium_param_delta_max_abs": medium_stats["max_abs"],
+            "gmvc_medium_param_delta_l2": medium_stats["l2"],
+            "gmvc_medium_param_delta_count": medium_stats["count"],
+            "gmvc_medium_param_delta_shape_mismatch": medium_stats["shape_mismatch"],
+            "gmvc_mhold_features_dc_delta_l2": dc_stats["l2"],
+            "gmvc_mhold_features_dc_delta_mean_abs": dc_stats["mean_abs"],
+            "gmvc_mhold_features_rest_delta_l2": rest_stats["l2"],
+            "gmvc_mhold_features_rest_delta_mean_abs": rest_stats["mean_abs"],
+            "gmvc_mhold_features_rest_to_dc_delta_ratio": rest_stats["l2"] / (dc_stats["l2"] + 1e-12),
+            "gmvc_mhold_opacity_delta_l2": opacity_stats["l2"],
+            "gmvc_mhold_opacity_delta_mean_abs": opacity_stats["mean_abs"],
+            "gmvc_mhold_geometry_delta_l2": geometry_stats["l2"],
+            "gmvc_mhold_geometry_delta_mean_abs": geometry_stats["mean_abs"],
+            "gmvc_mhold_gaussian_delta_shape_mismatch": max(
+                dc_stats["shape_mismatch"],
+                rest_stats["shape_mismatch"],
+                opacity_stats["shape_mismatch"],
+                geometry_stats["shape_mismatch"],
+            ),
+        }
+
+    def _sync_gmvc_hold_gaussian_reference_for_cull(self, culls: torch.Tensor) -> None:
+        if self._gmvc_gaussian_hold_reference is None:
+            return
+        keep = (~culls.detach().cpu()).bool()
+        for name, ref in list(self._gmvc_gaussian_hold_reference.items()):
+            if ref.ndim > 0 and int(ref.shape[0]) == int(keep.shape[0]):
+                self._gmvc_gaussian_hold_reference[name] = ref[keep].clone()
 
     def get_gaussian_param_groups(self) -> Dict[str, List[Parameter]]:
         # Here we explicitly use the means, scales as parameters so that the user can override this function and
@@ -1580,7 +1740,10 @@ class WaterSplattingModel(Model):
         symmetric_closure_loss = loss_dict.get("gmvc_symmetric_closure_loss")
         object_loss = loss_dict.get("gmvc_object_loss")
         gmvc_losses = [intrinsic_loss, residual_loss, closure_loss, profile_loss, symmetric_closure_loss, object_loss]
-        if not any(loss is not None and bool(getattr(loss, "requires_grad", False)) for loss in gmvc_losses):
+        mhold_active = self._gmvc_medium_hold_active()
+        if not any(loss is not None and bool(getattr(loss, "requires_grad", False)) for loss in gmvc_losses) and not (
+            mhold_active and main_loss is not None and bool(getattr(main_loss, "requires_grad", False))
+        ):
             return
 
         def _safe_grad(loss: Optional[torch.Tensor], params: List[torch.Tensor]) -> Tuple[Optional[torch.Tensor], ...]:
@@ -1662,6 +1825,7 @@ class WaterSplattingModel(Model):
         profile_medium_norm = self._grad_norm(profile_medium)
         symmetric_closure_medium_norm = self._grad_norm(symmetric_closure_medium)
         rgb_medium_norm = self._grad_norm(rgb_medium)
+        hold_delta_stats = self._gmvc_hold_delta_stats() if mhold_active else {}
 
         def _metric_float(name: str, default: float = 0.0) -> float:
             if metrics_dict is None or name not in metrics_dict:
@@ -1830,6 +1994,10 @@ class WaterSplattingModel(Model):
             "gmvc_v3_profile_decay_final_scale": float(
                 getattr(self.config, "gmvc_v3_profile_decay_final_scale", 0.0)
             ),
+            "gmvc_medium_hold_enabled": bool(getattr(self.config, "gmvc_medium_hold_enabled", False)),
+            "gmvc_medium_hold_active": bool(mhold_active),
+            "gmvc_medium_hold_start_step": int(getattr(self.config, "gmvc_medium_hold_start_step", 13001)),
+            "gmvc_medium_hold_stop_step": int(getattr(self.config, "gmvc_medium_hold_stop_step", 15000)),
             "learning_rate": dict(self._gmvc_latest_learning_rates),
             "learning_rate_medium_mlp": float(self._gmvc_latest_learning_rates.get("medium_mlp", 0.0)),
             "learning_rate_direction_encoding": float(
@@ -1874,6 +2042,7 @@ class WaterSplattingModel(Model):
             "gmvc_medium_delta_count",
         ]:
             row[key] = _metric_float(key)
+        row.update(hold_delta_stats)
         row["gmvc_phase"] = "object" if row.get("gmvc_v3_object_phase", 0.0) >= 0.5 else "medium"
         log_path = Path(path)
         log_path.parent.mkdir(parents=True, exist_ok=True)

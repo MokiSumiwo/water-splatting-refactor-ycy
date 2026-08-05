@@ -24,6 +24,7 @@ variant_slug() {
     C30|c30) echo "c30" ;;
     STOP|stop) echo "stop" ;;
     H500|h500|H500_STOP|h500_stop) echo "h500" ;;
+    MHOLD|mhold|P30_MHOLD|p30_mhold) echo "mhold" ;;
     DECAY|decay) echo "decay" ;;
     *) echo "Unknown variant $1" >&2; exit 2 ;;
   esac

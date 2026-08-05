@@ -4442,3 +4442,346 @@ explicit best-checkpoint strategy around 13k-14k, with matched 13.5k controls if
 ```
 
 Do not increase profile lambda, do not tune object lambda, and do not expand scenes until a Curasao 15k strategy passes both RGB and transfer gates.
+
+## 33. Curasao P30-MHOLD calibrated-medium hold test
+
+Date: 2026-08-05
+
+### Code facts
+
+Implemented a strict GMVC medium-hold switch:
+
+```text
+gmvc_medium_hold_enabled: bool = False
+gmvc_medium_hold_start_step: int = 13001
+gmvc_medium_hold_stop_step: int = 15000
+```
+
+When active, all medium-owned parameters are set to `requires_grad=False` before the training forward/backward pass and any existing `.grad` is set to `None`. This covers:
+
+```text
+medium_mlp
+direction_encoding
+gmvc_bounded_log_attn_center
+gmvc_bounded_log_bs_center
+gmvc_bounded_binf_logit_center
+```
+
+This is an optimizer-level freeze in the sense relevant for Adam: no gradient tensor exists for the medium parameters, so optimizer momentum does not advance those parameters. The renderer output is not detached as a tensor-level shortcut.
+
+Additional GMVC JSONL audit fields:
+
+```text
+gmvc_medium_hold_enabled
+gmvc_medium_hold_active
+gmvc_medium_hold_start_step
+gmvc_medium_hold_stop_step
+gmvc_medium_hold_reference_step
+gmvc_medium_param_delta_mean_abs
+gmvc_medium_param_delta_max_abs
+gmvc_medium_param_delta_l2
+gmvc_medium_param_delta_shape_mismatch
+gmvc_mhold_features_dc_delta_l2
+gmvc_mhold_features_rest_delta_l2
+gmvc_mhold_features_rest_to_dc_delta_ratio
+gmvc_mhold_opacity_delta_l2
+gmvc_mhold_geometry_delta_l2
+```
+
+The Gaussian reference snapshot is synchronized with post-13k culling, so the adaptation deltas remain shape-aligned after transparent Gaussian removal.
+
+### Experiment facts
+
+The new run:
+
+```text
+P30-MHOLD
+```
+
+starts from the existing P30 step-13000 checkpoint and keeps:
+
+```text
+scene = Curasao
+object lambda = 0.004
+object ramp factor = 1.0
+4 medium : 1 object schedule
+target_current_camera_tracks = True
+same geometry-only train bank
+same Eval-F / Eval-G
+```
+
+The only intended difference relative to STOP is:
+
+```text
+STOP:
+  profile=0 after resume; medium remains trainable under RGB.
+
+MHOLD:
+  profile=0 after resume; medium is frozen in all phases.
+```
+
+Training command:
+
+```bash
+GPU=6 VARIANT=MHOLD \
+  scripts/experiments/gmvc_v3_curasao_p30_profile_release_13k_to_15k.sh
+```
+
+Evaluation command:
+
+```bash
+GPU=6 VARIANTS=MHOLD STEPS=13500,14000,15000 RUN_SUMMARY=0 \
+  scripts/experiments/gmvc_v3_curasao_p30_profile_release_eval.sh
+```
+
+Summary command:
+
+```bash
+/opt/anaconda3/envs/water_splatting/bin/python \
+  scripts/diagnostics/summarize_gmvc_persistence.py \
+  --root renders/gmvc_fixed_bank_diag_20260805/curasao_p30_profile_release_15k \
+  --variants A0,C30,STOP,DECAY,H500,MHOLD \
+  --steps 14000,15000 \
+  --reference-variant STOP \
+  --start-root renders/gmvc_fixed_bank_diag_20260805/curasao_r500_profile_persistence_3k \
+  --start-step 13000 \
+  --start-variant P30 \
+  --output renders/gmvc_fixed_bank_diag_20260805/curasao_p30_profile_release_15k/summary_with_mhold.json
+```
+
+Per-view command:
+
+```bash
+CUDA_VISIBLE_DEVICES=6 /opt/anaconda3/envs/water_splatting/bin/python \
+  scripts/diagnostics/diagnose_gmvc_per_view_residuals.py \
+  --a0-config outputs/gmvc_v3_p30_release_a0_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_a0_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_a0/config.yml \
+  --a0-step 15000 \
+  --run C30=outputs/gmvc_v3_p30_release_c30_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_c30_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_c30/config.yml:15000 \
+  --run STOP=outputs/gmvc_v3_p30_release_stop_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_stop_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_stop/config.yml:15000 \
+  --run DECAY=outputs/gmvc_v3_p30_release_decay_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_decay_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_decay/config.yml:15000 \
+  --run H500=outputs/gmvc_v3_p30_release_h500_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_h500_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_h500/config.yml:15000 \
+  --run MHOLD=outputs/gmvc_v3_p30_release_mhold_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_mhold_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_mhold/config.yml:15000 \
+  --reference-run STOP \
+  --test-mode test \
+  --output-dir renders/gmvc_per_view_residuals_20260805/curasao_p30_profile_mhold_step15000
+```
+
+Main outputs:
+
+```text
+renders/gmvc_fixed_bank_diag_20260805/curasao_p30_profile_release_15k/summary_with_mhold.json
+renders/gmvc_per_view_residuals_20260805/curasao_p30_profile_mhold_step15000/per_view_residual_summary.json
+logs/gmvc_v3_p30_release_mhold_20260805_gmvc_v3_p30_profile_release_13k_to_15k.jsonl
+```
+
+### Freeze audit
+
+Forced JSONL rows:
+
+| Step | Phase | Hold active | Profile lambda | Object lambda | Profile->medium grad | RGB->medium grad | Medium param mean delta | Medium param max delta |
+|---:|---|---|---:|---:|---:|---:|---:|---:|
+| 13001 | medium | True | 0.0 | 0.000 | 0.0 | 0.0 | 0.0 | 0.0 |
+| 13004 | object | True | 0.0 | 0.004 | 0.0 | 0.0 | 0.0 | 0.0 |
+| 13500 | medium | True | 0.0 | 0.000 | 0.0 | 0.0 | 0.0 | 0.0 |
+| 13501 | medium | True | 0.0 | 0.000 | 0.0 | 0.0 | 0.0 | 0.0 |
+| 14000 | medium | True | 0.0 | 0.000 | 0.0 | 0.0 | 0.0 | 0.0 |
+| 15000 | medium | True | 0.0 | 0.000 | 0.0 | 0.0 | 0.0 | 0.0 |
+
+Across all 47 JSONL rows:
+
+```text
+max(gmvc_medium_param_delta_max_abs) = 0.0
+max(gmvc_medium_param_delta_mean_abs) = 0.0
+max(gmvc_medium_param_delta_shape_mismatch) = 0.0
+max(gmvc_mhold_gaussian_delta_shape_mismatch) = 0.0
+```
+
+The sampled fixed-row medium deltas are also zero throughout:
+
+```text
+medium_attn delta = 0.0
+medium_bs delta = 0.0
+B_inf delta = 0.0
+transmission delta = 0.0
+```
+
+Audit conclusion:
+
+```text
+MHOLD medium freezing is strict. The result is not confounded by Adam momentum or hidden medium parameter updates.
+```
+
+### Gaussian adaptation diagnostics
+
+Selected JSONL rows:
+
+| Step | RGB->DC grad | RGB->SH-rest grad | Object->DC grad | DC delta L2 | SH-rest delta L2 | Rest/DC delta ratio | Opacity delta L2 | Geometry delta L2 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 13001 | 0.000681 | 0.002639 | 0.000000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 |
+| 13004 | 0.000570 | 0.002209 | 0.0000129 | 2.438 | 0.476 | 0.195 | 27.542 | 5.088 |
+| 13500 | 0.000681 | 0.002636 | 0.000000 | 47.063 | 18.770 | 0.399 | 300.108 | 141.619 |
+| 14000 | 0.000613 | 0.002373 | 0.000000 | 78.959 | 35.475 | 0.449 | 485.050 | 262.042 |
+| 15000 | 0.000866 | 0.003352 | 0.000000 | 134.031 | 66.432 | 0.496 | 803.015 | 469.069 |
+
+Interval means:
+
+| Interval | Rows | RGB->DC grad | RGB->SH-rest grad | Object->DC grad | Object/RGB-DC ratio |
+|---|---:|---:|---:|---:|---:|
+| 13001-13999 | 24 | 0.000715 | 0.002768 | 0.00000264 | 0.00364 |
+| 14000-14999 | 22 | 0.000674 | 0.002611 | 0.00000298 | 0.00469 |
+
+The RGB adaptation is not DC-only. SH-rest changes grow to about half the DC delta norm by 15k, so any "success" interpretation must include the possibility that SH-rest absorbs some residual radiometric compensation.
+
+### RGB metrics
+
+| Step | Run | PSNR | dPSNR vs A0 | dPSNR vs STOP | SSIM | dSSIM vs A0 | LPIPS | dLPIPS vs A0 |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 14000 | A0 | 32.3633 | +0.0000 | +0.2191 | 0.955980 | +0.000000 | 0.108264 | +0.000000 |
+| 14000 | STOP | 32.1442 | -0.2191 | +0.0000 | 0.955490 | -0.000490 | 0.108237 | -0.000027 |
+| 14000 | MHOLD | 32.3094 | -0.0539 | +0.1652 | 0.955918 | -0.000061 | 0.107920 | -0.000344 |
+| 15000 | A0 | 32.1800 | +0.0000 | +0.1447 | 0.955931 | +0.000000 | 0.108039 | +0.000000 |
+| 15000 | STOP | 32.0353 | -0.1447 | +0.0000 | 0.955601 | -0.000330 | 0.108005 | -0.000034 |
+| 15000 | MHOLD | 32.2156 | +0.0356 | +0.1803 | 0.955745 | -0.000186 | 0.108008 | -0.000032 |
+
+RGB gate:
+
+```text
+MHOLD passes PSNR, SSIM, and LPIPS.
+At 15k, MHOLD is +0.0356 dB over same-step A0 and +0.1803 dB over STOP.
+```
+
+### Fixed-bank metrics versus same-step A0
+
+Percent change. Lower is better.
+
+Step 14000:
+
+| Run | Eval | Transfer | J-var | Closure | Consensus-J | Obj-target | DC-var | Recomp |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| STOP | F | -1.78% | -7.58% | -0.58% | -1.79% | -0.93% | -3.76% | -0.22% |
+| STOP | G | -1.80% | -8.04% | -0.28% | -1.90% | -2.60% | -4.25% | -0.31% |
+| MHOLD | F | -1.42% | -8.16% | -1.56% | -1.49% | -1.02% | -3.96% | +0.10% |
+| MHOLD | G | -1.76% | -10.81% | -1.07% | -2.03% | -4.14% | -4.51% | -0.73% |
+
+Step 15000:
+
+| Run | Eval | Transfer | J-var | Closure | Consensus-J | Obj-target | DC-var | Recomp |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| STOP | F | -1.15% | -9.40% | -0.24% | -1.15% | -5.80% | -5.05% | -2.25% |
+| STOP | G | -1.33% | -11.70% | +0.39% | -1.44% | -8.41% | -5.61% | -3.04% |
+| MHOLD | F | -1.04% | -9.00% | -0.98% | -1.14% | -5.93% | -4.71% | -2.37% |
+| MHOLD | G | -1.29% | -11.03% | -0.46% | -1.59% | -9.40% | -5.57% | -3.72% |
+
+Formal fixed-bank gate at 15k:
+
+```text
+Transfer threshold not met: F=-1.04%, G=-1.29%, required >=2.0%.
+J-var threshold partly fails: F=-9.00% is below 10%, G=-11.03% passes.
+DC-var, object-target, recomposition, and closure remain positive versus A0.
+```
+
+### Absolute retention versus P30 step-13000
+
+The key medium-only metrics are exactly retained:
+
+| Step | Eval | Transfer | J-var | Closure | Consensus-J |
+|---:|---|---:|---:|---:|---:|
+| 14000 | F | 0.0% vs P30-13k | 0.0% | 0.0% | 0.0% |
+| 14000 | G | 0.0% vs P30-13k | 0.0% | 0.0% | 0.0% |
+| 15000 | F | 0.0% vs P30-13k | 0.0% | 0.0% | 0.0% |
+| 15000 | G | 0.0% vs P30-13k | 0.0% | 0.0% | 0.0% |
+
+This resolves an apparent contradiction:
+
+```text
+The calibrated medium is preserved exactly in absolute fixed-bank terms.
+The same-step relative improvement shrinks because the A0 control also changes between 13k and 15k.
+```
+
+Therefore the same-step transfer gate is not failed by medium drift. It is failed because the frozen P30-13k medium is not sufficiently better than the 15k A0 medium under the current fixed-bank relative scoring.
+
+### Per-view residual diagnosis at 15k
+
+Mean deltas versus A0:
+
+| Run | dPSNR | dSSIM | dLPIPS | dRGB L1 | dLuma L1 | dChroma L1 |
+|---|---:|---:|---:|---:|---:|---:|
+| STOP | -0.1447 | -0.000330 | -0.000034 | +0.000440 | +0.000488 | +0.000033 |
+| MHOLD | +0.0356 | -0.000186 | -0.000032 | +0.000224 | +0.000318 | -0.000044 |
+
+MHOLD versus STOP:
+
+| View | Image | dPSNR | dSSIM | dLPIPS | dRGB L1 | dLuma L1 | dChroma L1 |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 0 | MTN_1288.png | +0.0175 | +0.000077 | -0.000188 | +0.000336 | +0.000387 | -0.000309 |
+| 1 | MTN_1296.png | +0.3874 | +0.000266 | -0.000310 | -0.000584 | -0.000501 | -0.000059 |
+| 2 | MTN_1304.png | +0.1359 | +0.000090 | +0.000505 | -0.000399 | -0.000397 | +0.000139 |
+
+Per-view interpretation:
+
+```text
+MHOLD improves PSNR versus STOP on all three eval views.
+The strongest gain is view 1.
+MHOLD is not a single-view artifact.
+Residual changes are mixed: view 0 has worse RGB/luma L1 but better PSNR and chroma; views 1 and 2 improve RGB/luma L1.
+```
+
+### Gate decision
+
+| Criterion | MHOLD result | Decision |
+|---|---|---|
+| RGB PSNR | +0.0356 dB vs A0 | Pass |
+| RGB SSIM | -0.000186 vs A0 | Pass |
+| RGB LPIPS | -0.000032 vs A0 | Pass |
+| Medium parameter freeze | max delta 0.0 | Pass |
+| Absolute medium metric retention | exact vs P30-13k | Pass |
+| Same-step Eval-F/G transfer | -1.04% / -1.29% | Fail threshold |
+| Same-step Eval-F/G J-var | -9.00% / -11.03% | F fails, G passes |
+| DC-var/object/recomp/closure | positive vs A0 | Pass |
+
+### Reasonable inference
+
+MHOLD strongly supports the core mechanism that STOP could not isolate:
+
+```text
+The P30 step-13000 medium calibration is compatible with RGB recovery when the medium is prevented from drifting.
+Gaussian and scene parameters can adapt to the frozen calibrated medium.
+```
+
+It also shows that the RGB penalty in C30/DECAY/H500 is not an unavoidable consequence of the calibrated medium state itself. The penalty comes from continued medium movement or from the joint medium/Gaussian optimization path after 13k.
+
+However, MHOLD does not satisfy the predeclared same-step transfer gate. Since absolute medium metrics are exactly retained, this gate failure should be interpreted carefully:
+
+```text
+The fixed medium is preserved.
+The 15k A0 baseline is stronger under the relative fixed-bank transfer score than the earlier 13k A0 baseline.
+```
+
+This means MHOLD is a genuine RGB breakthrough and a strong mechanism result, but it is not yet a clean final GMVC method claim under the current relative gate.
+
+### Unverified hypotheses
+
+The current result does not determine whether the Gaussian adaptation is physically clean. SH-rest delta grows to about half the DC delta by 15k, so part of the RGB recovery may be carried by high-order appearance compensation. This needs a targeted appearance diagnostic before declaring MHOLD a final method.
+
+### Next decision
+
+Do not expand to other scenes yet and do not train beyond 15k yet.
+
+The next minimal check should be diagnostic, not another schedule sweep:
+
+```text
+Evaluate MHOLD 15k for SH-rest compensation and DC-only recomposition.
+```
+
+Recommended single diagnostic:
+
+```text
+Compare A0 / P30-13k / STOP-15k / MHOLD-15k:
+  full RGB metrics
+  DC-only render metrics if available
+  full-SH minus DC-only residual
+  object-safe residual maps
+  fixed-bank metrics with and without forced DC proxy
+```
+
+If MHOLD's RGB gain remains under DC-only or mostly DC-supported rendering, then MHOLD is a strong candidate for the formal GMVC continuation rule. If the gain is mostly SH-rest compensation, then the next module should constrain Gaussian appearance adaptation after medium freeze rather than changing the medium schedule.
