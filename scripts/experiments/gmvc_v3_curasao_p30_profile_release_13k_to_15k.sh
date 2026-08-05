@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_DIR="/mnt/new/home_old/ycy/water-splatting-refactor"
+
+VARIANT="${VARIANT:-C30}"
+GPU="${GPU:-6}"
+SEED="${SEED:-42}"
+LOAD_STEP="${LOAD_STEP:-13000}"
+TARGET_FINAL_STEP="${TARGET_FINAL_STEP:-15000}"
+STAMP_BASE="${STAMP:-20260805_gmvc_v3_p30_profile_release_13k_to_15k}"
+LOG_ROOT="${LOG_ROOT:-${REPO_DIR}/logs}"
+
+A0_SOURCE_CKPT="${A0_SOURCE_CKPT:-${REPO_DIR}/outputs/gmvc_v3_a0_profile_persistence3k_curasao_seed42_step10000_to_13000/water-splatting/gmvc_v3_a0_profile_persistence3k_curasao_seed42_step10000_to_13000_20260805_gmvc_v3_curasao_r500_profile_persistence_3k_a0/nerfstudio_models/step-000013000.ckpt}"
+P30_SOURCE_CKPT="${P30_SOURCE_CKPT:-${REPO_DIR}/outputs/gmvc_v3_r500_p30_profile_persistence3k_curasao_seed42_step10000_to_13000/water-splatting/gmvc_v3_r500_p30_profile_persistence3k_curasao_seed42_step10000_to_13000_20260805_gmvc_v3_curasao_r500_profile_persistence_3k_p30_p30_r500_g000/nerfstudio_models/step-000013000.ckpt}"
+M1_CONFIG="${M1_CONFIG:-${REPO_DIR}/outputs/cross_scene_curasao_m1_seed42_15000/water-splatting/cross_scene_curasao_m1_seed42_15000_20260730_cross_scene/config.yml}"
+TRAIN_BANK="${TRAIN_BANK:-${REPO_DIR}/renders/gmvc_v3_geometry_track_banks/curasao_m1_step10000_train_s4096/gmvc_track_bank.pt}"
+
+case "${VARIANT}" in
+  A0|a0)
+    SLUG="a0"
+    SOURCE_CKPT="${A0_SOURCE_CKPT}"
+    GMVC_ON="False"
+    PROFILE_SCHEDULE="constant"
+    PROFILE_LAMBDA="0.0"
+    OBJECT_LAMBDA="0.0"
+    ;;
+  C30|c30)
+    SLUG="c30"
+    SOURCE_CKPT="${P30_SOURCE_CKPT}"
+    GMVC_ON="True"
+    PROFILE_SCHEDULE="constant"
+    PROFILE_LAMBDA="30"
+    OBJECT_LAMBDA="0.004"
+    ;;
+  STOP|stop)
+    SLUG="stop"
+    SOURCE_CKPT="${P30_SOURCE_CKPT}"
+    GMVC_ON="True"
+    PROFILE_SCHEDULE="stop"
+    PROFILE_LAMBDA="30"
+    OBJECT_LAMBDA="0.004"
+    ;;
+  DECAY|decay)
+    SLUG="decay"
+    SOURCE_CKPT="${P30_SOURCE_CKPT}"
+    GMVC_ON="True"
+    PROFILE_SCHEDULE="linear_decay"
+    PROFILE_LAMBDA="30"
+    OBJECT_LAMBDA="0.004"
+    ;;
+  *)
+    echo "Unknown VARIANT=${VARIANT}. Use A0, C30, STOP, or DECAY." >&2
+    exit 2
+    ;;
+esac
+
+if [[ ! -f "${SOURCE_CKPT}" ]]; then
+  echo "Missing source checkpoint for ${VARIANT}: ${SOURCE_CKPT}" >&2
+  exit 1
+fi
+if [[ "${GMVC_ON}" == "True" && ! -f "${TRAIN_BANK}" ]]; then
+  echo "Missing fixed train bank: ${TRAIN_BANK}" >&2
+  exit 1
+fi
+
+EXPERIMENT_NAME_DEFAULT="gmvc_v3_p30_release_${SLUG}_curasao_seed${SEED}_step${LOAD_STEP}_to_${TARGET_FINAL_STEP}"
+STAMP="${STAMP_BASE}_${SLUG}"
+GRAD_LOG="${LOG_ROOT}/gmvc_v3_p30_release_${SLUG}_${STAMP_BASE}.jsonl"
+
+exec env \
+  GPU="${GPU}" \
+  SCENE_SLUG="curasao" \
+  DATA_PATH="${DATA_PATH:-${REPO_DIR}/undistorted_data/undistorted_Curasao}" \
+  M1_LOAD_CONFIG="${M1_CONFIG}" \
+  M1_LOAD_CHECKPOINT="${SOURCE_CKPT}" \
+  EXPERIMENT_NAME="${EXPERIMENT_NAME:-${EXPERIMENT_NAME_DEFAULT}}" \
+  STAMP="${STAMP}" \
+  LOAD_STEP="${LOAD_STEP}" \
+  TARGET_FINAL_STEP="${TARGET_FINAL_STEP}" \
+  MAX_NUM_ITERATIONS="${MAX_NUM_ITERATIONS:-2000}" \
+  MODEL_NUM_STEPS="${MODEL_NUM_STEPS:-${TARGET_FINAL_STEP}}" \
+  STEPS_PER_SAVE="${STEPS_PER_SAVE:-1000}" \
+  SAVE_ONLY_LATEST_CHECKPOINT="${SAVE_ONLY_LATEST_CHECKPOINT:-False}" \
+  RUN_EVAL="${RUN_EVAL:-0}" \
+  RUN_CLOSURE_DIAG="${RUN_CLOSURE_DIAG:-0}" \
+  GMVC_VARIANT="p30_release_${SLUG}" \
+  GMVC_ENABLED="${GMVC_ON}" \
+  GMVC_DIAGNOSTIC_ONLY="False" \
+  GMVC_TRACK_BANK_PATH="${TRAIN_BANK}" \
+  GMVC_NEEDS_BANK="${GMVC_NEEDS_BANK:-0}" \
+  GMVC_TRACK_GEOMETRY_ONLY="1" \
+  GMVC_TRACK_SAMPLES_PER_VIEW="4096" \
+  GMVC_TRACK_MAX_OBS_PER_CAMERA="20000" \
+  GMVC_TRACK_SIGNAL_MIN="0.02" \
+  GMVC_TRACK_SIGNAL_MAX="0.98" \
+  GMVC_START_STEP="10000" \
+  GMVC_STOP_STEP="${TARGET_FINAL_STEP}" \
+  GMVC_RAMP_STEPS="500" \
+  LAMBDA_GMVC_J="0.0" \
+  LAMBDA_GMVC_RANGE="0.0" \
+  LAMBDA_GMVC_BINF="0.0" \
+  LAMBDA_GMVC_INTRINSIC="0.0" \
+  LAMBDA_GMVC_RESIDUAL_BUDGET="0.0" \
+  LAMBDA_GMVC_FIXED_CLOSURE="0.0" \
+  GMVC_V2_ENABLED="${GMVC_ON}" \
+  LAMBDA_GMVC_PROFILE="${PROFILE_LAMBDA}" \
+  LAMBDA_GMVC_SYMMETRIC_CLOSURE="0.0" \
+  GMVC_PROFILE_DETACH_J_STAR="True" \
+  GMVC_PROFILE_LOSS_MODE="irls_l2" \
+  GMVC_PROFILE_TRACK_BALANCED="True" \
+  GMVC_PROFILE_IRLS_DELTA="0.03" \
+  GMVC_PROFILE_IRLS_MAX_WEIGHT="1.0" \
+  GMVC_PROFILE_MIN_HESSIAN="1e-5" \
+  GMVC_PROFILE_MIN_TRANSMISSION_SPAN="0.01" \
+  GMVC_PROFILE_MIN_DEPTH_SPAN_REL="0.05" \
+  GMVC_V3_ENABLED="${GMVC_ON}" \
+  GMVC_V3_PROFILE_SCHEDULE="${PROFILE_SCHEDULE}" \
+  GMVC_V3_PROFILE_DECAY_START_STEP="13000" \
+  GMVC_V3_PROFILE_DECAY_END_STEP="14000" \
+  GMVC_V3_PROFILE_DECAY_FINAL_SCALE="0.0" \
+  LAMBDA_GMVC_OBJECT="${OBJECT_LAMBDA}" \
+  GMVC_V3_MEDIUM_STEPS="4" \
+  GMVC_V3_OBJECT_STEPS="1" \
+  GMVC_V3_FREEZE_MEDIUM_ON_OBJECT_PHASE="False" \
+  GMVC_V3_OBJECT_PHASE_MEDIUM_GRAD_SCALE="0.00" \
+  GMVC_V3_TARGET_CURRENT_CAMERA_TRACKS="True" \
+  GMVC_V3_OBJECT_SOURCE="J_proxy_raw" \
+  GMVC_OBJECT_TRACK_BALANCED="True" \
+  GMVC_OBJECT_J_CLAMP_MIN="-0.1" \
+  GMVC_OBJECT_J_CLAMP_MAX="1.1" \
+  GMVC_OBJECT_MIN_HESSIAN="1e-5" \
+  GMVC_OBJECT_MIN_DEPTH_SPAN_REL="0.05" \
+  GMVC_V2_MAX_TRACKS_PER_STEP="512" \
+  GMVC_V2_MIN_OBSERVATIONS_PER_TRACK="2" \
+  GMVC_GRAD_LOG_PATH="${GRAD_LOG}" \
+  GMVC_GRAD_LOG_EVERY="${GMVC_GRAD_LOG_EVERY:-49}" \
+  GMVC_GRAD_LOG_FORCE_STEPS="${GMVC_GRAD_LOG_FORCE_STEPS:-13001,13004,14000,15000}" \
+  GMVC_MAX_TRACKS_PER_STEP="4096" \
+  GMVC_BOUNDED_MEDIUM_ENABLED="False" \
+  GMVC_BOUNDED_INIT_FROM_FIRST_BATCH="False" \
+  GMVC_CLOSURE_SIGNAL_FLOOR="0.03" \
+  GMVC_INTRINSIC_SOURCE="J_proxy_raw" \
+  GMVC_INTRINSIC_USE_DC_PROXY="True" \
+  GMVC_FREEZE_GEOMETRY="False" \
+  GMVC_TRAIN_FEATURES_DC="False" \
+  GMVC_TRAIN_FEATURES_REST="False" \
+  "${REPO_DIR}/scripts/experiments/gmvc_phase_b_common.sh"

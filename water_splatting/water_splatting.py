@@ -334,6 +334,14 @@ class WaterSplattingModelConfig(ModelConfig):
     """Minimum relative depth span for GMVC profile loss."""
     gmvc_v3_enabled: bool = False
     """Enable GMVC-V3 alternating medium/object calibration."""
+    gmvc_v3_profile_schedule: Literal["constant", "stop", "linear_decay"] = "constant"
+    """Schedule for the effective GMVC-V3 profile loss weight."""
+    gmvc_v3_profile_decay_start_step: int = 13000
+    """Global step where stop/linear_decay profile release begins."""
+    gmvc_v3_profile_decay_end_step: int = 14000
+    """Global step where linear_decay reaches the final profile scale."""
+    gmvc_v3_profile_decay_final_scale: float = 0.0
+    """Final profile scale for stop/linear_decay schedules."""
     lambda_gmvc_object: float = 0.0
     """Weight for online DC-only object calibration against profiled J*."""
     gmvc_v3_medium_steps: int = 4
@@ -390,6 +398,8 @@ class WaterSplattingModelConfig(ModelConfig):
     """Optional JSONL path for GMVC intrinsic-vs-RGB DC gradient diagnostics."""
     gmvc_grad_log_every: int = 100
     """Training-step interval for GMVC gradient JSONL diagnostics when gmvc_grad_log_path is set."""
+    gmvc_grad_log_force_steps: Optional[str] = None
+    """Comma-separated global steps that should always be written to the GMVC gradient JSONL."""
     gmvc_max_tracks_per_step: int = 4096
     """Maximum detached track observations sampled for the current camera per step."""
     gmvc_eps: float = 1e-4
@@ -889,6 +899,8 @@ class WaterSplattingModel(Model):
         self._gmvc_training_bank_path = None
         self._gmvc_warned_missing_bank = False
         self._gmvc_online_state: Dict[str, torch.Tensor] = {}
+        self._gmvc_latest_learning_rates: Dict[str, float] = {}
+        self._gmvc_latest_grad_scaler_scale = 0.0
 
         self.crop_box: Optional[OrientedBox] = None
         if self.config.background_color == "random":
@@ -1334,7 +1346,13 @@ class WaterSplattingModel(Model):
         self, training_callback_attributes: TrainingCallbackAttributes
     ) -> List[TrainingCallback]:
         cbs = []
-        cbs.append(TrainingCallback([TrainingCallbackLocation.BEFORE_TRAIN_ITERATION], self.step_cb))
+        cbs.append(
+            TrainingCallback(
+                [TrainingCallbackLocation.BEFORE_TRAIN_ITERATION],
+                self.step_cb,
+                args=[training_callback_attributes.optimizers, training_callback_attributes.grad_scaler],
+            )
+        )
         # The order of these matters
         cbs.append(
             TrainingCallback(
@@ -1352,8 +1370,19 @@ class WaterSplattingModel(Model):
         )
         return cbs
 
-    def step_cb(self, step):
+    def step_cb(self, optimizers: Optional[Optimizers] = None, grad_scaler=None, step: int = 0):
         self.step = step
+        if optimizers is not None:
+            self._gmvc_latest_learning_rates = {
+                str(name): float(optimizer.param_groups[0].get("lr", 0.0))
+                for name, optimizer in optimizers.optimizers.items()
+                if getattr(optimizer, "param_groups", None)
+            }
+        if grad_scaler is not None:
+            try:
+                self._gmvc_latest_grad_scaler_scale = float(grad_scaler.get_scale())
+            except Exception:
+                self._gmvc_latest_grad_scaler_scale = 0.0
         self._ensure_background_gradient_surgery_hook()
 
     def get_gaussian_param_groups(self) -> Dict[str, List[Parameter]]:
@@ -1531,7 +1560,17 @@ class WaterSplattingModel(Model):
         if not (self.training and path):
             return
         every = max(int(getattr(self.config, "gmvc_grad_log_every", 100)), 1)
-        if int(self.step) % every != 0:
+        force_steps_raw = getattr(self.config, "gmvc_grad_log_force_steps", None)
+        force_steps = set()
+        if force_steps_raw:
+            for item in str(force_steps_raw).split(","):
+                item = item.strip()
+                if item:
+                    try:
+                        force_steps.add(int(item))
+                    except ValueError:
+                        pass
+        if int(self.step) % every != 0 and int(self.step) not in force_steps:
             return
         main_loss = loss_dict.get("main_loss")
         intrinsic_loss = loss_dict.get("gmvc_intrinsic_loss")
@@ -1634,6 +1673,7 @@ class WaterSplattingModel(Model):
 
         row = {
             "step": int(self.step),
+            "global_step": int(self.step),
             "gmvc_intrinsic_raw": float(
                 metrics_dict.get(
                     "gmvc_intrinsic_raw",
@@ -1782,8 +1822,31 @@ class WaterSplattingModel(Model):
             / (rgb_medium_norm + 1e-12),
             "gmvc_intrinsic_source": str(getattr(self.config, "gmvc_intrinsic_source", "J_proxy_raw")),
             "gmvc_intrinsic_use_dc_proxy": bool(getattr(self.config, "gmvc_intrinsic_use_dc_proxy", True)),
+            "gmvc_v3_profile_schedule": str(getattr(self.config, "gmvc_v3_profile_schedule", "constant")),
+            "gmvc_v3_profile_decay_start_step": int(
+                getattr(self.config, "gmvc_v3_profile_decay_start_step", 13000)
+            ),
+            "gmvc_v3_profile_decay_end_step": int(getattr(self.config, "gmvc_v3_profile_decay_end_step", 14000)),
+            "gmvc_v3_profile_decay_final_scale": float(
+                getattr(self.config, "gmvc_v3_profile_decay_final_scale", 0.0)
+            ),
+            "learning_rate": dict(self._gmvc_latest_learning_rates),
+            "learning_rate_medium_mlp": float(self._gmvc_latest_learning_rates.get("medium_mlp", 0.0)),
+            "learning_rate_direction_encoding": float(
+                self._gmvc_latest_learning_rates.get("direction_encoding", 0.0)
+            ),
+            "learning_rate_features_dc": float(self._gmvc_latest_learning_rates.get("features_dc", 0.0)),
+            "grad_scaler_scale": float(self._gmvc_latest_grad_scaler_scale),
         }
         for key in [
+            "gmvc_global_step",
+            "gmvc_phase",
+            "gmvc_profile_lambda_configured",
+            "gmvc_profile_lambda_scheduled",
+            "gmvc_profile_lambda_effective",
+            "gmvc_profile_schedule_scale",
+            "gmvc_object_ramp_factor",
+            "gmvc_object_phase_medium_grad_scale",
             "gmvc_v3_object_phase",
             "gmvc_lambda_profile",
             "gmvc_lambda_object",
@@ -1811,6 +1874,7 @@ class WaterSplattingModel(Model):
             "gmvc_medium_delta_count",
         ]:
             row[key] = _metric_float(key)
+        row["gmvc_phase"] = "object" if row.get("gmvc_v3_object_phase", 0.0) >= 0.5 else "medium"
         log_path = Path(path)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf8") as f:

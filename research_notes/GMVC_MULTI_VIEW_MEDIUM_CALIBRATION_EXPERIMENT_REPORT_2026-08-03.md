@@ -3841,3 +3841,327 @@ Reason: step-13000 passes RGB safety and has persistent fixed-bank gains; step-1
 Current conclusion: GMVC profile calibration has a real Curasao medium-decoupling signal, but the current 15k schedule over-trades RGB fidelity for calibration.
 Next action should remain Curasao-only and single-factor. Prefer testing profile stop/decay or best-checkpoint selection around 13k before any scene expansion. Do not increase profile lambda.
 ```
+
+## 31. Curasao P30 profile release sweep from 13k to 15k
+
+Date: 2026-08-05
+
+### Code facts
+
+Implemented a single-factor profile release schedule for GMVC-V3:
+
+```text
+gmvc_v3_profile_schedule: constant | stop | linear_decay
+gmvc_v3_profile_decay_start_step: 13000
+gmvc_v3_profile_decay_end_step: 14000
+gmvc_v3_profile_decay_final_scale: 0.0
+```
+
+The schedule only scales the effective profile loss weight. It does not change medium forward values, renderer equations, densification, refinement, track thresholds, IRLS delta, object lambda, object ramp, or the 4:1 medium/object phase.
+
+Additional JSONL audit fields:
+
+```text
+global_step
+gmvc_phase
+gmvc_profile_lambda_configured
+gmvc_profile_lambda_scheduled
+gmvc_profile_lambda_effective
+gmvc_object_ramp_factor
+gmvc_object_phase_medium_grad_scale
+learning_rate
+learning_rate_medium_mlp
+learning_rate_direction_encoding
+learning_rate_features_dc
+grad_scaler_scale
+```
+
+The per-view residual diagnostic now supports multiple runs through:
+
+```text
+--run LABEL=config:step
+--reference-run C30
+```
+
+New scripts:
+
+```text
+scripts/experiments/gmvc_v3_curasao_p30_profile_release_13k_to_15k.sh
+scripts/experiments/gmvc_v3_curasao_p30_profile_release_eval.sh
+```
+
+Updated scripts:
+
+```text
+water_splatting/water_splatting.py
+water_splatting/medium_calibration/gmvc_training.py
+scripts/experiments/backscatter_consistent_binf_iui3_redsea.sh
+scripts/experiments/gmvc_phase_b_common.sh
+scripts/experiments/gmvc_v3_alternating_1000.sh
+scripts/diagnostics/diagnose_gmvc_per_view_residuals.py
+scripts/diagnostics/summarize_gmvc_persistence.py
+```
+
+### Experiment facts
+
+All four runs were rerun under the new code. A0 was rerun because common training code changed.
+
+Training commands:
+
+```bash
+GPU=6 VARIANT=A0 scripts/experiments/gmvc_v3_curasao_p30_profile_release_13k_to_15k.sh
+GPU=7 VARIANT=C30 scripts/experiments/gmvc_v3_curasao_p30_profile_release_13k_to_15k.sh
+GPU=8 VARIANT=STOP scripts/experiments/gmvc_v3_curasao_p30_profile_release_13k_to_15k.sh
+GPU=9 VARIANT=DECAY scripts/experiments/gmvc_v3_curasao_p30_profile_release_13k_to_15k.sh
+```
+
+Evaluation command:
+
+```bash
+GPU=6 scripts/experiments/gmvc_v3_curasao_p30_profile_release_eval.sh
+```
+
+Per-view command:
+
+```bash
+CUDA_VISIBLE_DEVICES=6 /opt/anaconda3/envs/water_splatting/bin/python \
+  scripts/diagnostics/diagnose_gmvc_per_view_residuals.py \
+  --a0-config outputs/gmvc_v3_p30_release_a0_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_a0_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_a0/config.yml \
+  --a0-step 15000 \
+  --run C30=outputs/gmvc_v3_p30_release_c30_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_c30_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_c30/config.yml:15000 \
+  --run STOP=outputs/gmvc_v3_p30_release_stop_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_stop_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_stop/config.yml:15000 \
+  --run DECAY=outputs/gmvc_v3_p30_release_decay_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_decay_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_decay/config.yml:15000 \
+  --reference-run C30 \
+  --test-mode test \
+  --output-dir renders/gmvc_per_view_residuals_20260805/curasao_p30_profile_release_step15000
+```
+
+Main outputs:
+
+```text
+renders/gmvc_fixed_bank_diag_20260805/curasao_p30_profile_release_15k/summary.json
+renders/gmvc_per_view_residuals_20260805/curasao_p30_profile_release_step15000/per_view_residual_summary.json
+```
+
+Each run saved:
+
+```text
+step-000014000.ckpt
+step-000015000.ckpt
+```
+
+### Resume audit
+
+Nerfstudio resume state:
+
+```text
+Trainer._load_checkpoint sets _start_step = checkpoint step + 1.
+All release runs restored from step-000013000.ckpt and started training at global step 13001.
+Optimizer, scheduler, and scaler state are restored by Nerfstudio load-checkpoint.
+```
+
+Forced JSONL audit rows:
+
+| Run | Step | Phase | Schedule | Config lambda | Scheduled lambda | Effective lambda | Object lambda | Object ramp | Medium grad scale | medium LR | DC LR | scaler |
+|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| C30 | 13001 | medium | constant | 30.0 | 30.00 | 30.00 | 0.000 | 1.0 | 0.0 | 0.0001931 | 0.0025 | 1.0 |
+| C30 | 13004 | object | constant | 30.0 | 30.00 | 0.00 | 0.004 | 1.0 | 0.0 | 0.0001931 | 0.0025 | 1.0 |
+| STOP | 13001 | medium | stop | 30.0 | 0.00 | 0.00 | 0.000 | 1.0 | 0.0 | 0.0001931 | 0.0025 | 1.0 |
+| STOP | 13004 | object | stop | 30.0 | 0.00 | 0.00 | 0.004 | 1.0 | 0.0 | 0.0001931 | 0.0025 | 1.0 |
+| DECAY | 13001 | medium | linear_decay | 30.0 | 29.97 | 29.97 | 0.000 | 1.0 | 0.0 | 0.0001931 | 0.0025 | 1.0 |
+| DECAY | 13004 | object | linear_decay | 30.0 | 29.88 | 0.00 | 0.004 | 1.0 | 0.0 | 0.0001931 | 0.0025 | 1.0 |
+| DECAY | 14000 | medium | linear_decay | 30.0 | 0.00 | 0.00 | 0.000 | 1.0 | 0.0 | 0.0001702 | 0.0025 | 1.0 |
+
+Audit conclusion:
+
+```text
+No local-step ramp reset was observed.
+The 4:1 phase resumed from global step arithmetic: 13001 is medium phase, 13004 is object phase.
+Object ramp factor is already 1.0 after resume.
+Object phase medium RGB gradient scale is 0.0.
+STOP removes profile gradient from the first resumed training step.
+DECAY reaches zero effective profile weight at global step 14000.
+```
+
+### Config matrix
+
+All runs use Curasao only, seed 42, the same geometry-only train bank, the same Eval-F/Eval-G banks, `object lambda=0.004`, 4:1 phase, `target_current_camera_tracks=True`, and `object-phase medium grad scale=0` for GMVC runs.
+
+| Run | Source checkpoint | Profile schedule | Profile base lambda |
+|---|---|---|---:|
+| A0 | A0 step-13000 | GMVC off | 0 |
+| C30 | P30 step-13000 | constant | 30 |
+| STOP | P30 step-13000 | stop at 13000 | 30 |
+| DECAY | P30 step-13000 | linear 13000 to 14000, final 0 | 30 |
+
+### RGB metrics
+
+| Step | Run | PSNR | dPSNR vs A0 | dPSNR vs C30 | dPSNR vs P30-13k | SSIM | dSSIM vs A0 | LPIPS | dLPIPS vs A0 |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 14000 | A0 | 32.3633 | +0.0000 | +0.2683 | +0.0960 | 0.955980 | +0.000000 | 0.108264 | +0.000000 |
+| 14000 | C30 | 32.0949 | -0.2683 | +0.0000 | -0.1723 | 0.955015 | -0.000965 | 0.108530 | +0.000266 |
+| 14000 | STOP | 32.1442 | -0.2191 | +0.0492 | -0.1231 | 0.955490 | -0.000490 | 0.108237 | -0.000027 |
+| 14000 | DECAY | 32.1120 | -0.2512 | +0.0171 | -0.1552 | 0.955209 | -0.000771 | 0.108437 | +0.000173 |
+| 15000 | A0 | 32.1800 | +0.0000 | +0.2106 | -0.0873 | 0.955931 | +0.000000 | 0.108039 | +0.000000 |
+| 15000 | C30 | 31.9695 | -0.2106 | +0.0000 | -0.2978 | 0.955143 | -0.000787 | 0.108258 | +0.000218 |
+| 15000 | STOP | 32.0353 | -0.1447 | +0.0659 | -0.2319 | 0.955601 | -0.000330 | 0.108005 | -0.000034 |
+| 15000 | DECAY | 32.0261 | -0.1539 | +0.0566 | -0.2412 | 0.955511 | -0.000420 | 0.108028 | -0.000011 |
+
+RGB gate:
+
+```text
+C30 fails PSNR.
+STOP passes PSNR/SSIM/LPIPS.
+DECAY misses PSNR gate by about 0.0039 dB, while SSIM/LPIPS pass.
+```
+
+### Fixed-bank metrics versus same-step A0
+
+Percent change. Lower is better.
+
+Step 14000:
+
+| Run | Eval | Transfer | J-var | Closure | Consensus-J | Obj-target | DC-var | Recomp |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| C30 | F | -2.64% | -10.17% | -0.95% | -2.69% | -2.75% | -4.24% | -1.52% |
+| C30 | G | -2.80% | -11.89% | -0.52% | -3.02% | -4.78% | -4.66% | -1.56% |
+| STOP | F | -1.78% | -7.58% | -0.58% | -1.79% | -0.93% | -3.76% | -0.22% |
+| STOP | G | -1.80% | -8.04% | -0.28% | -1.90% | -2.60% | -4.25% | -0.31% |
+| DECAY | F | -2.25% | -8.97% | -0.77% | -2.27% | -2.08% | -3.95% | -1.01% |
+| DECAY | G | -2.29% | -9.83% | -0.40% | -2.41% | -3.85% | -4.42% | -1.05% |
+
+Step 15000:
+
+| Run | Eval | Transfer | J-var | Closure | Consensus-J | Obj-target | DC-var | Recomp |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| C30 | F | -2.23% | -12.15% | -0.78% | -2.26% | -7.10% | -5.35% | -3.42% |
+| C30 | G | -2.61% | -15.78% | -0.06% | -2.88% | -9.89% | -6.21% | -4.11% |
+| STOP | F | -1.15% | -9.40% | -0.24% | -1.15% | -5.80% | -5.05% | -2.25% |
+| STOP | G | -1.33% | -11.70% | +0.39% | -1.44% | -8.41% | -5.61% | -3.04% |
+| DECAY | F | -1.40% | -10.28% | -0.34% | -1.40% | -6.31% | -5.29% | -2.58% |
+| DECAY | G | -1.61% | -12.83% | +0.34% | -1.74% | -8.97% | -5.95% | -3.38% |
+
+Relative to C30 at step 15000:
+
+| Run | Eval | Transfer | J-var | Closure | Consensus-J | Obj-target | DC-var | Recomp |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| STOP | F | +1.10% | +3.12% | +0.54% | +1.14% | +1.41% | +0.32% | +1.22% |
+| STOP | G | +1.31% | +4.84% | +0.45% | +1.48% | +1.65% | +0.65% | +1.11% |
+| DECAY | F | +0.84% | +2.12% | +0.44% | +0.88% | +0.85% | +0.06% | +0.87% |
+| DECAY | G | +1.02% | +3.50% | +0.40% | +1.17% | +1.03% | +0.29% | +0.76% |
+
+Relative to P30 step-13000 at step 15000:
+
+| Run | Eval | Transfer | J-var | Closure | Consensus-J | Obj-target | DC-var | Recomp |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| C30 | F | -1.20% | -3.46% | +0.20% | -1.14% | -2.49% | -0.44% | -1.78% |
+| C30 | G | -1.34% | -5.33% | +0.40% | -1.31% | -2.14% | +0.26% | -1.16% |
+| STOP | F | -0.11% | -0.45% | +0.75% | -0.01% | -1.12% | -0.13% | -0.58% |
+| STOP | G | -0.05% | -0.75% | +0.86% | +0.14% | -0.53% | +0.91% | -0.06% |
+| DECAY | F | -0.36% | -1.42% | +0.65% | -0.27% | -1.66% | -0.38% | -0.92% |
+| DECAY | G | -0.33% | -2.02% | +0.80% | -0.16% | -1.14% | +0.55% | -0.40% |
+
+### Gradient and medium-change diagnostics
+
+Each GMVC run wrote 45 JSONL rows. C30, STOP, and DECAY all logged 35 medium-phase and 10 object-phase rows.
+
+Mean JSONL values:
+
+| Run | Interval | Effective profile lambda | Profile medium grad | Profile/RGB medium grad | RGB medium grad | J* drift | attn delta | bs delta | B_inf delta | transmission delta |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| C30 | 13001-13999 | 23.18 | 0.002166 | 0.00730 | 0.3112 | 0.01455 | 0.00596 | 0.00410 | 0.00167 | 0.00361 |
+| C30 | 14000-14999 | 23.18 | 0.002016 | 0.00689 | 0.3492 | 0.01899 | 0.00823 | 0.00472 | 0.00195 | 0.00507 |
+| STOP | 13001-13999 | 0.00 | 0.000000 | 0.00000 | 0.3125 | 0.01453 | 0.00599 | 0.00404 | 0.00165 | 0.00362 |
+| STOP | 14000-14999 | 0.00 | 0.000000 | 0.00000 | 0.3554 | 0.01879 | 0.00813 | 0.00457 | 0.00190 | 0.00498 |
+| DECAY | 13001-13999 | 11.75 | 0.001153 | 0.00414 | 0.3110 | 0.01454 | 0.00597 | 0.00407 | 0.00166 | 0.00361 |
+| DECAY | 14000-14999 | 0.00 | 0.000000 | 0.00000 | 0.3552 | 0.01883 | 0.00814 | 0.00462 | 0.00192 | 0.00500 |
+
+The profile schedule affected the profile-to-medium gradient as intended. STOP makes it zero from step 13001. DECAY has a smaller profile gradient before 14k and zero after 14k. Medium delta statistics remain close across runs, so the RGB recovery is not explained by a large gross reduction in medium parameter motion.
+
+### Per-view residual diagnosis at 15k
+
+Mean deltas versus A0:
+
+| Run | dPSNR | dSSIM | dLPIPS | dRGB L1 | dLuma L1 | dChroma L1 |
+|---|---:|---:|---:|---:|---:|---:|
+| C30 | -0.2106 | -0.000787 | +0.000218 | +0.000943 | +0.001079 | +0.000023 |
+| STOP | -0.1447 | -0.000330 | -0.000034 | +0.000440 | +0.000488 | +0.000033 |
+| DECAY | -0.1539 | -0.000420 | -0.000011 | +0.000530 | +0.000597 | +0.000032 |
+
+STOP and DECAY versus C30:
+
+| Run | dPSNR | dSSIM | dLPIPS | dRGB L1 | dLuma L1 | dChroma L1 |
+|---|---:|---:|---:|---:|---:|---:|
+| STOP | +0.0659 | +0.000457 | -0.000253 | -0.000503 | -0.000591 | +0.000009 |
+| DECAY | +0.0566 | +0.000368 | -0.000229 | -0.000412 | -0.000482 | +0.000009 |
+
+Per-view STOP versus C30:
+
+| View | Image | dPSNR | dSSIM | dLPIPS | dRGB L1 | dLuma L1 | dChroma L1 |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 0 | MTN_1288.png | +0.1746 | +0.001254 | -0.000720 | -0.001399 | -0.001617 | +0.000014 |
+| 1 | MTN_1296.png | +0.0047 | +0.000041 | +0.000082 | -0.000035 | -0.000067 | +0.000018 |
+| 2 | MTN_1304.png | +0.0184 | +0.000076 | -0.000120 | -0.000075 | -0.000088 | -0.000004 |
+
+Per-view interpretation:
+
+```text
+STOP improves C30 on all three eval views, but most of the gain comes from view 0.
+The improvement is mainly luminance residual reduction.
+Chroma residual is nearly unchanged and slightly worse on average.
+There is no evidence that STOP introduces a new single-view structural collapse.
+```
+
+### Gate decision
+
+15k gate:
+
+| Run | RGB gate | Transfer threshold | J-var threshold | DC/recomp/object | Closure | Decision |
+|---|---|---|---|---|---|---|
+| C30 | Fail PSNR | Pass | Pass | Pass | Mostly pass | Not usable due RGB |
+| STOP | Pass | Fail, F=-1.15%, G=-1.33% | Pass | Pass | Eval-G worsens +0.39% | Not a final candidate |
+| DECAY | Fail PSNR by 0.0039 dB | Fail, F=-1.40%, G=-1.61% | Pass | Pass | Eval-G worsens +0.34% | Not a final candidate |
+
+### Reasonable inference
+
+This sweep supports a narrower conclusion:
+
+```text
+Continued profile pressure after 13k is a real contributor to the 15k RGB penalty.
+Turning it off recovers enough RGB for STOP to pass the image gate.
+```
+
+But the same sweep does not support zero-floor calibrate-then-release as the final method:
+
+```text
+STOP and DECAY lose too much transfer improvement.
+Both fall below the 1.8% Eval-F/G transfer retention threshold.
+Both also weaken closure on Eval-G.
+```
+
+The result is closest to case three from the plan:
+
+```text
+STOP restores RGB, but the main transfer component of decoupling is not sufficiently retained.
+The calibrated medium decomposition is not fully self-maintaining after profile supervision is removed.
+```
+
+DECAY is not better than STOP in this zero-floor form. STOP has better RGB; DECAY retains slightly stronger transfer/J-var but still misses both the PSNR and transfer gates.
+
+### Unverified hypotheses
+
+The current evidence does not yet show whether a nonzero profile floor can keep transfer while preserving most RGB recovery. It also does not separate whether the transfer loss after STOP comes from medium drift, Gaussian compensation, or the 4:1 phase/object auxiliary continuing without profile support.
+
+### Next decision
+
+Do not enter cross-scene expansion, 15k success claim, longer training, or JapaneseGradens/IUI3/Panama.
+
+The next single-factor experiment, if GMVC continues, should be:
+
+```text
+P30 from 13k to 15k with profile linear decay to a nonzero floor.
+Suggested floors: 5 and 10.
+Keep all other settings unchanged.
+```
+
+Do not increase the profile base lambda and do not tune object lambda, ramp, cycle, bank, thresholds, or renderer.

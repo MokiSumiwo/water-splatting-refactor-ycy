@@ -108,6 +108,34 @@ def _ramped_weight(weight: float, step: int, start: int, ramp: int, stop: int) -
     return float(weight) * min((step - start) / max(float(ramp), 1.0), 1.0)
 
 
+def _gmvc_ramp_factor(step: int, start: int, ramp: int, stop: int) -> float:
+    if step < start or step >= stop:
+        return 0.0
+    if ramp <= 0:
+        return 1.0
+    return min((step - start) / max(float(ramp), 1.0), 1.0)
+
+
+def _gmvc_profile_schedule_scale(config: Any, step: int) -> float:
+    schedule = str(getattr(config, "gmvc_v3_profile_schedule", "constant"))
+    if schedule == "constant":
+        return 1.0
+    start = int(getattr(config, "gmvc_v3_profile_decay_start_step", 13000))
+    end = int(getattr(config, "gmvc_v3_profile_decay_end_step", 14000))
+    final = float(getattr(config, "gmvc_v3_profile_decay_final_scale", 0.0))
+    final = min(max(final, 0.0), 1.0)
+    if schedule == "stop":
+        return final if int(step) >= start else 1.0
+    if schedule == "linear_decay":
+        if int(step) <= start:
+            return 1.0
+        if end <= start or int(step) >= end:
+            return final
+        progress = (int(step) - start) / max(float(end - start), 1.0)
+        return 1.0 + (final - 1.0) * min(max(progress, 0.0), 1.0)
+    return 1.0
+
+
 def _sample_v2_track_rows(
     observations: Dict[str, Tensor],
     max_tracks: int,
@@ -470,7 +498,11 @@ def _compute_gmvc_v2_terms(
     start = int(getattr(config, "gmvc_start_step", 10000))
     stop = int(getattr(config, "gmvc_stop_step", 15000))
     ramp = int(getattr(config, "gmvc_ramp_steps", 500))
-    lambda_profile = _ramped_weight(float(getattr(config, "lambda_gmvc_profile", 0.0)), step, start, ramp, stop)
+    gmvc_ramp_factor = _gmvc_ramp_factor(step, start, ramp, stop)
+    lambda_profile_configured = float(getattr(config, "lambda_gmvc_profile", 0.0))
+    profile_schedule_scale = _gmvc_profile_schedule_scale(config, step)
+    lambda_profile_scheduled = lambda_profile_configured * gmvc_ramp_factor * profile_schedule_scale
+    lambda_profile = lambda_profile_scheduled
     lambda_symmetric_closure = _ramped_weight(
         float(getattr(config, "lambda_gmvc_symmetric_closure", 0.0)),
         step,
@@ -631,6 +663,16 @@ def _compute_gmvc_v2_terms(
         "gmvc_transmission_delta_l1_mean": transmission_delta_mean.detach(),
         "gmvc_transmission_delta_l1_p95": transmission_delta_p95.detach(),
         "gmvc_medium_delta_count": medium_delta_count.detach(),
+        "gmvc_global_step": gt_img.new_tensor(float(step)),
+        "gmvc_phase": gt_img.new_tensor(float(1.0 if object_phase else 0.0)),
+        "gmvc_profile_lambda_configured": gt_img.new_tensor(float(lambda_profile_configured)),
+        "gmvc_profile_lambda_scheduled": gt_img.new_tensor(float(lambda_profile_scheduled)),
+        "gmvc_profile_lambda_effective": gt_img.new_tensor(float(lambda_profile)),
+        "gmvc_profile_schedule_scale": gt_img.new_tensor(float(profile_schedule_scale)),
+        "gmvc_object_ramp_factor": gt_img.new_tensor(float(gmvc_ramp_factor)),
+        "gmvc_object_phase_medium_grad_scale": gt_img.new_tensor(
+            float(getattr(config, "gmvc_v3_object_phase_medium_grad_scale", 1.0))
+        ),
         "gmvc_lambda_profile": gt_img.new_tensor(float(lambda_profile)),
         "gmvc_lambda_symmetric_closure": gt_img.new_tensor(float(lambda_symmetric_closure)),
         "gmvc_lambda_object": gt_img.new_tensor(float(lambda_object)),
