@@ -5845,3 +5845,307 @@ weight(track) = f(depth span, T span, B span, view span, geometry weight, profil
 The important addition is reliability, not only observability. Raw propagation span can identify where useful signal may exist, but JapaneseGradens shows that high span alone does not guarantee correct constraints. Track weighting must also suppress correspondence noise, non-Lambertian tracks, geometry-weight outliers, and tracks with large robust profile residual.
 
 No new training is triggered yet. A minimal next step would be an offline candidate-weight audit that predicts which tracks would be upweighted/downweighted and checks whether the upweighted subset has higher positive gain on both Curasao and JapaneseGradens. Only if that audit is positive should an observability-aware GMVC training loss be implemented.
+
+## 39. Observability-aware profile weighting training test
+
+This section tests the minimal training version suggested by the section 38 audit. The goal is not to retune GMVC globally. It tests one hypothesis:
+
+```text
+Profile loss should focus more on tracks whose fixed-bank propagation geometry makes medium/object separation more observable.
+```
+
+The tested variant is named OAW:
+
+```text
+OAW = observability-aware weighting for GMVC profile tracks
+```
+
+### 39.1 Code change
+
+New default-off config flags:
+
+```text
+gmvc_profile_observability_weight_enabled = False
+gmvc_profile_observability_weight_mode = "dtb_view"
+gmvc_profile_observability_weight_power = 1.0
+gmvc_profile_observability_weight_min = 0.25
+gmvc_profile_observability_weight_max = 4.0
+```
+
+The implemented `dtb_view` score uses detached per-track percentiles of:
+
+```text
+relative depth span
+fixed-bank transmission span
+fixed-bank backscatter span
+view direction span
+observation count
+```
+
+The score is combined by geometric mean, exponentiated by `power`, normalized to mean 1 over valid tracks, and clamped to `[0.25, 4.0]`.
+
+Important routing detail:
+
+```text
+The weight only changes GMVC profile track aggregation.
+It does not change RGB loss.
+It does not change object loss.
+It does not change the physical renderer or inference outputs.
+```
+
+For `gmvc_profile_track_balanced=True`, `_track_balanced_mean()` now accepts a detached `track_weight`. This is necessary because otherwise the existing per-track averaging would cancel any track-level weighting.
+
+New metric logging fields:
+
+```text
+gmvc_profile_bank_transmission_span_p50
+gmvc_profile_bank_backscatter_span_p50
+gmvc_profile_view_angle_span_p50
+gmvc_profile_observability_weight_enabled
+gmvc_profile_observability_weight_mean
+gmvc_profile_observability_weight_p10/p50/p90
+```
+
+New offline audit script:
+
+```text
+scripts/diagnostics/summarize_gmvc_observability_weight_audit.py
+```
+
+New reproducibility wrappers:
+
+```text
+scripts/experiments/gmvc_v3_oaw_curasao_p30_profile_persistence_3000.sh
+scripts/experiments/gmvc_v3_oaw_japanesegradens_p30_profile_persistence_3000.sh
+scripts/experiments/gmvc_v3_oaw_curasao_p30_release_mhold_13k_to_15k.sh
+scripts/experiments/gmvc_v3_oaw_japanesegradens_p30_release_mhold_13k_to_15k.sh
+```
+
+### 39.2 Offline weight audit before training
+
+The offline audit used the saved track-level attribution records from section 38 and did not train a model. The best simple score was `obs_dtb_view`, matching the training implementation.
+
+Matched-hold P30-MHOLD versus A0-MHOLD:
+
+```text
+obs_dtb_view top25 transfer mean-gain lift: +0.10096
+obs_dtb_view top25 J-var mean-gain lift:   +0.05433
+all four Curasao/JapaneseGradens Eval-F/G banks were positive
+```
+
+P30-MHOLD versus normal A0:
+
+```text
+obs_dtb_view top25 transfer mean-gain lift: +0.12792
+obs_dtb_view top25 J-var mean-gain lift:   +0.12879
+all four Curasao/JapaneseGradens Eval-F/G banks were positive
+```
+
+Reliability-style scores were not used for this training pass because the audit showed they were weaker or harmful:
+
+```text
+reliability
+obs_x_reliability
+residual_inv_only
+irls_only
+```
+
+### 39.3 Smoke and training commands
+
+Smoke:
+
+```text
+GMVC_PROFILE_OBSERVABILITY_WEIGHT_ENABLED=True \
+GMVC_PROFILE_OBSERVABILITY_WEIGHT_MODE=dtb_view \
+MAX_NUM_ITERATIONS=20 \
+TARGET_FINAL_STEP=10020 \
+/bin/bash scripts/experiments/gmvc_v3_oaw_japanesegradens_p30_profile_persistence_3000.sh
+```
+
+Smoke checkpoint:
+
+```text
+outputs/gmvc_oaw_smoke_japanesegradens_seed42_step10000_to_10020/.../step-000010020.ckpt
+```
+
+Smoke result:
+
+```text
+training started and completed;
+OAW config flags were present in the config;
+weight stats were nontrivial, mean about 1.01, p10 about 0.25, p90 about 1.8;
+profile medium gradients were nonzero in medium phase;
+no CUDA or autograd error.
+```
+
+Training wrappers:
+
+```text
+GPU=6 /bin/bash scripts/experiments/gmvc_v3_oaw_curasao_p30_profile_persistence_3000.sh
+GPU=7 /bin/bash scripts/experiments/gmvc_v3_oaw_japanesegradens_p30_profile_persistence_3000.sh
+
+GPU=6 /bin/bash scripts/experiments/gmvc_v3_oaw_curasao_p30_release_mhold_13k_to_15k.sh
+GPU=7 /bin/bash scripts/experiments/gmvc_v3_oaw_japanesegradens_p30_release_mhold_13k_to_15k.sh
+```
+
+The actual runs used the same commands with explicit experiment names, stamps, `SAVE_ONLY_LATEST_CHECKPOINT=False`, and the same OAW flag values. The 10k->13k runs were executed from uncommitted code at git commit `41e69c9`, with the OAW diff present in the worktree.
+
+OAW profile 13k checkpoints:
+
+```text
+outputs/gmvc_v3_oaw_r500_p30_profile_persistence3k_curasao_seed42_step10000_to_13000/.../step-000013000.ckpt
+outputs/gmvc_v3_oaw_r500_p30_profile_persistence3k_japanesegradens_seed42_step10000_to_13000/.../step-000013000.ckpt
+```
+
+OAW-MHOLD 15k checkpoints:
+
+```text
+outputs/gmvc_v3_oaw_p30_release_mhold_curasao_seed42_step13000_to_15000/.../step-000015000.ckpt
+outputs/gmvc_v3_oaw_japanesegradens_p30_release_mhold_seed42_step13000_to_15000/.../step-000015000.ckpt
+```
+
+### 39.4 Training log audit
+
+OAW 10k->13k profile phase:
+
+| Scene | rows | weight mean | p10 | p50 | p90 |
+|---|---:|---:|---:|---:|---:|
+| Curasao | 66 | 1.0110 | 0.2665 | 0.9716 | 1.7958 |
+| JapaneseGradens | 66 | 1.0105 | 0.2659 | 0.9388 | 1.7977 |
+
+The weight distribution is active and nontrivial in both scenes.
+
+OAW-MHOLD 13k->15k release phase:
+
+```text
+gmvc_profile_lambda_effective = 0.0
+gmvc_profile_schedule_scale = 0.0
+gmvc_medium_hold_active = True
+gmvc_medium_param_delta_max_abs = 0.0
+rgb_grad_norm_medium = 0.0
+object phase: gmvc_object_grad_norm_dc nonzero, gmvc_object_grad_norm_medium = 0.0
+```
+
+This confirms the 15k phase is a medium-hold continuation of the OAW 13k profile checkpoint, not continued profile optimization.
+
+### 39.5 RGB results
+
+All values are test split eval metrics. Deltas are relative to same-scene A0 at step 15000.
+
+| Scene | Run | Step | PSNR | dPSNR | SSIM | dSSIM | LPIPS | dLPIPS |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| Curasao | A0 | 15000 | 32.1800 | +0.0000 | 0.955931 | +0.000000 | 0.108039 | +0.000000 |
+| Curasao | A0-MHOLD | 15000 | 32.4629 | +0.2829 | 0.956852 | +0.000922 | 0.107474 | -0.000566 |
+| Curasao | P30-MHOLD | 15000 | 32.2156 | +0.0356 | 0.955745 | -0.000186 | 0.108008 | -0.000032 |
+| Curasao | OAW-MHOLD | 15000 | 32.1424 | -0.0376 | 0.955477 | -0.000454 | 0.108219 | +0.000180 |
+| JapaneseGradens | A0 | 15000 | 24.7588 | +0.0000 | 0.899367 | +0.000000 | 0.120381 | +0.000000 |
+| JapaneseGradens | A0-MHOLD | 15000 | 24.7459 | -0.0130 | 0.899593 | +0.000226 | 0.120234 | -0.000147 |
+| JapaneseGradens | P30-MHOLD | 15000 | 24.7538 | -0.0050 | 0.899657 | +0.000290 | 0.120336 | -0.000044 |
+| JapaneseGradens | OAW-MHOLD | 15000 | 24.7774 | +0.0185 | 0.899652 | +0.000284 | 0.120197 | -0.000183 |
+
+OAW has the desired RGB direction on JapaneseGradens, but it fails Curasao RGB safety relative to both A0 and P30-MHOLD. It is also far below the Curasao A0-MHOLD RGB stabilizer.
+
+The intermediate OAW-P30 13k checkpoints had:
+
+```text
+Curasao:          PSNR 32.2387, SSIM 0.955784, LPIPS 0.108017
+JapaneseGradens:  PSNR 24.8349, SSIM 0.900487, LPIPS 0.119162
+```
+
+These are useful diagnostics, but the fair final candidate is OAW-MHOLD at 15k.
+
+### 39.6 Fixed Eval-F/G decomposition results
+
+Lower is better. Percent deltas are relative to same-scene A0 at step 15000.
+
+| Scene | Bank | Run | transfer | J-var | closure | object-target | DC-var | recomposition |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| Curasao | Eval-F | P30-MHOLD | -1.04% | -9.00% | -0.98% | -5.93% | -4.71% | -2.37% |
+| Curasao | Eval-F | OAW-MHOLD | -1.36% | -9.11% | -1.28% | -6.20% | -4.95% | -2.62% |
+| Curasao | Eval-G | P30-MHOLD | -1.29% | -11.03% | -0.46% | -9.40% | -5.57% | -3.72% |
+| Curasao | Eval-G | OAW-MHOLD | -1.19% | -9.41% | -0.60% | -9.67% | -5.58% | -3.86% |
+| JapaneseGradens | Eval-F | P30-MHOLD | -2.69% | +6.67% | -0.29% | -2.06% | +5.71% | -4.00% |
+| JapaneseGradens | Eval-F | OAW-MHOLD | -2.88% | +8.06% | -0.06% | -1.88% | +6.32% | -4.26% |
+| JapaneseGradens | Eval-G | P30-MHOLD | -2.80% | +6.13% | -0.30% | -2.55% | +5.54% | -4.14% |
+| JapaneseGradens | Eval-G | OAW-MHOLD | -3.00% | +7.33% | -0.06% | -2.29% | +6.38% | -4.37% |
+
+Incremental OAW-MHOLD versus original P30-MHOLD:
+
+| Scene | Bank | transfer | J-var | closure | object-target | DC-var | recomposition |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Curasao | Eval-F | -0.32% | -0.12% | -0.30% | -0.28% | -0.25% | -0.26% |
+| Curasao | Eval-G | +0.10% | +1.83% | -0.14% | -0.29% | -0.01% | -0.15% |
+| JapaneseGradens | Eval-F | -0.19% | +1.30% | +0.23% | +0.18% | +0.57% | -0.26% |
+| JapaneseGradens | Eval-G | -0.21% | +1.13% | +0.24% | +0.26% | +0.80% | -0.24% |
+
+OAW gives only a tiny decomposition increment on Curasao Eval-F and no consistent increment on Eval-G. On JapaneseGradens it improves transfer and recomposition slightly, but worsens J-var, closure, object-target, and DC-var relative to P30-MHOLD.
+
+### 39.7 Track-level OAW attribution
+
+Track-level attribution compares:
+
+```text
+base      = A0-MHOLD
+candidate = OAW-MHOLD
+```
+
+Outputs:
+
+```text
+renders/gmvc_track_observability_gain_20260806/curasao_oaw/
+renders/gmvc_track_observability_gain_20260806/japanesegradens_oaw/
+```
+
+Mean gain is base minus candidate, so positive means OAW-MHOLD is better on that track.
+
+| Scene | Bank | transfer gain / positive ratio | J-var gain / positive ratio | DC-var gain / positive ratio |
+|---|---|---:|---:|---:|
+| Curasao | Eval-F | 0.000391 / 0.709 | 0.000805 / 0.933 | 0.000108 / 0.733 |
+| Curasao | Eval-G | 0.000372 / 0.689 | 0.001367 / 0.921 | 0.000120 / 0.734 |
+| JapaneseGradens | Eval-F | 0.000324 / 0.499 | 0.000045 / 0.507 | -0.000002 / 0.484 |
+| JapaneseGradens | Eval-G | 0.000334 / 0.515 | 0.000065 / 0.521 | -0.000004 / 0.497 |
+
+This repeats the section 38 pattern. Curasao has broad positive coverage; JapaneseGradens is near balanced and DC-var is slightly negative.
+
+High-observability quartiles on JapaneseGradens are still more positive for transfer:
+
+```text
+Eval-F depth-span Q1 transfer gain: 0.000112, positive ratio 0.486
+Eval-F depth-span Q4 transfer gain: 0.001140, positive ratio 0.603
+
+Eval-G depth-span Q1 transfer gain: 0.000048, positive ratio 0.497
+Eval-G depth-span Q4 transfer gain: 0.001181, positive ratio 0.610
+```
+
+But this does not make the final aggregate constraint reliable. Q4 J-var positive ratio remains only about 0.58-0.59, and DC-var is not fixed.
+
+### 39.8 Gate decision
+
+OAW does not pass the cross-scene candidate gate.
+
+Reasons:
+
+```text
+1. Curasao OAW-MHOLD loses 0.0376 dB PSNR versus A0 and 0.0732 dB versus P30-MHOLD.
+2. Curasao OAW-MHOLD also worsens SSIM and LPIPS versus A0.
+3. JapaneseGradens OAW-MHOLD improves RGB versus A0, but the gain is small.
+4. Fixed-bank gains over P30-MHOLD are tiny and mixed.
+5. JapaneseGradens still has worse J-var and DC-var versus A0, and OAW worsens them slightly versus P30-MHOLD.
+6. Track-level positive coverage remains scene-dependent: strong on Curasao, near random on JapaneseGradens.
+```
+
+The correct conclusion is:
+
+```text
+Pure observability-aware profile weighting is useful as a diagnostic and slightly helps JapaneseGradens RGB, but it is not a reliable GMVC-V3 module. It does not solve the cross-scene failure identified in section 37.
+```
+
+The OAW result also refines the mechanism diagnosis:
+
+```text
+Raw observability can identify tracks where transfer gains are more likely, especially in JapaneseGradens high-span quartiles.
+However, observability alone does not determine whether the profile target is correct.
+The missing piece is reliability: correspondence quality, non-Lambertian behavior, local geometry errors, and robust residual quality.
+```
+
+No remaining-scene expansion, no longer Curasao tuning, and no new 15k/four-scene claim should be made from OAW. If GMVC continues, the next minimal test should be an offline reliability model that predicts harmful tracks before training, not another global weight/lambda sweep.

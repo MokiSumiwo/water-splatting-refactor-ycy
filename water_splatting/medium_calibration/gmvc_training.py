@@ -57,7 +57,14 @@ def _weighted_mean(value: Tensor, weight: Tensor, eps: float) -> Tensor:
     return (value * weight[:, None]).sum() / (weight.sum() * value.shape[-1] + float(eps))
 
 
-def _track_balanced_mean(value: Tensor, weight: Tensor, local_track: Tensor, track_count: int, eps: float) -> Tensor:
+def _track_balanced_mean(
+    value: Tensor,
+    weight: Tensor,
+    local_track: Tensor,
+    track_count: int,
+    eps: float,
+    track_weight: Optional[Tensor] = None,
+) -> Tensor:
     if value.numel() == 0 or track_count <= 0:
         return value.new_zeros(())
     weighted_sum = _scatter_sum(value * weight[:, None], local_track, track_count).sum(dim=-1)
@@ -66,6 +73,11 @@ def _track_balanced_mean(value: Tensor, weight: Tensor, local_track: Tensor, tra
     if not bool(valid.any()):
         return value.new_zeros(())
     per_track = weighted_sum[valid] / (weight_sum[valid] * value.shape[-1] + float(eps))
+    if track_weight is not None:
+        selected_weight = track_weight[valid].detach().reshape(-1).to(device=per_track.device, dtype=per_track.dtype)
+        selected_weight = torch.where(torch.isfinite(selected_weight), selected_weight.clamp_min(0.0), torch.zeros_like(selected_weight))
+        if bool((selected_weight > 0).any()):
+            return (per_track * selected_weight).sum() / selected_weight.sum().clamp_min(float(eps))
     return per_track.mean()
 
 
@@ -199,6 +211,39 @@ def _track_scalar_min_max(value: Tensor, index: Tensor, valid: Tensor, count: in
     return mins, maxs
 
 
+def _track_vector_angle_span(value: Tensor, index: Tensor, valid: Tensor, count: int, eps: float) -> Tensor:
+    spans = value.new_zeros((count,))
+    normalized = value / value.norm(dim=-1, keepdim=True).clamp_min(float(eps))
+    for track_idx in range(count):
+        rows = torch.nonzero((index == track_idx) & valid, as_tuple=False).reshape(-1)
+        if int(rows.numel()) < 2:
+            continue
+        track_values = normalized[rows]
+        spans[track_idx] = torch.acos((track_values @ track_values.T).clamp(-1.0, 1.0).min())
+    return spans
+
+
+def _track_percentile_score(value: Tensor, valid: Tensor) -> Tensor:
+    score = value.new_zeros(value.shape)
+    finite = valid & torch.isfinite(value)
+    if not bool(finite.any()):
+        return score
+    values = value.detach()[finite].float()
+    order = torch.argsort(values)
+    ranks = torch.empty_like(values)
+    ranks[order] = torch.arange(int(values.numel()), device=values.device, dtype=values.dtype)
+    ranked = (ranks + 0.5) / max(float(values.numel()), 1.0)
+    score[finite] = ranked.to(device=value.device, dtype=value.dtype)
+    return score
+
+
+def _geometric_track_score(values: Tuple[Tensor, ...], eps: float) -> Tensor:
+    if not values:
+        raise ValueError("At least one value is required")
+    stacked = torch.stack([value.clamp(float(eps), 1.0) for value in values], dim=0)
+    return torch.exp(torch.log(stacked).mean(dim=0))
+
+
 def _gmvc_v3_object_phase(config: Any, step: int) -> bool:
     if not bool(getattr(config, "gmvc_v3_enabled", False)):
         return False
@@ -311,6 +356,12 @@ def _compute_gmvc_v2_terms(
     )
     weight = torch.where(finite, weight, torch.zeros_like(weight))
     transmission, backscatter = _medium_terms(depth, medium_attn, medium_bs, b_inf)
+    bank_transmission, bank_backscatter = _medium_terms(
+        depth.detach(),
+        bank_attn.detach(),
+        bank_bs.detach(),
+        bank_binf.detach(),
+    )
 
     min_obs = max(int(getattr(config, "gmvc_v2_min_observations_per_track", 2)), 2)
     obs_count = _scatter_sum((weight > 0).to(dtype)[:, None], local_track, sampled_track_count).reshape(-1)
@@ -323,10 +374,25 @@ def _compute_gmvc_v2_terms(
         valid_rows,
         sampled_track_count,
     )
+    bank_t_min, bank_t_max = _track_scalar_min_max(
+        bank_transmission.detach().mean(dim=-1),
+        local_track,
+        valid_rows,
+        sampled_track_count,
+    )
+    bank_b_min, bank_b_max = _track_scalar_min_max(
+        bank_backscatter.detach().mean(dim=-1),
+        local_track,
+        valid_rows,
+        sampled_track_count,
+    )
     depth_scalar_for_gate = depth.detach().reshape(-1)
     d_min, d_max = _track_scalar_min_max(depth_scalar_for_gate, local_track, valid_rows, sampled_track_count)
+    view_angle_span = _track_vector_angle_span(directions.detach(), local_track, valid_rows, sampled_track_count, eps)
     median_depth = _scatter_sum((depth_scalar_for_gate * valid_rows.to(dtype))[:, None], local_track, sampled_track_count).reshape(-1)
     median_depth = median_depth / obs_count.clamp_min(1.0)
+    geometry_weight_mean = _scatter_sum(weight.detach()[:, None], local_track, sampled_track_count).reshape(-1)
+    geometry_weight_mean = geometry_weight_mean / obs_count.clamp_min(1.0)
     initial_profile_weight = torch.where(base_track_valid[local_track], weight, torch.zeros_like(weight))
     initial_denominator = _scatter_sum(
         initial_profile_weight[:, None] * transmission.detach().square(),
@@ -344,6 +410,45 @@ def _compute_gmvc_v2_terms(
     profile_weight = torch.where(track_valid[local_track], weight, torch.zeros_like(weight))
     profile_loss_mode = str(getattr(config, "gmvc_profile_loss_mode", "charbonnier"))
     profile_track_balanced = bool(getattr(config, "gmvc_profile_track_balanced", False))
+    profile_observability_weight_enabled = bool(
+        getattr(config, "gmvc_profile_observability_weight_enabled", False)
+    )
+    profile_observability_track_weight = torch.ones_like(depth_span_rel)
+    if profile_observability_weight_enabled:
+        mode = str(getattr(config, "gmvc_profile_observability_weight_mode", "dtb_view"))
+        score_parts = [
+            _track_percentile_score(depth_span_rel, track_valid),
+            _track_percentile_score(bank_t_max - bank_t_min, track_valid),
+            _track_percentile_score(bank_b_max - bank_b_min, track_valid),
+        ]
+        if mode in {"dtb_view", "dtb_view_geom"}:
+            score_parts.extend(
+                [
+                    _track_percentile_score(view_angle_span, track_valid),
+                    _track_percentile_score(obs_count, track_valid),
+                ]
+            )
+        if mode == "dtb_view_geom":
+            score_parts.extend(
+                [
+                    _track_percentile_score(geometry_weight_mean, track_valid),
+                    _track_percentile_score(hessian_scalar, track_valid),
+                ]
+            )
+        track_score = _geometric_track_score(tuple(score_parts), eps)
+        power = max(float(getattr(config, "gmvc_profile_observability_weight_power", 1.0)), 0.0)
+        profile_observability_track_weight = track_score.pow(power)
+        valid_weight = profile_observability_track_weight[track_valid]
+        if bool(valid_weight.numel() > 0) and bool(torch.isfinite(valid_weight).any()):
+            profile_observability_track_weight = profile_observability_track_weight / valid_weight.mean().clamp_min(eps)
+        min_weight = max(float(getattr(config, "gmvc_profile_observability_weight_min", 0.25)), 0.0)
+        max_weight = max(float(getattr(config, "gmvc_profile_observability_weight_max", 4.0)), min_weight)
+        profile_observability_track_weight = profile_observability_track_weight.clamp(min_weight, max_weight)
+        profile_observability_track_weight = torch.where(
+            track_valid,
+            profile_observability_track_weight,
+            torch.zeros_like(profile_observability_track_weight),
+        )
     irls_weight = torch.ones_like(profile_weight)
 
     if profile_weight.sum() > 0:
@@ -381,16 +486,24 @@ def _compute_gmvc_v2_terms(
                 eps=float(getattr(config, "gmvc_charbonnier_eps", 1e-6)),
             )
             loss_weight = profile_weight
+        loss_weight_for_mean = loss_weight
+        track_weight_for_mean = None
+        if profile_observability_weight_enabled:
+            if profile_track_balanced:
+                track_weight_for_mean = profile_observability_track_weight
+            else:
+                loss_weight_for_mean = loss_weight * profile_observability_track_weight[local_track].detach()
         if profile_track_balanced:
             profile_loss = _track_balanced_mean(
                 profile_loss_values,
-                loss_weight,
+                loss_weight_for_mean,
                 local_track,
                 sampled_track_count,
                 eps,
+                track_weight=track_weight_for_mean,
             )
         else:
-            profile_loss = _weighted_mean(profile_loss_values, loss_weight, eps)
+            profile_loss = _weighted_mean(profile_loss_values, loss_weight_for_mean, eps)
         j_obs = (gt.detach() - backscatter.detach()) / (transmission.detach() + eps)
         j_center = j_star.detach()[local_track]
         j_variance_values = (j_obs - j_center).abs()
@@ -401,9 +514,13 @@ def _compute_gmvc_v2_terms(
                 local_track,
                 sampled_track_count,
                 eps,
+                track_weight=track_weight_for_mean,
             )
         else:
-            j_variance = _weighted_mean(j_variance_values, profile_weight.detach(), eps)
+            j_variance_weight = profile_weight.detach()
+            if profile_observability_weight_enabled:
+                j_variance_weight = j_variance_weight * profile_observability_track_weight[local_track].detach()
+            j_variance = _weighted_mean(j_variance_values, j_variance_weight, eps)
     else:
         profile_loss = zero
         j_variance = zero
@@ -613,6 +730,10 @@ def _compute_gmvc_v2_terms(
                 b_inf_delta_mean, b_inf_delta_p95, _ = _row_delta_cache("b_inf", b_inf)
                 transmission_delta_mean, transmission_delta_p95, _ = _row_delta_cache("transmission", transmission)
 
+    profile_observability_valid_weight = profile_observability_track_weight.detach()[track_valid.detach()]
+    profile_observability_weight_mean = (
+        profile_observability_valid_weight.mean() if profile_observability_valid_weight.numel() else zero.detach()
+    )
     losses = {
         "gmvc_profile_loss": profile_loss * lambda_profile,
         "gmvc_symmetric_closure_loss": closure_loss * lambda_symmetric_closure,
@@ -631,6 +752,16 @@ def _compute_gmvc_v2_terms(
         "gmvc_profile_hessian_p05": _safe_quantile(hessian_scalar, 0.05, zero),
         "gmvc_profile_transmission_span_p50": _safe_quantile(t_max - t_min, 0.50, zero),
         "gmvc_profile_depth_span_rel_p50": _safe_quantile(depth_span_rel, 0.50, zero),
+        "gmvc_profile_bank_transmission_span_p50": _safe_quantile(bank_t_max - bank_t_min, 0.50, zero),
+        "gmvc_profile_bank_backscatter_span_p50": _safe_quantile(bank_b_max - bank_b_min, 0.50, zero),
+        "gmvc_profile_view_angle_span_p50": _safe_quantile(view_angle_span, 0.50, zero),
+        "gmvc_profile_observability_weight_enabled": gt_img.new_tensor(
+            float(profile_observability_weight_enabled)
+        ),
+        "gmvc_profile_observability_weight_mean": profile_observability_weight_mean.detach(),
+        "gmvc_profile_observability_weight_p10": _safe_quantile(profile_observability_valid_weight, 0.10, zero),
+        "gmvc_profile_observability_weight_p50": _safe_quantile(profile_observability_valid_weight, 0.50, zero),
+        "gmvc_profile_observability_weight_p90": _safe_quantile(profile_observability_valid_weight, 0.90, zero),
         "gmvc_profile_irls_weight_mean": irls_weight.detach().mean() if irls_weight.numel() else zero.detach(),
         "gmvc_profile_j_variance_l1": j_variance.detach(),
         "gmvc_profile_j_star_mean": j_star.detach().mean() if j_star.numel() else zero.detach(),

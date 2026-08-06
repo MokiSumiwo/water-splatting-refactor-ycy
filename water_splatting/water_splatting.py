@@ -332,6 +332,16 @@ class WaterSplattingModelConfig(ModelConfig):
     """Minimum per-track current-medium transmission span for GMVC profile loss."""
     gmvc_profile_min_depth_span_rel: float = 0.0
     """Minimum relative depth span for GMVC profile loss."""
+    gmvc_profile_observability_weight_enabled: bool = False
+    """Use detached track observability to reweight GMVC profile tracks."""
+    gmvc_profile_observability_weight_mode: Literal["dtb", "dtb_view", "dtb_view_geom"] = "dtb_view"
+    """Track observability score inputs: depth/transmission/backscatter, optional view span and geometry."""
+    gmvc_profile_observability_weight_power: float = 1.0
+    """Exponent applied to the normalized observability track score."""
+    gmvc_profile_observability_weight_min: float = 0.25
+    """Minimum normalized observability track weight."""
+    gmvc_profile_observability_weight_max: float = 4.0
+    """Maximum normalized observability track weight."""
     gmvc_v3_enabled: bool = False
     """Enable GMVC-V3 alternating medium/object calibration."""
     gmvc_v3_profile_schedule: Literal["constant", "stop", "linear_decay"] = "constant"
@@ -2015,6 +2025,14 @@ class WaterSplattingModel(Model):
             "gmvc_profile_schedule_scale",
             "gmvc_object_ramp_factor",
             "gmvc_object_phase_medium_grad_scale",
+            "gmvc_profile_bank_transmission_span_p50",
+            "gmvc_profile_bank_backscatter_span_p50",
+            "gmvc_profile_view_angle_span_p50",
+            "gmvc_profile_observability_weight_enabled",
+            "gmvc_profile_observability_weight_mean",
+            "gmvc_profile_observability_weight_p10",
+            "gmvc_profile_observability_weight_p50",
+            "gmvc_profile_observability_weight_p90",
             "gmvc_v3_object_phase",
             "gmvc_lambda_profile",
             "gmvc_lambda_object",
