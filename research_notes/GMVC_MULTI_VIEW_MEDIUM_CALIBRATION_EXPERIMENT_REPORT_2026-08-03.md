@@ -6335,3 +6335,219 @@ Current track-internal signals are not sufficient to predict when the shared J* 
 ```
 
 This closes the reliability-weighting branch for now. If GMVC is discussed in a paper, it should be presented as a geometry-anchored diagnostic and partial mechanism result, with explicit limitations from non-Lambertian effects, geometry mismatch, and medium non-uniformity.
+
+## 41. Four-scene fixed P30-MHOLD validation
+
+Date: 2026-08-06
+
+Commit before this validation:
+
+```text
+7afc1a8 Add GMVC profile target reliability audit
+```
+
+This section records the fixed four-scene validation requested after the reliability-weighting branch was closed. No new objective, renderer change, densification change, pruning change, profile weighting variant, RAW/OAW change, lambda sweep, ramp change, hold-step change, IRLS change, or threshold change was introduced.
+
+### 41.1 Code additions
+
+New scripts:
+
+```text
+scripts/experiments/gmvc_v3_four_scene_p30_mhold_15k.sh
+scripts/experiments/gmvc_v3_four_scene_p30_mhold_eval.sh
+scripts/diagnostics/render_gmvc_underwater_dewatered_comparison.py
+scripts/diagnostics/summarize_gmvc_four_scene_15k.py
+```
+
+The training wrapper reuses completed Curasao and JapaneseGradens A0/P30-MHOLD checkpoints only when the final `step-000015000.ckpt` exists. It trains missing scene continuations from the M1 step-10000 source. IUI3 needed a controlled M1 bootstrap because the existing formal M1 output did not provide the required `step-000010000.ckpt`.
+
+The evaluation wrapper runs:
+
+```text
+1. average eval RGB metrics for A0 and P30-MHOLD at step 15000;
+2. fixed-bank Eval-F and Eval-G diagnostics with heldout tracks;
+3. underwater, dewatered-proxy, and medium-component contact sheets;
+4. a summary JSON and two CSV tables.
+```
+
+The dewatered visualization is diagnostic only. It uses `J_proxy_raw` under a forced DC-proxy GMVC context when available, with fallback to `J_gaussian_raw` or `J_raw`. It is not a clear-image ground truth.
+
+### 41.2 Fixed method
+
+All scenes use the same method:
+
+```text
+M1 source step: 10000
+P30 calibration: global steps 10001-13000
+lambda_gmvc_profile: 30
+lambda_gmvc_object: 0.004
+profile ramp: 500 steps
+phase schedule: 4 medium steps : 1 object step
+object-phase medium grad scale: 0
+target_current_camera_tracks: True
+training bank: geometry-only train bank, 4096 samples per view
+seed: 42
+medium hold: global steps 13001-15000
+hold profile effective lambda: 0
+hold medium freeze: strict, audited by medium gradients and parameter deltas
+```
+
+Commands:
+
+```bash
+SCENE=Panama VARIANT=ALL GPU=8 RUN_EVAL=0 bash scripts/experiments/gmvc_v3_four_scene_p30_mhold_15k.sh
+SCENE=IUI3 VARIANT=ALL GPU=7 RUN_EVAL=0 bash scripts/experiments/gmvc_v3_four_scene_p30_mhold_15k.sh
+SCENE=ALL GPU=6 bash scripts/experiments/gmvc_v3_four_scene_p30_mhold_eval.sh
+```
+
+Curasao and JapaneseGradens reused the already completed fixed-parameter continuations from the previous sections.
+
+### 41.3 Main outputs
+
+Summary outputs:
+
+```text
+renders/gmvc_four_scene_p30_mhold_15k/summary.json
+renders/gmvc_four_scene_p30_mhold_15k/summary_rgb.csv
+renders/gmvc_four_scene_p30_mhold_15k/summary_fixed_bank.csv
+```
+
+Representative contact sheets:
+
+```text
+renders/gmvc_four_scene_p30_mhold_15k/Curasao/visualization/contact_sheets/underwater_contact_sheet.png
+renders/gmvc_four_scene_p30_mhold_15k/Curasao/visualization/contact_sheets/dewatered_contact_sheet.png
+renders/gmvc_four_scene_p30_mhold_15k/Curasao/visualization/contact_sheets/medium_components_contact_sheet.png
+renders/gmvc_four_scene_p30_mhold_15k/JapaneseGradens/visualization/contact_sheets/underwater_contact_sheet.png
+renders/gmvc_four_scene_p30_mhold_15k/JapaneseGradens/visualization/contact_sheets/dewatered_contact_sheet.png
+renders/gmvc_four_scene_p30_mhold_15k/JapaneseGradens/visualization/contact_sheets/medium_components_contact_sheet.png
+renders/gmvc_four_scene_p30_mhold_15k/IUI3/visualization/contact_sheets/underwater_contact_sheet.png
+renders/gmvc_four_scene_p30_mhold_15k/IUI3/visualization/contact_sheets/dewatered_contact_sheet.png
+renders/gmvc_four_scene_p30_mhold_15k/IUI3/visualization/contact_sheets/medium_components_contact_sheet.png
+renders/gmvc_four_scene_p30_mhold_15k/Panama/visualization/contact_sheets/underwater_contact_sheet.png
+renders/gmvc_four_scene_p30_mhold_15k/Panama/visualization/contact_sheets/dewatered_contact_sheet.png
+renders/gmvc_four_scene_p30_mhold_15k/Panama/visualization/contact_sheets/medium_components_contact_sheet.png
+```
+
+### 41.4 Checkpoint paths
+
+Curasao:
+
+```text
+A0: outputs/gmvc_v3_p30_release_a0_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_a0_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_a0/nerfstudio_models/step-000015000.ckpt
+P30-MHOLD: outputs/gmvc_v3_p30_release_mhold_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_mhold_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_mhold/nerfstudio_models/step-000015000.ckpt
+```
+
+JapaneseGradens:
+
+```text
+A0: outputs/gmvc_v3_japanesegradens_p30_release_a0_seed42_step13000_to_15000/water-splatting/gmvc_v3_japanesegradens_p30_release_a0_seed42_step13000_to_15000_20260806_gmvc_v3_japanesegradens_p30_profile_release_13k_to_15k_a0/nerfstudio_models/step-000015000.ckpt
+P30-MHOLD: outputs/gmvc_v3_japanesegradens_p30_release_mhold_seed42_step13000_to_15000/water-splatting/gmvc_v3_japanesegradens_p30_release_mhold_seed42_step13000_to_15000_20260806_gmvc_v3_japanesegradens_p30_profile_release_13k_to_15k_mhold/nerfstudio_models/step-000015000.ckpt
+```
+
+IUI3:
+
+```text
+M1 bootstrap source: outputs/gmvc_v3_four_scene_iui3_m1_seed42_15000/water-splatting/gmvc_v3_four_scene_iui3_m1_seed42_15000_20260806_gmvc_four_scene_p30_mhold_15k_m1_bootstrap/nerfstudio_models/step-000010000.ckpt
+A0: outputs/gmvc_v3_four_scene_a0_iui3_redsea_seed42_step10000_to_15000/water-splatting/gmvc_v3_four_scene_a0_iui3_redsea_seed42_step10000_to_15000_20260806_gmvc_four_scene_p30_mhold_15k_a0/nerfstudio_models/step-000015000.ckpt
+P30-MHOLD: outputs/gmvc_v3_four_scene_p30_mhold_iui3_redsea_seed42_step13000_to_15000/water-splatting/gmvc_v3_four_scene_p30_mhold_iui3_redsea_seed42_step13000_to_15000_20260806_gmvc_four_scene_p30_mhold_15k_mhold/nerfstudio_models/step-000015000.ckpt
+```
+
+Panama:
+
+```text
+A0: outputs/gmvc_v3_four_scene_a0_panama_seed42_step10000_to_15000/water-splatting/gmvc_v3_four_scene_a0_panama_seed42_step10000_to_15000_20260806_gmvc_four_scene_p30_mhold_15k_a0/nerfstudio_models/step-000015000.ckpt
+P30-MHOLD: outputs/gmvc_v3_four_scene_p30_mhold_panama_seed42_step13000_to_15000/water-splatting/gmvc_v3_four_scene_p30_mhold_panama_seed42_step13000_to_15000_20260806_gmvc_four_scene_p30_mhold_15k_mhold/nerfstudio_models/step-000015000.ckpt
+```
+
+### 41.5 Medium-hold audit
+
+All four medium-hold runs passed the strict freeze audit over steps 13001-15000.
+
+| Scene | log rows | profile lambda max | hold active fraction | medium RGB grad max | medium parameter delta max |
+|---|---:|---:|---:|---:|---:|
+| Curasao | 47 | 0.0 | 1.0 | 0.0 | 0.0 |
+| JapaneseGradens | 46 | 0.0 | 1.0 | 0.0 | 0.0 |
+| IUI3 | 46 | 0.0 | 1.0 | 0.0 | 0.0 |
+| Panama | 46 | 0.0 | 1.0 | 0.0 | 0.0 |
+
+The audited medium output deltas were also zero for attenuation, backscatter, `B_inf`, and transmission in every scene.
+
+### 41.6 RGB results
+
+P30-MHOLD is compared against phase-matched A0 at step 15000.
+
+| Scene | A0 PSNR | P30-MHOLD PSNR | dPSNR | dSSIM | dLPIPS | RGB gate |
+|---|---:|---:|---:|---:|---:|---|
+| Curasao | 32.1800 | 32.2156 | +0.0356 | -0.000186 | -0.000032 | pass |
+| JapaneseGradens | 24.7588 | 24.7538 | -0.0050 | +0.000290 | -0.000044 | pass |
+| IUI3 | 30.8785 | 30.8759 | -0.0026 | +0.000361 | -0.000446 | pass |
+| Panama | 32.3180 | 32.3039 | -0.0142 | +0.000151 | -0.000083 | pass |
+| Macro mean | - | - | +0.0034 | +0.000154 | -0.000151 | pass |
+
+The safety gate used here is `dPSNR >= -0.15 dB`, `dSSIM >= -0.0015`, and `dLPIPS <= +0.003`. All scenes pass this safety definition. The RGB gain is not cross-scene strong: it is clear only on Curasao, while the other three scenes are nearly neutral.
+
+Per-view PSNR deltas show compensation effects even when scene means are neutral:
+
+| Scene | min per-view dPSNR | max per-view dPSNR |
+|---|---:|---:|
+| Curasao | -0.1168 | +0.1384 |
+| JapaneseGradens | -0.0401 | +0.0561 |
+| IUI3 | -0.7727 | +0.7227 |
+| Panama | -0.2971 | +0.2435 |
+
+IUI3 and Panama have larger per-view redistribution than their mean deltas suggest. This should be considered a residual risk for any claim based only on scene means.
+
+### 41.7 Fixed-bank results
+
+Negative deltas are better for all metrics in this table.
+
+| Scene | Bank | d transfer | d J-var | d closure floor | d object target | d DC-var | d recomposition |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Curasao | Eval-F | -1.04% | -9.00% | -0.98% | -5.93% | -4.71% | -2.37% |
+| Curasao | Eval-G | -1.29% | -11.03% | -0.46% | -9.40% | -5.57% | -3.72% |
+| JapaneseGradens | Eval-F | -2.69% | +6.67% | -0.29% | -2.06% | +5.71% | -4.00% |
+| JapaneseGradens | Eval-G | -2.80% | +6.13% | -0.30% | -2.55% | +5.54% | -4.14% |
+| IUI3 | Eval-F | -1.25% | +4.19% | +0.29% | +1.09% | +5.74% | -0.82% |
+| IUI3 | Eval-G | -1.11% | +4.20% | +0.05% | -5.68% | +5.04% | -3.10% |
+| Panama | Eval-F | -0.80% | +8.37% | +4.59% | +4.87% | +6.33% | +0.13% |
+| Panama | Eval-G | -0.92% | +9.31% | +2.99% | +3.88% | +6.38% | -0.63% |
+
+Interpretation by scene:
+
+```text
+Curasao: full fixed-bank mechanism success. All listed Eval-F and Eval-G metrics improve.
+JapaneseGradens: weak mixed validation. Transfer, closure, object-target, and recomposition improve, but J-var and DC-var worsen.
+IUI3: RGB safe and transfer/recomposition mostly improve, but J-var and DC-var worsen; Eval-F object-target and closure also worsen slightly.
+Panama: RGB safe but decomposition is mixed-negative. Transfer improves, but J-var, closure, object-target, and DC-var worsen.
+```
+
+Across all eight fixed-bank evaluations, transfer improves consistently, but variance and closure do not. This means P30-MHOLD still changes the decomposition in the intended transfer direction, but it does not provide a robust cross-scene calibration of object radiance and medium consistency.
+
+### 41.8 Gate decision
+
+This four-scene validation supports the following limited claims:
+
+```text
+1. The fixed P30-MHOLD implementation is stable and RGB-safe under the current four-scene safety gate.
+2. Strict medium hold is correctly implemented and auditable.
+3. Curasao remains a real local mechanism success.
+4. Transfer_l1 improves on every scene and both Eval-F/Eval-G banks.
+```
+
+It does not support the stronger claims:
+
+```text
+1. P30-MHOLD is a cross-scene RGB-improving module.
+2. P30-MHOLD robustly reduces all medium/object decomposition inconsistencies.
+3. Medium hold is a generally beneficial RGB mechanism.
+4. Current fixed profile calibration is sufficient for IUI3 and Panama.
+```
+
+Final classification:
+
+```text
+GMVC P30-MHOLD is a stable, RGB-safe, geometry-anchored diagnostic/module with clear Curasao success and partial cross-scene transfer improvement, but it is not yet a cross-scene successful reconstruction module.
+```
+
+No further lambda/ramp/hold-step tuning is recommended from these results. If GMVC is continued, the next change must address why transfer can improve while J-var/DC-var/closure worsen on weaker scenes. That requires a new causal hypothesis, not another fixed-profile weighting sweep.
