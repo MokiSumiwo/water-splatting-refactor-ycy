@@ -6043,7 +6043,7 @@ All values are test split eval metrics. Deltas are relative to same-scene A0 at 
 | JapaneseGradens | P30-MHOLD | 15000 | 24.7538 | -0.0050 | 0.899657 | +0.000290 | 0.120336 | -0.000044 |
 | JapaneseGradens | OAW-MHOLD | 15000 | 24.7774 | +0.0185 | 0.899652 | +0.000284 | 0.120197 | -0.000183 |
 
-OAW has the desired RGB direction on JapaneseGradens, but it fails Curasao RGB safety relative to both A0 and P30-MHOLD. It is also far below the Curasao A0-MHOLD RGB stabilizer.
+OAW has the desired RGB direction on JapaneseGradens. On Curasao, the -0.0376 dB PSNR, -0.000454 SSIM, and +0.000180 LPIPS changes versus A0 are still inside the previously used RGB safety band. The issue is not RGB safety. The issue is that OAW does not improve the RGB/decomposition Pareto over P30-MHOLD or A0-MHOLD.
 
 The intermediate OAW-P30 13k checkpoints had:
 
@@ -6121,13 +6121,13 @@ But this does not make the final aggregate constraint reliable. Q4 J-var positiv
 
 ### 39.8 Gate decision
 
-OAW does not pass the cross-scene candidate gate.
+OAW does not pass the cross-scene candidate gate, even though its Curasao RGB delta remains inside the safety threshold.
 
 Reasons:
 
 ```text
-1. Curasao OAW-MHOLD loses 0.0376 dB PSNR versus A0 and 0.0732 dB versus P30-MHOLD.
-2. Curasao OAW-MHOLD also worsens SSIM and LPIPS versus A0.
+1. Curasao OAW-MHOLD does not improve the RGB Pareto: it loses 0.0376 dB PSNR versus A0 and 0.0732 dB versus P30-MHOLD.
+2. Curasao OAW-MHOLD is far below the A0-MHOLD RGB stabilizer.
 3. JapaneseGradens OAW-MHOLD improves RGB versus A0, but the gain is small.
 4. Fixed-bank gains over P30-MHOLD are tiny and mixed.
 5. JapaneseGradens still has worse J-var and DC-var versus A0, and OAW worsens them slightly versus P30-MHOLD.
@@ -6149,3 +6149,189 @@ The missing piece is reliability: correspondence quality, non-Lambertian behavio
 ```
 
 No remaining-scene expansion, no longer Curasao tuning, and no new 15k/four-scene claim should be made from OAW. If GMVC continues, the next minimal test should be an offline reliability model that predicts harmful tracks before training, not another global weight/lambda sweep.
+
+## 40. Profile target reliability audit
+
+This pass follows the post-OAW decision: do not train a new GMVC version yet. The goal is to test whether track-internal signals can predict whether a solved profile target is reliable.
+
+New diagnostic:
+
+```text
+scripts/diagnostics/diagnose_gmvc_profile_target_reliability.py
+```
+
+The diagnostic uses only:
+
+```text
+fixed geometry-only track bank observations
+GT RGB from the underwater training images
+fixed bank M1 medium parameters
+detached profile solve, IRLS statistics, and leave-one-out target stability
+```
+
+It does not use clear GT, external models, training-time labels, final checkpoint parameter differences, or P30/A0 differences as features. P30-MHOLD versus A0-MHOLD track utility is used only as an offline diagnostic label.
+
+### 40.1 Label definition
+
+For each track, the candidate utility compares:
+
+```text
+base      = A0-MHOLD
+candidate = P30-MHOLD
+```
+
+Positive label:
+
+```text
+transfer improves
+and J-var improves
+and closure relative worsening <= 0.5%
+```
+
+Continuous utility:
+
+```text
+relative transfer gain
++ relative J-var gain
++ 0.5 * relative recomposition gain
+- positive closure relative worsening
+```
+
+This label is stricter than transfer-only because JapaneseGradens showed transfer and J-var can move in opposite directions.
+
+### 40.2 Commands and outputs
+
+All runs use 6000 heldout tracks from the existing section 38 track-level gain records.
+
+```text
+/opt/anaconda3/envs/water_splatting/bin/python scripts/diagnostics/diagnose_gmvc_profile_target_reliability.py \
+  --scene-name curasao \
+  --bank-name evalf \
+  --track-bank renders/gmvc_v2_track_banks/curasao_m1_step10000_train_s4096/gmvc_track_bank.pt \
+  --gain-records renders/gmvc_track_observability_gain_20260806/curasao/evalf/a0_mhold_vs_p30_mhold/track_observability_gain_records.jsonl \
+  --bootstrap-samples 200 \
+  --output-dir renders/gmvc_profile_target_reliability_20260806/curasao/evalf/a0_mhold_vs_p30_mhold
+
+/opt/anaconda3/envs/water_splatting/bin/python scripts/diagnostics/diagnose_gmvc_profile_target_reliability.py \
+  --scene-name curasao \
+  --bank-name evalg \
+  --track-bank renders/gmvc_v3_geometry_track_banks/curasao_m1_step10000_train_s4096/gmvc_track_bank.pt \
+  --gain-records renders/gmvc_track_observability_gain_20260806/curasao/evalg/a0_mhold_vs_p30_mhold/track_observability_gain_records.jsonl \
+  --bootstrap-samples 200 \
+  --output-dir renders/gmvc_profile_target_reliability_20260806/curasao/evalg/a0_mhold_vs_p30_mhold
+
+/opt/anaconda3/envs/water_splatting/bin/python scripts/diagnostics/diagnose_gmvc_profile_target_reliability.py \
+  --scene-name japanesegradens \
+  --bank-name evalf \
+  --track-bank renders/gmvc_v3_geometry_track_banks/japanesegradens_redsea_m1_step10000_train_s4096_seed123/gmvc_track_bank.pt \
+  --gain-records renders/gmvc_track_observability_gain_20260806/japanesegradens/evalf/a0_mhold_vs_p30_mhold/track_observability_gain_records.jsonl \
+  --bootstrap-samples 200 \
+  --output-dir renders/gmvc_profile_target_reliability_20260806/japanesegradens/evalf/a0_mhold_vs_p30_mhold
+
+/opt/anaconda3/envs/water_splatting/bin/python scripts/diagnostics/diagnose_gmvc_profile_target_reliability.py \
+  --scene-name japanesegradens \
+  --bank-name evalg \
+  --track-bank renders/gmvc_v3_geometry_track_banks/japanesegradens_redsea_m1_step10000_train_s4096/gmvc_track_bank.pt \
+  --gain-records renders/gmvc_track_observability_gain_20260806/japanesegradens/evalg/a0_mhold_vs_p30_mhold/track_observability_gain_records.jsonl \
+  --bootstrap-samples 200 \
+  --output-dir renders/gmvc_profile_target_reliability_20260806/japanesegradens/evalg/a0_mhold_vs_p30_mhold
+```
+
+Each output directory contains:
+
+```text
+profile_target_reliability_summary.json
+profile_target_reliability_records.jsonl
+```
+
+### 40.3 Dataset-level label balance
+
+| Scene | Bank | tracks | positive label rate | utility mean |
+|---|---:|---:|---:|---:|
+| Curasao | Eval-F | 6000 | 0.605 | +0.1390 |
+| Curasao | Eval-G | 6000 | 0.560 | +0.1325 |
+| JapaneseGradens | Eval-F | 6000 | 0.365 | -0.0092 |
+| JapaneseGradens | Eval-G | 6000 | 0.382 | -0.0079 |
+
+This confirms the previous diagnosis: Curasao has broad positive utility under the matched-hold profile candidate, while JapaneseGradens is mostly mixed or negative under the stricter positive-label definition.
+
+### 40.4 Primary feature audit
+
+For each feature, the table reports Spearman correlation with continuous utility after orienting the feature so that "higher score" should mean "more reliable". The final columns are top-quartile versus bottom-quartile positive-label rates.
+
+| Scene | Bank | Feature | rho | bootstrap 95% CI | top/bottom positive |
+|---|---|---|---:|---:|---:|
+| Curasao | Eval-F | LOO obs error median | +0.173 | [+0.146,+0.194] | 0.546 / 0.604 |
+| Curasao | Eval-G | LOO obs error median | +0.036 | [+0.012,+0.062] | 0.447 / 0.645 |
+| JapaneseGradens | Eval-F | LOO obs error median | -0.236 | [-0.258,-0.213] | 0.173 / 0.543 |
+| JapaneseGradens | Eval-G | LOO obs error median | -0.196 | [-0.220,-0.167] | 0.215 / 0.554 |
+| Curasao | Eval-F | LOO J* drift median | +0.239 | [+0.213,+0.263] | 0.642 / 0.558 |
+| Curasao | Eval-G | LOO J* drift median | +0.128 | [+0.094,+0.154] | 0.618 / 0.581 |
+| JapaneseGradens | Eval-F | LOO J* drift median | -0.126 | [-0.150,-0.099] | 0.257 / 0.463 |
+| JapaneseGradens | Eval-G | LOO J* drift median | -0.112 | [-0.139,-0.089] | 0.261 / 0.473 |
+| Curasao | Eval-F | IRLS inlier ratio | -0.020 | [-0.045,+0.011] | 0.427 / 0.626 |
+| Curasao | Eval-G | IRLS inlier ratio | -0.152 | [-0.183,-0.138] | 0.318 / 0.688 |
+| JapaneseGradens | Eval-F | IRLS inlier ratio | -0.241 | [-0.258,-0.211] | 0.174 / 0.547 |
+| JapaneseGradens | Eval-G | IRLS inlier ratio | -0.214 | [-0.234,-0.185] | 0.199 / 0.557 |
+| Curasao | Eval-F | effective obs count | +0.314 | [+0.288,+0.338] | 0.767 / 0.444 |
+| Curasao | Eval-G | effective obs count | +0.137 | [+0.106,+0.160] | 0.537 / 0.492 |
+| JapaneseGradens | Eval-F | effective obs count | -0.021 | [-0.051,+0.006] | 0.375 / 0.386 |
+| JapaneseGradens | Eval-G | effective obs count | -0.002 | [-0.027,+0.025] | 0.377 / 0.415 |
+| Curasao | Eval-F | max single obs weight share | +0.323 | [+0.297,+0.345] | 0.789 / 0.439 |
+| Curasao | Eval-G | max single obs weight share | +0.167 | [+0.142,+0.188] | 0.576 / 0.479 |
+| JapaneseGradens | Eval-F | max single obs weight share | -0.054 | [-0.080,-0.031] | 0.331 / 0.389 |
+| JapaneseGradens | Eval-G | max single obs weight share | -0.031 | [-0.051,-0.007] | 0.331 / 0.423 |
+| Curasao | Eval-F | depth span rel | +0.136 | [+0.109,+0.163] | 0.670 / 0.525 |
+| Curasao | Eval-G | depth span rel | +0.012 | [-0.016,+0.042] | 0.621 / 0.620 |
+| JapaneseGradens | Eval-F | depth span rel | +0.088 | [+0.064,+0.113] | 0.536 / 0.294 |
+| JapaneseGradens | Eval-G | depth span rel | +0.087 | [+0.064,+0.114] | 0.541 / 0.300 |
+| Curasao | Eval-F | transmission span | +0.153 | [+0.128,+0.175] | 0.641 / 0.545 |
+| Curasao | Eval-G | transmission span | +0.012 | [-0.016,+0.042] | 0.516 / 0.595 |
+| JapaneseGradens | Eval-F | transmission span | +0.092 | [+0.065,+0.113] | 0.531 / 0.319 |
+| JapaneseGradens | Eval-G | transmission span | +0.081 | [+0.055,+0.109] | 0.535 / 0.353 |
+
+### 40.5 Interpretation
+
+The audit does not support reliability-aware training yet.
+
+Key facts:
+
+```text
+1. LOO observation error and LOO J* drift do not provide a stable reliability signal.
+2. On JapaneseGradens, lower LOO error and lower profile residual are associated with lower positive-label rate, not higher.
+3. IRLS inlier ratio is negative in all four banks under this utility label.
+4. Effective observation count and max single-observation share are useful on Curasao Eval-F, weaker on Curasao Eval-G, and not useful on JapaneseGradens.
+5. Raw observability spans remain weakly useful on JapaneseGradens, but rho is far below the required 0.25 and Curasao Eval-G is nearly zero.
+```
+
+The most important negative result is that the intuitive reliability features are anti-predictive on JapaneseGradens. This likely means they measure "how easy the current M1 profile solve is" rather than "how much profile calibration will help". In JapaneseGradens, tracks with high LOO error or high propagation span may simply be the tracks where M1 is currently wrong enough for P30 to improve transfer, while low-error tracks may already be stable or may not need profile correction.
+
+### 40.6 Gate decision
+
+The offline reliability gate fails.
+
+```text
+Cross-scene Spearman >= 0.25: fail.
+Stable feature direction across Curasao and JapaneseGradens: fail for LOO, IRLS, residual, effective-count features.
+Top 25% positive label rate >= 65% in both scenes: fail.
+Low-reliability group separation: fail, because several "low reliability" groups have higher positive rates.
+```
+
+Therefore the next training version should not be implemented:
+
+```text
+Do not implement RAW-MHOLD.
+Do not run Curasao/JapaneseGradens RAW 15k.
+Do not continue tuning OAW power/min/max.
+Do not add another global profile weighting schedule.
+```
+
+Updated GMVC conclusion:
+
+```text
+Curasao remains a clear local mechanism success.
+JapaneseGradens remains weak and mixed.
+Current track-internal signals are not sufficient to predict when the shared J* profile assumption will be useful across scenes.
+```
+
+This closes the reliability-weighting branch for now. If GMVC is discussed in a paper, it should be presented as a geometry-anchored diagnostic and partial mechanism result, with explicit limitations from non-Lambertian effects, geometry mismatch, and medium non-uniformity.
