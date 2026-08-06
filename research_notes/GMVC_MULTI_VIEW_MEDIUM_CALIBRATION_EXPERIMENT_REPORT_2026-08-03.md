@@ -5473,3 +5473,191 @@ A0-PHASE: confirms phase/object alone changes decomposition but harms RGB withou
 ```
 
 No cross-scene or >15k run is triggered by this result. The clean next question is no longer whether hold matters; it does. The next design decision is whether the paper target should prioritize RGB quality with medium hold, physical decomposition with P30-MHOLD, or report both as a Pareto.
+
+## 37. Second-scene observability and JapaneseGradens fixed-parameter validation
+
+This pass follows the post-Curasao decision: stop all Curasao hyperparameter tuning and test whether the mechanism transfers to one second scene with fixed parameters.
+
+New code:
+
+```text
+scripts/diagnostics/summarize_gmvc_geometry_observability.py
+scripts/experiments/gmvc_v3_japanesegradens_r500_profile_persistence_3000.sh
+scripts/experiments/gmvc_v3_japanesegradens_p30_profile_release_13k_to_15k.sh
+scripts/experiments/gmvc_v3_japanesegradens_p30_profile_release_eval.sh
+```
+
+The validation keeps the Curasao-selected settings fixed:
+
+```text
+profile lambda = 30
+object lambda = 0.004
+ramp = 500
+4:1 medium/object phase schedule
+object-phase medium grad scale = 0
+calibration: 10k -> 13k
+release/hold validation: 13k -> 15k
+```
+
+### 37.1 No-training scene observability screen
+
+Command:
+
+```bash
+/opt/anaconda3/envs/water_splatting/bin/python scripts/diagnostics/summarize_gmvc_geometry_observability.py \
+  --bank japanesegradens=renders/gmvc_v3_geometry_track_banks/japanesegradens_redsea_m1_step10000_train_s4096/gmvc_track_bank.pt \
+  --bank iui3=renders/gmvc_scene_observability_20260806/geometry_track_banks/iui3_m1_step14999_train_s4096/gmvc_track_bank.pt \
+  --bank panama=renders/gmvc_v3_geometry_track_banks/panama_m1_step10000_train_s4096/gmvc_track_bank.pt \
+  --output-json renders/gmvc_scene_observability_20260806/gmvc_scene_observability_summary.json
+```
+
+Summary:
+
+| Scene | bank step | tracks | observations | obs/track | rel-depth mean/p90 | T span mean/p90 | B span mean/p90 | A0 transfer | A0 J-var | A0 DC-var |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| JapaneseGradens | 10000 | 55,467 | 599,597 | 10.87 | 0.334 / 0.649 | 0.147 / 0.277 | 0.042 / 0.073 | 0.038115 | 0.009133 | 0.002057 |
+| IUI3 | 14999 | 91,259 | 1,459,457 | 15.95 | 0.318 / 0.528 | 0.228 / 0.339 | 0.056 / 0.084 | 0.020435 | 0.002434 | 0.000948 |
+| Panama | 10000 | 49,216 | 422,324 | 8.59 | 0.358 / 0.628 | 0.144 / 0.258 | 0.080 / 0.138 | 0.022275 | 0.005811 | 0.002596 |
+
+JapaneseGradens was selected as the second-scene validation target. IUI3 has stronger raw coverage, but only a step-14999 M1 checkpoint is available in the current repository for this screen. JapaneseGradens has the intended step-10000 M1 checkpoint and larger A0 fixed-bank error headroom.
+
+Eval banks used for the second-scene validation:
+
+```text
+Eval-F: renders/gmvc_v3_geometry_track_banks/japanesegradens_redsea_m1_step10000_train_s4096_seed123/gmvc_track_bank.pt
+Eval-G: renders/gmvc_v3_geometry_track_banks/japanesegradens_redsea_m1_step10000_train_s4096/gmvc_track_bank.pt
+```
+
+The original Eval-F bank was not reused because it did not contain the newer geometry-only `observations` payload required by `diagnose_gmvc_fixed_bank.py`.
+
+### 37.2 Training and evaluation commands
+
+Training:
+
+```bash
+VARIANT=A0 GPU=6 /bin/bash scripts/experiments/gmvc_v3_japanesegradens_r500_profile_persistence_3000.sh
+VARIANT=P30 GPU=6 /bin/bash scripts/experiments/gmvc_v3_japanesegradens_r500_profile_persistence_3000.sh
+
+VARIANT=A0 GPU=6 /bin/bash scripts/experiments/gmvc_v3_japanesegradens_p30_profile_release_13k_to_15k.sh
+VARIANT=A0_PHASE GPU=6 /bin/bash scripts/experiments/gmvc_v3_japanesegradens_p30_profile_release_13k_to_15k.sh
+VARIANT=A0_MHOLD GPU=6 /bin/bash scripts/experiments/gmvc_v3_japanesegradens_p30_profile_release_13k_to_15k.sh
+VARIANT=MHOLD GPU=6 /bin/bash scripts/experiments/gmvc_v3_japanesegradens_p30_profile_release_13k_to_15k.sh
+```
+
+Evaluation:
+
+```bash
+VARIANTS=A0,A0_PHASE,A0_MHOLD,MHOLD STEPS=14000,15000 GPU=6 RUN_SUMMARY=0 \
+  /bin/bash scripts/experiments/gmvc_v3_japanesegradens_p30_profile_release_eval.sh
+
+/opt/anaconda3/envs/water_splatting/bin/python scripts/diagnostics/summarize_gmvc_persistence.py \
+  --root renders/gmvc_fixed_bank_diag_20260806/japanesegradens_p30_profile_release_15k \
+  --variants A0,A0_PHASE,A0_MHOLD,MHOLD \
+  --steps 14000,15000 \
+  --reference-variant A0 \
+  --output renders/gmvc_fixed_bank_diag_20260806/japanesegradens_p30_profile_release_15k/summary.json
+```
+
+### 37.3 Gradient and hold audit
+
+Logged files:
+
+```text
+logs/gmvc_v3_japanesegradens_r500_profile_persistence_p30_20260806_gmvc_v3_japanesegradens_r500_profile_persistence_3k.jsonl
+logs/gmvc_v3_japanesegradens_p30_release_a0_phase_20260806_gmvc_v3_japanesegradens_p30_profile_release_13k_to_15k.jsonl
+logs/gmvc_v3_japanesegradens_p30_release_a0_mhold_20260806_gmvc_v3_japanesegradens_p30_profile_release_13k_to_15k.jsonl
+logs/gmvc_v3_japanesegradens_p30_release_mhold_20260806_gmvc_v3_japanesegradens_p30_profile_release_13k_to_15k.jsonl
+```
+
+Audit facts:
+
+| Run | records | phase coverage | RGB -> medium grad | profile grad | medium hold | medium param drift |
+|---|---:|---|---|---|---|---|
+| P30 10k->13k | 66 | medium/object | medium phase mean 0.2329, object phase 0 | max 0.004124 | off | attn delta mean up to 0.01169 |
+| A0-PHASE 13k->15k | 46 | medium/object | medium phase mean 0.2394, object phase 0 | 0 | off | attn delta mean up to 0.00826 |
+| A0-MHOLD 13k->15k | 46 | medium/object | 0 in both phases | 0 | active | param delta mean/max 0 |
+| P30-MHOLD 13k->15k | 46 | medium/object | 0 in both phases | 0 after 13k | active | param delta mean/max 0 |
+
+This confirms the intended routing: profile calibration updated medium during 10k->13k, object phase detached RGB from medium, A0-PHASE allowed medium-phase RGB adaptation, and both hold runs froze medium exactly from 13001 to 15000.
+
+### 37.4 RGB metrics
+
+| Step | Run | PSNR | SSIM | LPIPS |
+|---:|---|---:|---:|---:|
+| 14000 | A0 | 24.7944 | 0.900049 | 0.119677 |
+| 14000 | A0-PHASE | 24.8261 | 0.899972 | 0.119670 |
+| 14000 | A0-MHOLD | 24.7791 | 0.900215 | 0.119428 |
+| 14000 | P30-MHOLD | 24.7888 | 0.900270 | 0.119671 |
+| 15000 | A0 | 24.7588 | 0.899367 | 0.120381 |
+| 15000 | A0-PHASE | 24.7603 | 0.899356 | 0.120146 |
+| 15000 | A0-MHOLD | 24.7459 | 0.899593 | 0.120234 |
+| 15000 | P30-MHOLD | 24.7538 | 0.899657 | 0.120336 |
+
+15k deltas versus A0:
+
+| Run | dPSNR | dSSIM | dLPIPS |
+|---|---:|---:|---:|
+| A0-PHASE | +0.0015 | -0.000011 | -0.000235 |
+| A0-MHOLD | -0.0130 | +0.000226 | -0.000147 |
+| P30-MHOLD | -0.0050 | +0.000290 | -0.000044 |
+
+JapaneseGradens does not reproduce the Curasao A0-MHOLD RGB behavior. Medium hold improves SSIM and LPIPS slightly, but PSNR is lower than the normal A0 continuation at both 14k and 15k.
+
+### 37.5 Fixed-bank metrics at 15k
+
+| Run | Bank | transfer | J-var | closure floor | object target | DC-var | recomp |
+|---|---|---:|---:|---:|---:|---:|---:|
+| A0 | F | 0.039158 | 0.006931 | 0.141957 | 0.042779 | 0.001787 | 0.030845 |
+| A0 | G | 0.038937 | 0.006629 | 0.140730 | 0.041464 | 0.001719 | 0.030652 |
+| A0-PHASE | F | 0.039291 | 0.006997 | 0.142117 | 0.042235 | 0.001797 | 0.030727 |
+| A0-PHASE | G | 0.039084 | 0.006699 | 0.140988 | 0.040788 | 0.001726 | 0.030537 |
+| A0-MHOLD | F | 0.038576 | 0.007554 | 0.140805 | 0.043134 | 0.001898 | 0.030140 |
+| A0-MHOLD | G | 0.038335 | 0.007201 | 0.139582 | 0.041747 | 0.001825 | 0.029948 |
+| P30-MHOLD | F | 0.038104 | 0.007393 | 0.141545 | 0.041899 | 0.001889 | 0.029609 |
+| P30-MHOLD | G | 0.037849 | 0.007035 | 0.140311 | 0.040407 | 0.001815 | 0.029384 |
+
+P30-MHOLD versus A0-MHOLD:
+
+| Bank | transfer | J-var | DC-var | object target | recomp | closure floor |
+|---|---:|---:|---:|---:|---:|---:|
+| F | -1.22% | -2.13% | -0.45% | -2.86% | -1.76% | +0.52% |
+| G | -1.27% | -2.30% | -0.58% | -3.21% | -1.89% | +0.52% |
+
+Thus, relative to the generic medium-hold control, P30 calibration gives a small but consistent decomposition gain on both Eval-F and Eval-G for transfer, J-var, DC-var, object-target, and recomposition. Closure floor is slightly worse by about 0.52%.
+
+P30-MHOLD versus normal A0:
+
+```text
+transfer improves by about 2.7-2.8%;
+object-target and recomposition improve by about 2.1-4.1%;
+J-var and DC-var are worse by about 5.5-6.7%;
+closure floor is slightly better by about 0.3%;
+RGB remains approximately safe but does not improve PSNR.
+```
+
+### 37.6 Second-scene gate decision
+
+The cross-scene mechanism gate is not passed.
+
+Reasons:
+
+```text
+1. A0-MHOLD does not stably improve JapaneseGradens RGB versus normal A0.
+2. P30-MHOLD improves transfer/J-var/DC-var versus A0-MHOLD on both Eval-F/G, but the gains are small.
+3. P30-MHOLD is RGB-safe versus A0 by SSIM/LPIPS and nearly PSNR-neutral, but PSNR is still -0.005 dB.
+4. Object-target and recomposition are positive versus A0-MHOLD and A0.
+5. Closure floor is slightly worse versus A0-MHOLD, though not catastrophically.
+```
+
+The correct stage conclusion is:
+
+```text
+GMVC has a confirmed Curasao mechanism and a weak second-scene profile signal on JapaneseGradens, but the medium-hold RGB mechanism does not generalize cleanly to JapaneseGradens. Therefore GMVC should not enter remaining-scene expansion, four-scene 15k claims, or further Curasao tuning at this point.
+```
+
+The negative result is useful. It separates two facts that were entangled in Curasao:
+
+```text
+medium hold can be a strong RGB stabilizer, but it is scene-dependent;
+profile calibration can improve geometry-anchored decomposition relative to a matched hold control, but the current magnitude is too small for a cross-scene method claim.
+```

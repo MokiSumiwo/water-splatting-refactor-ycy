@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_DIR="/mnt/new/home_old/ycy/water-splatting-refactor"
+
+VARIANT="${VARIANT:-P30}"
+GPU="${GPU:-6}"
+SEED="${SEED:-42}"
+LOAD_STEP="${LOAD_STEP:-10000}"
+TARGET_FINAL_STEP="${TARGET_FINAL_STEP:-13000}"
+STAMP_BASE="${STAMP:-20260806_gmvc_v3_japanesegradens_r500_profile_persistence_3k}"
+LOG_ROOT="${LOG_ROOT:-${REPO_DIR}/logs}"
+
+M1_CONFIG="${M1_CONFIG:-${REPO_DIR}/outputs/cross_scene_japanesegradens_redsea_m1_seed42_15000/water-splatting/cross_scene_japanesegradens_redsea_m1_seed42_15000_20260730_cross_scene/config.yml}"
+M1_CKPT="${M1_CKPT:-${REPO_DIR}/outputs/cross_scene_japanesegradens_redsea_m1_seed42_15000/water-splatting/cross_scene_japanesegradens_redsea_m1_seed42_15000_20260730_cross_scene/nerfstudio_models/step-000010000.ckpt}"
+TRAIN_BANK="${TRAIN_BANK:-${REPO_DIR}/renders/gmvc_v3_geometry_track_banks/japanesegradens_redsea_m1_step10000_train_s4096/gmvc_track_bank.pt}"
+
+GMVC_ON="True"
+NEEDS_BANK="1"
+PROFILE_LAMBDA="30"
+OBJECT_LAMBDA="0.004"
+
+case "${VARIANT}" in
+  A0|a0)
+    SLUG="a0"
+    GMVC_ON="False"
+    NEEDS_BANK="0"
+    PROFILE_LAMBDA="0.0"
+    OBJECT_LAMBDA="0.0"
+    EXPERIMENT_NAME_DEFAULT="gmvc_v3_a0_profile_persistence3k_japanesegradens_redsea_seed${SEED}_step${LOAD_STEP}_to_${TARGET_FINAL_STEP}"
+    ;;
+  P30|p30|P30_MHOLD_SOURCE|p30_mhold_source)
+    SLUG="p30"
+    EXPERIMENT_NAME_DEFAULT="gmvc_v3_r500_p30_profile_persistence3k_japanesegradens_redsea_seed${SEED}_step${LOAD_STEP}_to_${TARGET_FINAL_STEP}"
+    ;;
+  *)
+    echo "Unknown VARIANT=${VARIANT}. Use A0 or P30." >&2
+    exit 2
+    ;;
+esac
+
+STAMP="${STAMP_BASE}_${SLUG}"
+GRAD_LOG="${LOG_ROOT}/gmvc_v3_japanesegradens_r500_profile_persistence_${SLUG}_${STAMP_BASE}.jsonl"
+
+exec env \
+  GPU="${GPU}" \
+  SCENE_SLUG="japanesegradens_redsea" \
+  DATA_PATH="${DATA_PATH:-${REPO_DIR}/undistorted_data/undistorted_JapaneseGradens-RedSea}" \
+  M1_LOAD_CONFIG="${M1_CONFIG}" \
+  M1_LOAD_CHECKPOINT="${M1_CKPT}" \
+  EXPERIMENT_NAME="${EXPERIMENT_NAME:-${EXPERIMENT_NAME_DEFAULT}}" \
+  STAMP="${STAMP}" \
+  LOAD_STEP="${LOAD_STEP}" \
+  TARGET_FINAL_STEP="${TARGET_FINAL_STEP}" \
+  MAX_NUM_ITERATIONS="${MAX_NUM_ITERATIONS:-3000}" \
+  MODEL_NUM_STEPS="${MODEL_NUM_STEPS:-${TARGET_FINAL_STEP}}" \
+  STEPS_PER_SAVE="${STEPS_PER_SAVE:-1000}" \
+  SAVE_ONLY_LATEST_CHECKPOINT="${SAVE_ONLY_LATEST_CHECKPOINT:-False}" \
+  RUN_EVAL="${RUN_EVAL:-0}" \
+  RUN_CLOSURE_DIAG="${RUN_CLOSURE_DIAG:-0}" \
+  GMVC_VARIANT="japanesegradens_profile_persistence_${SLUG}" \
+  GMVC_ENABLED="${GMVC_ON}" \
+  GMVC_DIAGNOSTIC_ONLY="False" \
+  GMVC_TRACK_BANK_PATH="${TRAIN_BANK}" \
+  GMVC_NEEDS_BANK="${GMVC_NEEDS_BANK:-${NEEDS_BANK}}" \
+  GMVC_TRACK_GEOMETRY_ONLY="1" \
+  GMVC_TRACK_SAMPLES_PER_VIEW="4096" \
+  GMVC_TRACK_MAX_OBS_PER_CAMERA="20000" \
+  GMVC_TRACK_SIGNAL_MIN="0.02" \
+  GMVC_TRACK_SIGNAL_MAX="0.98" \
+  GMVC_START_STEP="10000" \
+  GMVC_STOP_STEP="${TARGET_FINAL_STEP}" \
+  GMVC_RAMP_STEPS="500" \
+  LAMBDA_GMVC_J="0.0" \
+  LAMBDA_GMVC_RANGE="0.0" \
+  LAMBDA_GMVC_BINF="0.0" \
+  LAMBDA_GMVC_INTRINSIC="0.0" \
+  LAMBDA_GMVC_RESIDUAL_BUDGET="0.0" \
+  LAMBDA_GMVC_FIXED_CLOSURE="0.0" \
+  GMVC_V2_ENABLED="${GMVC_ON}" \
+  LAMBDA_GMVC_PROFILE="${PROFILE_LAMBDA}" \
+  LAMBDA_GMVC_SYMMETRIC_CLOSURE="0.0" \
+  GMVC_PROFILE_DETACH_J_STAR="True" \
+  GMVC_PROFILE_LOSS_MODE="irls_l2" \
+  GMVC_PROFILE_TRACK_BALANCED="True" \
+  GMVC_PROFILE_IRLS_DELTA="0.03" \
+  GMVC_PROFILE_IRLS_MAX_WEIGHT="1.0" \
+  GMVC_PROFILE_MIN_HESSIAN="1e-5" \
+  GMVC_PROFILE_MIN_TRANSMISSION_SPAN="0.01" \
+  GMVC_PROFILE_MIN_DEPTH_SPAN_REL="0.05" \
+  GMVC_V3_ENABLED="${GMVC_ON}" \
+  GMVC_V3_PROFILE_SCHEDULE="constant" \
+  GMVC_MEDIUM_HOLD_ENABLED="False" \
+  LAMBDA_GMVC_OBJECT="${OBJECT_LAMBDA}" \
+  GMVC_V3_MEDIUM_STEPS="4" \
+  GMVC_V3_OBJECT_STEPS="1" \
+  GMVC_V3_FREEZE_MEDIUM_ON_OBJECT_PHASE="False" \
+  GMVC_V3_OBJECT_PHASE_MEDIUM_GRAD_SCALE="0.00" \
+  GMVC_V3_TARGET_CURRENT_CAMERA_TRACKS="True" \
+  GMVC_V3_OBJECT_SOURCE="J_proxy_raw" \
+  GMVC_OBJECT_TRACK_BALANCED="True" \
+  GMVC_OBJECT_J_CLAMP_MIN="-0.1" \
+  GMVC_OBJECT_J_CLAMP_MAX="1.1" \
+  GMVC_OBJECT_MIN_HESSIAN="1e-5" \
+  GMVC_OBJECT_MIN_DEPTH_SPAN_REL="0.05" \
+  GMVC_V2_MAX_TRACKS_PER_STEP="512" \
+  GMVC_V2_MIN_OBSERVATIONS_PER_TRACK="2" \
+  GMVC_GRAD_LOG_PATH="${GRAD_LOG}" \
+  GMVC_GRAD_LOG_EVERY="${GMVC_GRAD_LOG_EVERY:-49}" \
+  GMVC_GRAD_LOG_FORCE_STEPS="${GMVC_GRAD_LOG_FORCE_STEPS:-10000,10001,10500,11000,12000,13000}" \
+  GMVC_MAX_TRACKS_PER_STEP="4096" \
+  GMVC_BOUNDED_MEDIUM_ENABLED="False" \
+  GMVC_BOUNDED_INIT_FROM_FIRST_BATCH="False" \
+  GMVC_CLOSURE_SIGNAL_FLOOR="0.03" \
+  GMVC_INTRINSIC_SOURCE="J_proxy_raw" \
+  GMVC_INTRINSIC_USE_DC_PROXY="True" \
+  GMVC_FREEZE_GEOMETRY="False" \
+  GMVC_TRAIN_FEATURES_DC="False" \
+  GMVC_TRAIN_FEATURES_REST="False" \
+  "${REPO_DIR}/scripts/experiments/gmvc_phase_b_common.sh"
