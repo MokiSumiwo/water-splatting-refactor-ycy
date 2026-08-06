@@ -5661,3 +5661,187 @@ The negative result is useful. It separates two facts that were entangled in Cur
 medium hold can be a strong RGB stabilizer, but it is scene-dependent;
 profile calibration can improve geometry-anchored decomposition relative to a matched hold control, but the current magnitude is too small for a cross-scene method claim.
 ```
+
+## 38. Track-level observability and gain attribution
+
+This pass performs the no-training attribution requested after the JapaneseGradens fixed-parameter validation. It does not train new checkpoints. It reuses the 15k Curasao and JapaneseGradens checkpoints and evaluates the same fixed Eval-F/G track banks at the track level.
+
+New diagnostic:
+
+```text
+scripts/diagnostics/diagnose_gmvc_track_observability_gain.py
+```
+
+The script renders two checkpoints on the same heldout split of a fixed track bank, computes per-track observability and per-track metrics, and saves:
+
+```text
+track_observability_gain_summary.json
+track_observability_gain_records.jsonl
+```
+
+Positive gain means the candidate has lower error than the base on that track.
+
+### 38.1 Attribution setup
+
+Primary attribution compares:
+
+```text
+base      = A0-MHOLD
+candidate = P30-MHOLD
+```
+
+This isolates profile calibration under the same medium-hold condition.
+
+Secondary attribution compares:
+
+```text
+base      = normal A0
+candidate = P30-MHOLD
+```
+
+This answers the complete-candidate versus original-continuation question, but it mixes profile, phase, and hold effects.
+
+Banks:
+
+```text
+Curasao Eval-F:
+renders/gmvc_v2_track_banks/curasao_m1_step10000_train_s4096/gmvc_track_bank.pt
+
+Curasao Eval-G:
+renders/gmvc_v3_geometry_track_banks/curasao_m1_step10000_train_s4096/gmvc_track_bank.pt
+
+JapaneseGradens Eval-F:
+renders/gmvc_v3_geometry_track_banks/japanesegradens_redsea_m1_step10000_train_s4096_seed123/gmvc_track_bank.pt
+
+JapaneseGradens Eval-G:
+renders/gmvc_v3_geometry_track_banks/japanesegradens_redsea_m1_step10000_train_s4096/gmvc_track_bank.pt
+```
+
+Each run uses:
+
+```text
+max_tracks = 30000
+train_fraction = 0.80
+seed = 42
+heldout tracks = 6000
+load_step = 15000
+```
+
+Outputs:
+
+```text
+renders/gmvc_track_observability_gain_20260806/curasao/evalf/a0_mhold_vs_p30_mhold/
+renders/gmvc_track_observability_gain_20260806/curasao/evalg/a0_mhold_vs_p30_mhold/
+renders/gmvc_track_observability_gain_20260806/japanesegradens/evalf/a0_mhold_vs_p30_mhold/
+renders/gmvc_track_observability_gain_20260806/japanesegradens/evalg/a0_mhold_vs_p30_mhold/
+
+renders/gmvc_track_observability_gain_20260806/curasao/evalf/a0_vs_p30_mhold/
+renders/gmvc_track_observability_gain_20260806/curasao/evalg/a0_vs_p30_mhold/
+renders/gmvc_track_observability_gain_20260806/japanesegradens/evalf/a0_vs_p30_mhold/
+renders/gmvc_track_observability_gain_20260806/japanesegradens/evalg/a0_vs_p30_mhold/
+```
+
+### 38.2 Track observability statistics
+
+Primary bank observability for the matched-hold attribution:
+
+| Scene | Bank | depth-span-rel mean/p50/p90 | T-span mean/p50/p90 | B-span mean/p50/p90 | view angle mean/p50/p90 |
+|---|---|---:|---:|---:|---:|
+| Curasao | Eval-F | 0.289 / 0.278 / 0.464 | 0.079 / 0.073 / 0.136 | 0.045 / 0.040 / 0.081 | 16.62 / 17.27 / 24.40 |
+| Curasao | Eval-G | 0.279 / 0.268 / 0.462 | 0.078 / 0.072 / 0.131 | 0.044 / 0.040 / 0.081 | 15.92 / 15.90 / 24.01 |
+| JapaneseGradens | Eval-F | 0.331 / 0.287 / 0.648 | 0.147 / 0.134 / 0.275 | 0.041 / 0.038 / 0.073 | 29.62 / 27.57 / 54.37 |
+| JapaneseGradens | Eval-G | 0.336 / 0.298 / 0.646 | 0.148 / 0.136 / 0.274 | 0.042 / 0.039 / 0.073 | 30.16 / 28.12 / 55.00 |
+
+JapaneseGradens is not weak because it lacks raw depth, transmission, or view-angle span. It actually has larger mean depth span, T span, and view-angle span than Curasao. The weakness must therefore involve how reliably those spans translate into usable profile constraints.
+
+### 38.3 Primary result: P30-MHOLD versus A0-MHOLD
+
+| Scene | Bank | transfer gain / positive ratio | J-var gain / positive ratio | DC-var gain / positive ratio |
+|---|---|---:|---:|---:|
+| Curasao | Eval-F | 0.000385 / 0.728 | 0.000793 / 0.942 | 0.000104 / 0.729 |
+| Curasao | Eval-G | 0.000500 / 0.706 | 0.001522 / 0.940 | 0.000120 / 0.726 |
+| JapaneseGradens | Eval-F | 0.000311 / 0.516 | 0.000146 / 0.536 | 0.000009 / 0.506 |
+| JapaneseGradens | Eval-G | 0.000317 / 0.527 | 0.000151 / 0.550 | 0.000011 / 0.502 |
+
+The key difference is not just mean magnitude. It is coverage:
+
+```text
+Curasao:
+J-var improves on about 94% of heldout tracks.
+Transfer and DC-var improve on about 70-73% of tracks.
+
+JapaneseGradens:
+Transfer, J-var, and DC-var are only slightly above random track coverage.
+```
+
+This explains why Curasao looked like a stable mechanism while JapaneseGradens only showed a weak direction. P30 calibration acts on a broad majority of Curasao tracks, but on JapaneseGradens it helps and hurts nearly balanced subsets.
+
+### 38.4 Correlation with propagation observability
+
+Spearman correlation between gain and:
+
+```text
+d = relative depth span
+T = bank transmission span
+B = bank backscatter span
+```
+
+| Scene | Bank | transfer vs d/T/B | J-var vs d/T/B | DC-var vs d/T/B |
+|---|---|---:|---:|---:|
+| Curasao | Eval-F | +0.090 / +0.119 / +0.123 | +0.129 / +0.102 / +0.089 | +0.112 / +0.054 / +0.040 |
+| Curasao | Eval-G | -0.037 / -0.039 / -0.059 | -0.077 / -0.076 / -0.107 | +0.109 / +0.044 / +0.023 |
+| JapaneseGradens | Eval-F | +0.101 / +0.095 / +0.092 | +0.061 / +0.068 / +0.018 | +0.003 / +0.026 / -0.015 |
+| JapaneseGradens | Eval-G | +0.113 / +0.090 / +0.107 | +0.058 / +0.048 / +0.028 | -0.030 / +0.006 / -0.049 |
+
+The correlations are weak and not uniformly signed across Curasao banks. Therefore, raw propagation span alone is not a sufficient explanation.
+
+However, JapaneseGradens has a consistent weak positive transfer-gain correlation with depth/T/B span. This suggests that high-observability tracks contain useful signal, but low and mid observability tracks dilute it.
+
+### 38.5 Quartile evidence
+
+Depth-span relative quartiles:
+
+| Scene | Bank | Q1 transfer/J-var gain | Q4 transfer/J-var gain |
+|---|---|---:|---:|
+| Curasao | Eval-F | 0.000381 / 0.000799 | 0.000461 / 0.000770 |
+| Curasao | Eval-G | 0.000972 / 0.002513 | 0.000394 / 0.000703 |
+| JapaneseGradens | Eval-F | 0.000154 / 0.000097 | 0.000917 / 0.000394 |
+| JapaneseGradens | Eval-G | 0.000084 / 0.000102 | 0.000949 / 0.000403 |
+
+JapaneseGradens shows the clearest quartile pattern: the highest relative-depth-span quartile has much larger transfer and J-var gains than the lowest quartile. The same pattern appears with T-span and B-span quartiles in the saved JSON. Still, the Q4 positive ratio is only about 0.60-0.62 for transfer and about 0.58-0.62 for J-var, so high span helps but does not make the constraint reliably correct.
+
+Curasao is different. The gain is broad across quartiles, especially for J-var. This means the Curasao success cannot be reduced to a simple "larger propagation span gives larger gain" rule.
+
+### 38.6 Secondary result: P30-MHOLD versus normal A0
+
+| Scene | Bank | transfer gain / positive ratio | J-var gain / positive ratio | DC-var gain / positive ratio |
+|---|---|---:|---:|---:|
+| Curasao | Eval-F | 0.000211 / 0.597 | 0.000608 / 0.901 | 0.000091 / 0.684 |
+| Curasao | Eval-G | 0.000363 / 0.573 | 0.001262 / 0.882 | 0.000116 / 0.696 |
+| JapaneseGradens | Eval-F | 0.000587 / 0.510 | -0.000518 / 0.312 | -0.000102 / 0.343 |
+| JapaneseGradens | Eval-G | 0.000600 / 0.526 | -0.000476 / 0.322 | -0.000095 / 0.343 |
+
+The full candidate remains clearly positive on Curasao decomposition relative to normal A0. On JapaneseGradens, it improves transfer slightly but worsens J-var and DC-var for most tracks relative to normal A0. This matches the aggregate gate failure from section 37.
+
+### 38.7 Updated conclusion
+
+The attribution analysis partially supports the observability hypothesis but does not fully validate a simple span-weighted fix.
+
+Facts:
+
+```text
+1. Curasao gains are broad across tracks, especially for J-var.
+2. JapaneseGradens gains are weak and near-balanced in positive/negative coverage.
+3. JapaneseGradens high-observability quartiles benefit more than low-observability quartiles.
+4. Raw depth/T/B span correlations are weak and not enough by themselves.
+```
+
+The next technically defensible direction, if GMVC continues, is not more lambda/ramp/hold tuning. It is an observability-and-reliability weighted profile objective:
+
+```text
+weight(track) = f(depth span, T span, B span, view span, geometry weight, profile residual / IRLS reliability)
+```
+
+The important addition is reliability, not only observability. Raw propagation span can identify where useful signal may exist, but JapaneseGradens shows that high span alone does not guarantee correct constraints. Track weighting must also suppress correspondence noise, non-Lambertian tracks, geometry-weight outliers, and tracks with large robust profile residual.
+
+No new training is triggered yet. A minimal next step would be an offline candidate-weight audit that predicts which tracks would be upweighted/downweighted and checks whether the upweighted subset has higher positive gain on both Curasao and JapaneseGradens. Only if that audit is positive should an observability-aware GMVC training loss be implemented.
