@@ -6551,3 +6551,185 @@ GMVC P30-MHOLD is a stable, RGB-safe, geometry-anchored diagnostic/module with c
 ```
 
 No further lambda/ramp/hold-step tuning is recommended from these results. If GMVC is continued, the next change must address why transfer can improve while J-var/DC-var/closure worsen on weaker scenes. That requires a new causal hypothesis, not another fixed-profile weighting sweep.
+
+## 42. Four-scene visual audit asset export
+
+Date: 2026-08-07
+
+This pass generated image assets for external/manual visual review only. It did not train, change checkpoints, modify renderer physics, change losses, or make visual-quality conclusions.
+
+### 42.1 Code and output
+
+New diagnostic exporter:
+
+```text
+scripts/diagnostics/render_gmvc_four_scene_visual_assets.py
+```
+
+Output root:
+
+```text
+renders/gmvc_four_scene_visual_audit/
+```
+
+Index and manifests:
+
+```text
+renders/gmvc_four_scene_visual_audit/manifest.json
+renders/gmvc_four_scene_visual_audit/manifest.csv
+renders/gmvc_four_scene_visual_audit/VISUAL_REVIEW_INDEX.md
+```
+
+The output directory is an untracked render artifact directory and is not intended for Git tracking.
+
+### 42.2 Checkpoints
+
+Curasao:
+
+```text
+A0: outputs/gmvc_v3_p30_release_a0_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_a0_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_a0/nerfstudio_models/step-000015000.ckpt
+P30-MHOLD: outputs/gmvc_v3_p30_release_mhold_curasao_seed42_step13000_to_15000/water-splatting/gmvc_v3_p30_release_mhold_curasao_seed42_step13000_to_15000_20260805_gmvc_v3_p30_profile_release_13k_to_15k_mhold/nerfstudio_models/step-000015000.ckpt
+```
+
+JapaneseGradens:
+
+```text
+A0: outputs/gmvc_v3_japanesegradens_p30_release_a0_seed42_step13000_to_15000/water-splatting/gmvc_v3_japanesegradens_p30_release_a0_seed42_step13000_to_15000_20260806_gmvc_v3_japanesegradens_p30_profile_release_13k_to_15k_a0/nerfstudio_models/step-000015000.ckpt
+P30-MHOLD: outputs/gmvc_v3_japanesegradens_p30_release_mhold_seed42_step13000_to_15000/water-splatting/gmvc_v3_japanesegradens_p30_release_mhold_seed42_step13000_to_15000_20260806_gmvc_v3_japanesegradens_p30_profile_release_13k_to_15k_mhold/nerfstudio_models/step-000015000.ckpt
+```
+
+IUI3:
+
+```text
+A0: outputs/gmvc_v3_four_scene_a0_iui3_redsea_seed42_step10000_to_15000/water-splatting/gmvc_v3_four_scene_a0_iui3_redsea_seed42_step10000_to_15000_20260806_gmvc_four_scene_p30_mhold_15k_a0/nerfstudio_models/step-000015000.ckpt
+P30-MHOLD: outputs/gmvc_v3_four_scene_p30_mhold_iui3_redsea_seed42_step13000_to_15000/water-splatting/gmvc_v3_four_scene_p30_mhold_iui3_redsea_seed42_step13000_to_15000_20260806_gmvc_four_scene_p30_mhold_15k_mhold/nerfstudio_models/step-000015000.ckpt
+```
+
+Panama:
+
+```text
+A0: outputs/gmvc_v3_four_scene_a0_panama_seed42_step10000_to_15000/water-splatting/gmvc_v3_four_scene_a0_panama_seed42_step10000_to_15000_20260806_gmvc_four_scene_p30_mhold_15k_a0/nerfstudio_models/step-000015000.ckpt
+P30-MHOLD: outputs/gmvc_v3_four_scene_p30_mhold_panama_seed42_step13000_to_15000/water-splatting/gmvc_v3_four_scene_p30_mhold_panama_seed42_step13000_to_15000_20260806_gmvc_four_scene_p30_mhold_15k_mhold/nerfstudio_models/step-000015000.ckpt
+```
+
+All eight loads resolved to step 15000.
+
+### 42.3 Output definitions
+
+Underwater GT:
+
+```text
+images["gt"] returned by model.get_image_metrics_and_images, i.e. dataset underwater RGB composited with outputs["background"].
+```
+
+Underwater render:
+
+```text
+outputs["pred_image"] from model.get_outputs_for_camera at the eval camera and loaded checkpoint, clamped to [0,1] only for PNG saving.
+```
+
+Dewatered render:
+
+```text
+J_proxy_raw rendered under the diagnostic forced GMVC DC-proxy context when available; fallback is J_gaussian_raw then J_raw. This is a model intrinsic proxy and not clear-image GT.
+```
+
+Medium components:
+
+```text
+transmission = exp(-(medium_attn * depth).clamp_min(0))
+attenuation = outputs["medium_attn"]
+backscatter = outputs["b_inf"] * (1 - exp(-(medium_bs * depth).clamp_min(0)))
+B_inf = outputs["b_inf"]
+medium_rgb = outputs["medium_rgb"]
+direct_object_signal = outputs["rgb_object"]
+```
+
+Residual-difference visualization:
+
+```text
+mean-channel signed residual delta mapped as clamp(0.5 + 4.0 * (P30_abs_residual - A0_abs_residual), 0, 1).
+```
+
+All per-view PNGs use the same save path: clamp to `[0,1]`, convert to RGB uint8 PNG, no gamma adjustment, no white balance, no contrast/saturation adjustment, and no crop.
+
+### 42.4 Eval views and generated file counts
+
+| Scene | Eval views | Underwater per-view files | Dewatered per-view files | Medium component per-view files | Contact sheets |
+|---|---:|---:|---:|---:|---:|
+| Curasao | 3 | 18 | 9 | 36 | 16 |
+| JapaneseGradens | 3 | 18 | 9 | 36 | 16 |
+| IUI3 | 4 | 24 | 12 | 48 | 16 |
+| Panama | 3 | 18 | 9 | 36 | 16 |
+
+View IDs:
+
+```text
+Curasao: 0, 1, 2
+JapaneseGradens: 0, 1, 2
+IUI3: 0, 1, 2, 3
+Panama: 0, 1, 2
+```
+
+Representative view IDs:
+
+```text
+Curasao: 0, 1, 2
+JapaneseGradens: 0, 1, 2
+IUI3: 0, 2, 3
+Panama: 0, 1, 2
+```
+
+### 42.5 Contact sheet paths
+
+Underwater:
+
+```text
+renders/gmvc_four_scene_visual_audit/<Scene>/underwater/contact_sheets/contact_sheet_all_underwater_comparison.png
+renders/gmvc_four_scene_visual_audit/<Scene>/underwater/contact_sheets/contact_sheet_representative_underwater_comparison.png
+```
+
+Dewatered:
+
+```text
+renders/gmvc_four_scene_visual_audit/<Scene>/dewatered/contact_sheets/contact_sheet_all_dewatered_comparison.png
+renders/gmvc_four_scene_visual_audit/<Scene>/dewatered/contact_sheets/contact_sheet_representative_dewatered_comparison.png
+```
+
+Medium component sheets:
+
+```text
+renders/gmvc_four_scene_visual_audit/<Scene>/medium/contact_sheets/contact_sheet_all_<component>.png
+renders/gmvc_four_scene_visual_audit/<Scene>/medium/contact_sheets/contact_sheet_representative_<component>.png
+```
+
+Components:
+
+```text
+transmission
+attenuation
+backscatter
+B_inf
+medium_rgb
+direct_object_signal
+```
+
+### 42.6 Technical checks
+
+Checks performed by the exporter and manifest verification:
+
+```text
+A0/P30 view ID match: pass
+A0/P30 image index/name match: pass
+A0/P30 camera intrinsics and camera_to_worlds match: pass
+A0/P30 render shape match: pass
+configured SH degree match: pass, sh_degree=3
+active SH degree match: pass, active_sh_degree=3
+requested/loaded step match: pass, step=15000
+same tone mapping/color space/save format: pass
+PNG files present and non-empty: pass
+PNG dimensions match manifest: pass
+unavailable medium components: none
+```
+
+No dewatered PSNR/SSIM/LPIPS was computed because no clear-image GT is used by this export.
