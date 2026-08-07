@@ -286,6 +286,16 @@ class WaterSplattingModelConfig(ModelConfig):
     """Reserved base-residual medium context regularization weight. Off by default."""
     medium_predictor_mode: Literal["single", "base_residual"] = "single"
     """Medium predictor structure flag. single preserves the current M1/M2 predictor."""
+    direct_optical_depth_scale: float = 1.0
+    """Scale applied only to direct attenuation beta_D before underwater rasterization."""
+    medium_background_supervision_enabled: bool = False
+    """Enable training-only direct medium_rgb supervision on detached background-water masks."""
+    medium_background_supervision_lambda: float = 0.0
+    """Weight for detached background-water medium_rgb supervision."""
+    medium_background_supervision_exclude_boundary: bool = True
+    """Exclude boundary pixels when building the effective background supervision mask."""
+    medium_background_supervision_hit_exclusion_threshold: float = -1.0
+    """If >=0, exclude background pixels whose detached hit_confidence is above this threshold."""
     gmvc_enabled: bool = False
     """Enable Geometry-Anchored Multi-View Medium Calibration training terms."""
     gmvc_diagnostic_only: bool = False
@@ -3161,7 +3171,11 @@ class WaterSplattingModel(Model):
         )
         medium_rgb = medium.rgb
         medium_bs = medium.bs
-        medium_attn = medium.attn
+        medium_attn_raw = medium.attn
+        direct_optical_depth_scale = float(getattr(self.config, "direct_optical_depth_scale", 1.0))
+        if direct_optical_depth_scale < 0.0:
+            raise ValueError("direct_optical_depth_scale must be non-negative")
+        medium_attn = medium_attn_raw * direct_optical_depth_scale
 
         def _empty_gaussian_outputs(rgb: torch.Tensor, depth_value: float = 10.0) -> Dict[str, torch.Tensor]:
             depth = rgb.new_ones(*rgb.shape[:2], 1) * float(depth_value)
@@ -3202,6 +3216,8 @@ class WaterSplattingModel(Model):
                 "medium_rgb": medium_rgb,
                 "medium_bs": medium_bs,
                 "medium_attn": medium_attn,
+                "medium_attn_raw": medium_attn_raw,
+                "direct_optical_depth_scale": medium_attn.new_tensor(direct_optical_depth_scale),
             }
             if medium.b_inf is not None:
                 out["b_inf"] = medium.b_inf
@@ -3336,7 +3352,8 @@ class WaterSplattingModel(Model):
             )
             medium_rgb = medium.rgb
             medium_bs = medium.bs
-            medium_attn = medium.attn
+            medium_attn_raw = medium.attn
+            medium_attn = medium_attn_raw * direct_optical_depth_scale
 
         render = self.underwater_rasterizer.rasterize(  # type: ignore
             xys=self.xys,
@@ -3738,6 +3755,8 @@ class WaterSplattingModel(Model):
             "medium_rgb": medium_rgb,
             "medium_bs": medium_bs,
             "medium_attn": medium_attn,
+            "medium_attn_raw": medium_attn_raw,
+            "direct_optical_depth_scale": medium_attn.new_tensor(direct_optical_depth_scale),
         }
         if clear_proxy_render is not None:
             j_proxy_raw = clear_proxy_render.rgb
@@ -3835,10 +3854,15 @@ class WaterSplattingModel(Model):
         for i in range(3):
             # 3 channels
             metrics_dict[f"medium_attn_{i}"] = outputs["medium_attn"][:, :, i].mean()
+            if "medium_attn_raw" in outputs:
+                metrics_dict[f"medium_attn_raw_{i}"] = outputs["medium_attn_raw"][:, :, i].mean()
+                metrics_dict[f"medium_attn_effective_{i}"] = outputs["medium_attn"][:, :, i].mean()
             metrics_dict[f"medium_bs_{i}"] = outputs["medium_bs"][:, :, i].mean()
             metrics_dict[f"medium_rgb_{i}"] = outputs["medium_rgb"][:, :, i].mean()
             if "b_inf" in outputs:
                 metrics_dict[f"b_inf_{i}"] = outputs["b_inf"][:, :, i].mean()
+        if "direct_optical_depth_scale" in outputs:
+            metrics_dict["direct_optical_depth_scale"] = outputs["direct_optical_depth_scale"]
         if "b_inf_minus_A_abs" in outputs:
             metrics_dict["b_inf_minus_A_abs_mean"] = outputs["b_inf_minus_A_abs"].mean()
             metrics_dict["b_inf_minus_A_abs_max"] = outputs["b_inf_minus_A_abs"].max()
@@ -4309,6 +4333,41 @@ class WaterSplattingModel(Model):
                         gt_img,
                         bg_mask,
                     )
+
+        medium_bg_weight = float(getattr(self.config, "medium_background_supervision_lambda", 0.0))
+        if bool(getattr(self.config, "medium_background_supervision_enabled", False)) and medium_bg_weight > 0.0:
+            bg_mask = self._load_backscatter_region_mask(
+                outputs=outputs,
+                key=getattr(self.config, "background_water_mask_key", "water"),
+                target=gt_img,
+            )
+            if bg_mask is not None and bg_mask.sum() > 0:
+                boundary_mask = None
+                if bool(getattr(self.config, "medium_background_supervision_exclude_boundary", True)):
+                    boundary_mask = self._load_backscatter_region_mask(outputs=outputs, key="boundary", target=gt_img)
+                bg_medium_mask = effective_background_mask(
+                    water_mask=bg_mask,
+                    boundary_mask=boundary_mask,
+                    hit_confidence=outputs.get("hit_confidence"),
+                    hit_threshold=float(getattr(self.config, "medium_background_supervision_hit_exclusion_threshold", -1.0)),
+                ).detach()
+                if image_mask is not None:
+                    bg_medium_mask = (bg_medium_mask * image_mask.detach()).clamp(0.0, 1.0)
+                if bg_medium_mask.sum() > 0:
+                    residual = torch.abs(outputs["medium_rgb"] - gt_img)
+                    channel_weight = 1.0 / (outputs["medium_rgb"].detach() + 1e-3)
+                    denom = bg_medium_mask.sum().clamp_min(1e-6)
+                    background_medium_l1 = (bg_medium_mask * residual).sum() / denom
+                    weighted_background_medium_l1 = (bg_medium_mask * channel_weight * residual).sum() / denom
+                    loss_dict["medium_background_supervision_loss"] = medium_bg_weight * weighted_background_medium_l1
+                    if metrics_dict is not None:
+                        metrics_dict["background_medium_l1"] = background_medium_l1.detach()
+                        metrics_dict["weighted_background_medium_l1"] = weighted_background_medium_l1.detach()
+                        metrics_dict["medium_background_supervision_mask_coverage"] = bg_medium_mask.detach().mean()
+                        metrics_dict["medium_background_supervision_lambda"] = torch.tensor(
+                            medium_bg_weight,
+                            device=self.device,
+                        )
 
         bg_clear_weight = self._background_clear_ramp_weight(
             getattr(self.config, "lambda_background_clear_gaussian", 0.0)
