@@ -1192,6 +1192,7 @@ class WaterSplattingModel(Model):
             if do_densification:
                 # then we densify
                 assert self.xys_grad_norm is not None and self.vis_counts is not None and self.max_2Dsize is not None
+                n_before_densification = self.num_points
                 avg_grad_norm = (self.xys_grad_norm / self.vis_counts) * 0.5 * max(self.last_size[0], self.last_size[1])
 
                 high_grads = (avg_grad_norm > self.config.densify_grad_thresh).squeeze()
@@ -1202,10 +1203,12 @@ class WaterSplattingModel(Model):
                 splits &= high_grads
 
                 nsamps = self.config.n_split_samples
+                split_count = int(splits.sum().item())
                 split_params = self.split_gaussians(splits, nsamps)
 
                 dups = (self.scales.exp().max(dim=-1).values <= self.config.densify_size_thresh).squeeze()
                 dups &= high_grads
+                duplicate_count = int(dups.sum().item())
 
                 dup_params = self.dup_gaussians(dups)
                 for name, param in self.gauss_params.items():
@@ -1230,6 +1233,12 @@ class WaterSplattingModel(Model):
 
                 dup_idcs = torch.where(dups)[0]
                 self.dup_in_all_optim(optimizers, dup_idcs, 1)
+                CONSOLE.log(
+                    "Densification step="
+                    f"{self.step} split={split_count} duplicate={duplicate_count} "
+                    f"split_children={int(nsamps) * split_count} duplicate_children={duplicate_count} "
+                    f"total_before={n_before_densification} total_after_append={self.num_points}"
+                )
 
                 # if self.step < self.config.stop_screen_size_at:
                 # After a guassian is split into two new gaussians, the original one should also be pruned.
@@ -1317,7 +1326,7 @@ class WaterSplattingModel(Model):
         self._sync_gmvc_hold_gaussian_reference_for_cull(culls)
 
         CONSOLE.log(
-            f"Culled {n_bef - self.num_points} gaussians "
+            f"Culled step={self.step} {n_bef - self.num_points} gaussians "
             f"({below_alpha_count} below alpha thresh, {toobigs_count} too bigs, {self.num_points} remaining)"
         )
 

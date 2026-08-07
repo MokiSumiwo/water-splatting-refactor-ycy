@@ -150,3 +150,135 @@ No directly runnable WaterSplatting clean-pair synthetic dataset was found in th
 - Q4: BG010 does not show the required natural reduction in tau/J saturation under the first medium direct supervision setting.
 - Q5: For this Curasao test, the positive mechanism signal is closer to direct optical-depth scaling than to the tested medium independent supervision. This is not a claim about the full SeaFree-GS method.
 - Q6: At SH=3, D010 and AB reduce full-SH clear saturation metrics relative to D100 while passing RGB safety gates. No SH-degree reduction was used.
+
+## D010 Persistence
+
+Code Fact:
+
+- This stage keeps the same renderer, RGB reconstruction loss, optimizer/scheduler/scaler restoration, densification/refinement, opacity strategy, Gaussian geometry, dataset split, SH degree 3, `medium_context_mode=dir_xy_camera`, `b_inf_mode=tied`, `infinite_water_enabled=False`, and seed 42.
+- No GMVC, OAW/RAW, background supervision, AB, soft bound, SH0, new loss, or new gamma value is enabled.
+- The only experimental variable remains `direct_optical_depth_scale`: D100-PERSIST uses `gamma_D=1.0`; D010-PERSIST uses `gamma_D=0.1`.
+
+Experimental Fact:
+
+- D100-PERSIST resumes from the D100 step-13000 training state and continues to step 15000.
+- D010-PERSIST resumes from the D010 step-13000 training state and continues to step 15000.
+- Persistence outputs:
+  - D100 checkpoints: `outputs/dewater_d010_persistence_20260807/dewater_d100_persist_curasao_seed42_step13000_to_15000/`
+  - D010 checkpoints: `outputs/dewater_d010_persistence_20260807/dewater_d010_persist_curasao_seed42_step13000_to_15000/`
+  - Diagnostics: `renders/dewater_d010_persistence_20260807/`
+  - Summary JSON: `outputs/dewater_d010_persistence_20260807/d010_persistence_summary.json`
+  - Summary CSV: `outputs/dewater_d010_persistence_20260807/d010_persistence_summary.csv`
+
+| Step | Run | PSNR | SSIM | LPIPS | beta raw | beta eff | R_beta | tau p90 | P(T<0.1) | P(J>1) | J p99 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 13000 | D100-PERSIST | 32.223931 | 0.956911 | 0.107947 | 0.538801 | 0.538801 | 1.000000 | 2.531823 | 0.148602 | 0.044772 | 2.326760 |
+| 13000 | D010-PERSIST | 32.436670 | 0.957246 | 0.108737 | 3.839738 | 0.383974 | 7.126444 | 1.733984 | 0.001710 | 0.025737 | 1.688977 |
+| 14000 | D100-PERSIST | 32.372182 | 0.955993 | 0.108244 | 0.529313 | 0.529313 | 1.000000 | 2.516180 | 0.146393 | 0.045001 | 2.345485 |
+| 14000 | D010-PERSIST | 32.434656 | 0.956873 | 0.108648 | 4.107950 | 0.410795 | 7.760912 | 1.913829 | 0.009116 | 0.028013 | 1.796672 |
+| 15000 | D100-PERSIST | 32.183900 | 0.955937 | 0.108058 | 0.530557 | 0.530557 | 1.000000 | 2.498326 | 0.142697 | 0.044909 | 2.350998 |
+| 15000 | D010-PERSIST | 32.338216 | 0.956792 | 0.108534 | 4.226358 | 0.422636 | 7.965891 | 1.991694 | 0.023508 | 0.029077 | 1.841920 |
+
+Quantitative Conclusion:
+
+- `R_beta` trajectory: 13k `7.126444`, 14k `7.760912`, 15k `7.965891`.
+- `10 - R_beta`: 13k `2.873556`, 14k `2.239088`, 15k `2.034109`.
+- D010-PERSIST at 15k passes RGB safety relative to D100-PERSIST at the same step: `dPSNR=+0.154316`, `dSSIM=+0.000855`, `dLPIPS=+0.000476`.
+- D010-PERSIST at 15k keeps `tau p90` lower by `20.28%` and `P(J>1)` lower by `35.25%` relative to D100-PERSIST.
+- Persistence classification: P-A. Under the predefined gate, D010 changes the persistent optimization solution through 15k, and Scratch is triggered.
+
+Reasonable Inference:
+
+- Raw beta continues increasing from 13k to 15k, but it remains below the full compensation target of `10x` at step 15000.
+- The 15k values satisfy the predefined stable-lower-optical-depth gate rather than the compensation-catch-up gate.
+
+## D010 Scratch Training
+
+Code Fact:
+
+- D010-SCRATCH trains Curasao from step 0 with `direct_optical_depth_scale=0.1`.
+- The beta initialization is unchanged; no manual `beta_D * 10` compensation is applied.
+- The same SH=3 renderer, original RGB reconstruction loss, optimizer/scheduler/scaler, densification/refinement, opacity strategy, and dataset split are used.
+- No GMVC, medium background supervision, AB, soft intrinsic bound, SH0, OAW/RAW, new loss, or new gamma value is enabled.
+- Nerfstudio from-scratch 15k runs in this repo save the terminal checkpoint as `step-000014999.ckpt`. The diagnostics directory is labeled `step_15000`, and `summary.json` records `loaded_step=14999`.
+
+Experimental Fact:
+
+- D010-SCRATCH output root: `outputs/dewater_d010_scratch_20260807/`.
+- D010-SCRATCH render root: `renders/dewater_d010_scratch_20260807/`.
+- D010-SCRATCH summary JSON: `outputs/dewater_d010_scratch_20260807/d010_scratch_summary.json`.
+- D010-SCRATCH summary CSV: `outputs/dewater_d010_scratch_20260807/d010_scratch_summary.csv`.
+- D100-SCRATCH baseline reuses existing gamma=1 Curasao M1-compatible checkpoints where available: 5k, 10k, final `step-000014999`; the 13k point uses the matched D100 continuation checkpoint from the A sweep.
+
+| Step | Run | Loaded | PSNR | SSIM | LPIPS | beta raw | beta eff | tau p90 | P(T<0.1) | P(J>1) | J p99 | Gaussian count |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1000 | D010-SCRATCH | 1000 | 26.256755 | 0.740219 | 0.426815 | 2.288258 | 0.228826 | 1.258930 | 0.000064 | 0.011867 | 1.066537 | 64803 |
+| 3000 | D010-SCRATCH | 3000 | 23.796100 | 0.658632 | 0.431692 | 3.608206 | 0.360821 | 2.010315 | 0.069731 | 0.060355 | 1.701018 | 564880 |
+| 5000 | D010-SCRATCH | 5000 | 29.595919 | 0.892300 | 0.232321 | 4.654941 | 0.465494 | 2.762088 | 0.188713 | 0.087222 | 2.934536 | 923676 |
+| 5000 | D100-SCRATCH | 5000 | 30.337736 | 0.893982 | 0.227867 | 0.494114 | 0.494114 | 2.416231 | 0.118991 | 0.031781 | 1.779927 | 922020 |
+| 8000 | D010-SCRATCH | 8000 | 33.354826 | 0.956238 | 0.112577 | 5.194084 | 0.519408 | 3.024805 | 0.206360 | 0.102604 | 3.845085 | 1189010 |
+| 10000 | D010-SCRATCH | 10000 | 33.164044 | 0.956770 | 0.109999 | 5.450143 | 0.545014 | 3.210847 | 0.220773 | 0.114157 | 4.373565 | 1148924 |
+| 10000 | D100-SCRATCH | 10000 | 33.151569 | 0.956404 | 0.109539 | 0.551918 | 0.551918 | 2.511684 | 0.133931 | 0.046954 | 2.311693 | 1140794 |
+| 13000 | D010-SCRATCH | 13000 | 32.367476 | 0.957756 | 0.107602 | 5.500127 | 0.550013 | 3.387978 | 0.240758 | 0.116151 | 4.475880 | 1118490 |
+| 13000 | D100-SCRATCH | 13000 | 32.223931 | 0.956911 | 0.107947 | 0.538801 | 0.538801 | 2.531823 | 0.148602 | 0.044772 | 2.326765 | 1110842 |
+| 15000 | D010-SCRATCH | 14999 | 32.326513 | 0.957235 | 0.108202 | 5.482617 | 0.548262 | 3.437896 | 0.241403 | 0.113092 | 4.496261 | 1114093 |
+| 15000 | D100-SCRATCH | 14999 | 32.165164 | 0.956004 | 0.108141 | 0.531716 | 0.531716 | 2.504676 | 0.143831 | 0.044918 | 2.350653 | 1106714 |
+
+Quantitative Conclusion:
+
+- D010-SCRATCH passes RGB safety at nominal 15k relative to D100-SCRATCH: `dPSNR=+0.161348`, `dSSIM=+0.001231`, `dLPIPS=+0.000061`.
+- D010-SCRATCH does not preserve the lower-optical-depth mechanism at nominal 15k: `tau p90` is `37.26%` higher than D100-SCRATCH and `P(J>1)` is `151.78%` higher.
+- D010-SCRATCH raw beta ratio vs D100-SCRATCH at nominal 15k is `10.311166`, above the full-compensation reference of `10x`.
+- D010-SCRATCH therefore fails the predefined Scratch mechanism gate despite RGB safety.
+
+Gaussian population facts:
+
+- D010-SCRATCH train log parsed `164` densification/cull events.
+- D100 historical logs do not contain the newly added split/duplicate/cull fields, so split/duplicate event-by-event comparison is unavailable for D100.
+- Gaussian count comparison where both runs have diagnostics:
+  - 5k: D100 `922020`, D010 `923676`, delta `+1656` (`+0.18%`).
+  - 10k: D100 `1140794`, D010 `1148924`, delta `+8130` (`+0.71%`).
+  - 13k: D100 `1110842`, D010 `1118490`, delta `+7648` (`+0.69%`).
+  - nominal 15k: D100 `1106714`, D010 `1114093`, delta `+7379` (`+0.67%`).
+
+## Three-Path Comparison
+
+Experimental Fact:
+
+- Three-path final visual output root: `renders/dewater_d010_scratch_20260807/three_path_step_15000/`.
+- Manifest JSON: `renders/dewater_d010_scratch_20260807/three_path_step_15000/manifest.json`.
+- Manifest CSV: `renders/dewater_d010_scratch_20260807/three_path_step_15000/manifest.csv`.
+- Visual index: `renders/dewater_d010_scratch_20260807/three_path_step_15000/VISUAL_COMPARE_INDEX.md`.
+
+| Metric | D100-SCRATCH | D010-SWITCH | D010-SCRATCH |
+| --- | ---: | ---: | ---: |
+| Loaded step | 14999 | 15000 | 14999 |
+| PSNR | 32.165164 | 32.338216 | 32.326513 |
+| SSIM | 0.956004 | 0.956792 | 0.957235 |
+| LPIPS | 0.108141 | 0.108534 | 0.108202 |
+| beta raw | 0.531716 | 4.226358 | 5.482617 |
+| beta eff | 0.531716 | 0.422636 | 0.548262 |
+| tau p50 | 1.392244 | 1.093456 | 1.455885 |
+| tau p90 | 2.504676 | 1.991694 | 3.437896 |
+| tau p99 | 2.996496 | 2.406861 | 4.625885 |
+| T mean | 0.235115 | 0.315782 | 0.202039 |
+| P(T<0.1) | 0.143831 | 0.023508 | 0.241403 |
+| P(T<0.05) | 0.011275 | 0.000167 | 0.148904 |
+| J p95 | 0.939800 | 0.705894 | 1.956954 |
+| J p99 | 2.350653 | 1.841920 | 4.496261 |
+| P(J>1) | 0.044918 | 0.029077 | 0.113092 |
+| P(J>1.5) | 0.024378 | 0.015934 | 0.069234 |
+| P(J>2) | 0.015046 | 0.006876 | 0.048653 |
+| Gaussian count | 1106714 | 931117 | 1114093 |
+
+Quantitative Conclusion:
+
+- D010-SWITCH at 15k passes RGB safety vs D100-SCRATCH and keeps `tau p90` lower by `20.48%` and `P(J>1)` lower by `35.27%`.
+- D010-SCRATCH at nominal 15k passes RGB safety but has `tau p90` higher by `37.26%` and `P(J>1)` higher by `151.78%` vs D100-SCRATCH.
+- Final classification: `Late-stage recalibration / basin switching`.
+
+Reasonable Inference:
+
+- In this Curasao run, `gamma_D=0.1` from step 0 is largely compensated by beta growth and does not maintain the lower-optical-depth / reduced-intrinsic-compensation mechanism.
+- The positive D010 evidence is specific to switching after M1 reconstruction in this stage, not to using `gamma_D=0.1` as a from-scratch parameterization.
+- Four-scene from-scratch D010 validation is not triggered by these gates. Cross-scene validation, if pursued, should be framed separately for the late-switch setting rather than as a from-scratch D010 default.

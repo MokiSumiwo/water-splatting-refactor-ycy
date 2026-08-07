@@ -437,6 +437,26 @@ def _background_mask_stats(
     }
 
 
+def _model_state_summary(model: Any) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "gaussian_count": int(getattr(model, "num_points", 0)),
+    }
+    opacities = getattr(model, "opacities", None)
+    if opacities is not None:
+        alpha = torch.sigmoid(opacities.detach().float().reshape(-1).cpu())
+        finite = alpha[torch.isfinite(alpha)]
+        stats = {
+            "count": int(finite.numel()),
+            "mean": float(finite.mean().item()) if finite.numel() else 0.0,
+            "min": float(finite.min().item()) if finite.numel() else 0.0,
+            "max": float(finite.max().item()) if finite.numel() else 0.0,
+        }
+        for q in (0.10, 0.50, 0.90, 0.95, 0.99):
+            stats[f"p{int(round(q * 100)):02d}"] = _safe_quantile(finite, q)
+        out["opacity_alpha"] = stats
+    return out
+
+
 def _aggregate_background_stats(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     bg_rows = [row.get("background_mask_stats", {}) for row in rows if row.get("background_mask_stats", {}).get("available")]
     if not bg_rows:
@@ -894,6 +914,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         },
         "aggregate": aggregate,
         "background_supervision": _aggregate_background_stats(rows),
+        "model_state": _model_state_summary(model),
         "per_view": rows,
         "manifest": manifest,
         "git_commit": _git_commit(repo),
