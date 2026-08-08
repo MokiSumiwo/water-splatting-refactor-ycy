@@ -299,3 +299,127 @@ This stage does not establish physical correctness of the recovered clear appear
 ### Reasonable Inference
 
 The fixed bounded SH3 parameterization consistently closes the high-value intrinsic route in the measured diagnostics. The unresolved issue is RGB-domain compatibility across all scenes, not boundary escape or a measured shift into backscatter.
+
+## Formal Stage Conclusion
+
+### Quantitative Conclusion
+
+The cross-scene result should not be summarized as a simple BND failure. The automatic full-gate label:
+
+```text
+BND_CROSS_SCENE_FAILURE = true
+```
+
+means only that BND is not yet a drop-in replacement for M1 under the predefined RGB-safety gate. It does not mean that the bounded-intrinsic decomposition mechanism failed.
+
+The correct stage-level status is:
+
+```text
+Mechanistically validated, but RGB-Pareto incomplete.
+```
+
+Across all four scenes, BND consistently changed the decomposition proxies in the intended direction:
+
+```text
+tau_D p90 decreased
+J p99 decreased
+P(J > 1) went to 0
+no large sigmoid boundary escape was detected
+no measured transfer into backscatter was detected
+```
+
+The key replicated relation is:
+
+```text
+Bounded intrinsic appearance -> lower effective direct optical depth
+```
+
+This is stronger than the trivial statement that `P(J>1)=0` follows from the bounded color parameterization. In all four scenes, restricting the Gaussian intrinsic color range also caused the learned medium/object allocation to move toward a lower-optical-depth solution.
+
+### Reasonable Inference
+
+The experiments provide the strongest current evidence for the intrinsic-attenuation compensation hypothesis:
+
+```text
+unbounded SH3 intrinsic appearance
+    -> high-J escape route
+    -> compatible with high direct optical depth / low transmission
+    -> underwater RGB can still be fitted
+```
+
+BND removes the `J >> 1` route from the parameter space while retaining SH3 view-dependent capacity. The optimizer did not simply keep the old attenuation values and fail everywhere. Instead, every scene moved toward lower `tau_D`, which indicates that unbounded intrinsic appearance is a real object-medium compensation degree of freedom in WaterSplatting.
+
+### Experimental Fact
+
+The RGB-safety result is scene-dependent:
+
+| Scene | RGB safety | mechanism gate | note |
+| --- | --- | --- | --- |
+| Curasao | PASS | PASS | RGB metrics stayed within gate and tau/J decreased. |
+| IUI3 | PASS | PASS | RGB metrics stayed within gate and tau/J decreased. |
+| JapaneseGradens | FAIL | PASS | SSIM delta `-0.003200` missed the RGB gate while tau/J decreased. |
+| Panama | FAIL | PASS | PSNR delta `-0.810558` missed the RGB gate while tau/J decreased. |
+
+Therefore the decomposition mechanism replicated more broadly than RGB safety.
+
+### Quantitative Conclusion
+
+Panama is the most important remaining counterexample for direct deployment. BND reduced its decomposition proxies:
+
+```text
+tau p90: 1.769849 -> 0.999069  (-43.55%)
+J p99:   1.311801 -> 0.838911  (-36.05%)
+P(J>1):  0.037758 -> 0
+```
+
+but PSNR changed:
+
+```text
+32.308910 -> 31.498353  (-0.810558 dB)
+```
+
+This suggests that BND removed a compensation freedom that the original M1 used for accurate underwater RGB fitting in Panama, and the current model did not recover an equally accurate alternative representation under the fixed BND parameterization.
+
+### External Manual Visual Review Note
+
+The following visual observation is recorded from the user-provided external/manual analysis text, not from an automatic visual-quality judgment in this run:
+
+```text
+The clear_raw contact sheets are consistent with the quantitative trend:
+M1 has a stronger high-value intrinsic tail in multiple scenes, while BND produces a more range-controlled intrinsic representation. This should not be described as recovering true clear-scene color because no clear-image ground truth is available.
+```
+
+The technically appropriate wording is:
+
+```text
+BND produces a more stable, range-controlled intrinsic representation that is consistent with reduced high-J compensation.
+```
+
+### Relation To SeaFree-Inspired Factors
+
+### Reasonable Inference
+
+Among the tested SeaFree-inspired factors so far, bounded intrinsic appearance has the strongest cross-scene mechanism evidence. Direct optical-depth `/10` scaling was largely absorbed by learnable `beta_D` in from-scratch WaterSplatting runs, and background/medium supervision did not show comparable tau/J changes in the previous audits.
+
+This supports the interpretation that SeaFree-style success should not be attributed only to LOS normalization. A major contributor is likely a constrained intrinsic appearance solution space.
+
+### Final Recommendation
+
+```text
+PARTIALLY
+```
+
+BND should be treated as a new core decomposition mechanism candidate, but not yet as the final M1 replacement. The next stage should focus on why JapaneseGradens and Panama lose RGB safety after the high-J compensation route is removed.
+
+Recommended next directions:
+
+1. Diagnose the source of JapaneseGradens/Panama RGB loss under BND.
+2. Audit whether bounded SH3 retains sufficient view-dependent appearance capacity in those scenes.
+3. Consider targeted bounded parameterizations such as bounded DC plus limited SH residual only if the capacity audit supports it.
+4. Do not return D010 to the main line based on these results.
+
+One-sentence summary:
+
+```text
+The cross-scene experiments consistently show that bounding the full-SH intrinsic appearance eliminates the high-radiance escape route and substantially reduces direct optical depth across all four scenes, establishing unbounded intrinsic appearance as a major source of object-medium compensation in WaterSplatting. The remaining limitation is no longer decomposition stability itself, but the scene-dependent RGB fitting trade-off introduced after this compensation route is removed.
+```
