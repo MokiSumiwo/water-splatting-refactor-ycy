@@ -24,6 +24,9 @@ CHANNELS = ("r", "g", "b")
 ALPHAS = (0.0, 0.25, 0.50, 0.75, 1.0)
 STAT_Q = (0.10, 0.50, 0.90, 0.95, 0.99)
 T_Q = (0.01, 0.05, 0.10, 0.50, 0.90)
+GAUSSIAN_COLOR_Q = (0.01, 0.05, 0.50, 0.90, 0.95, 0.99)
+LOGIT_Q = (0.01, 0.05, 0.50, 0.95, 0.99)
+DERIVATIVE_Q = (0.10, 0.50, 0.90)
 RGB_RANGE = "[0,1]"
 NO_TONE = "none; tensors are clamped only for PNG conversion unless a named diagnostic mapping is used"
 COLOR_SPACE = "renderer/dataset RGB tensor space; saved as RGB PNG without color conversion"
@@ -111,6 +114,8 @@ def _finite_flat(value: Tensor, mask: Optional[Tensor] = None) -> Tensor:
         mask = mask.detach().bool()
         while mask.ndim < data.ndim:
             mask = mask.expand(*data.shape[:2], data.shape[-1] if data.ndim == 3 else 1)
+        if tuple(mask.shape) != tuple(data.shape):
+            return torch.empty(0)
         data = data[mask]
     else:
         data = data.reshape(-1)
@@ -451,6 +456,10 @@ def _background_mask_stats(
 def _model_state_summary(model: Any) -> Dict[str, Any]:
     out: Dict[str, Any] = {
         "gaussian_count": int(getattr(model, "num_points", 0)),
+        "intrinsic_color_parameterization": str(
+            getattr(getattr(model, "config", object()), "intrinsic_color_parameterization", "legacy")
+        ),
+        "bounded_sh_logit_eps": float(getattr(getattr(model, "config", object()), "bounded_sh_logit_eps", 1e-10)),
     }
     opacities = getattr(model, "opacities", None)
     if opacities is not None:
@@ -537,8 +546,68 @@ def _concat_gaussian_channel_values(per_view: Sequence[Mapping[str, Tensor]], ke
         tensor = item[key].detach().float()
         if tensor.ndim != 2 or tensor.shape[-1] < channel_index + 1:
             continue
+        if tensor.shape[0] != mask.shape[0]:
+            continue
         values.append(tensor[:, channel_index][mask].detach().float().cpu())
     return torch.cat(values) if values else torch.empty(0)
+
+
+def _flat_stats(flat: Tensor, quantiles: Sequence[float]) -> Dict[str, Any]:
+    out = {
+        "count": int(flat.numel()),
+        "mean": float(flat.mean().item()) if flat.numel() else 0.0,
+        "min": float(flat.min().item()) if flat.numel() else 0.0,
+        "max": float(flat.max().item()) if flat.numel() else 0.0,
+    }
+    for q in quantiles:
+        out[f"p{int(round(q * 100)):02d}"] = _safe_quantile(flat, q)
+    return out
+
+
+def _gaussian_thresholds(flat: Tensor) -> Dict[str, float]:
+    if flat.numel() == 0:
+        return {
+            "P(c<0)": 0.0,
+            "P(c<0.01)": 0.0,
+            "P(c<0.05)": 0.0,
+            "P(c>0.95)": 0.0,
+            "P(c>0.99)": 0.0,
+            "P(c>1.0)": 0.0,
+            "P(c>1.5)": 0.0,
+            "P(c>2.0)": 0.0,
+            "SATURATION_MASS_001": 0.0,
+        }
+    lt_001 = float((flat < 0.01).float().mean().item())
+    gt_099 = float((flat > 0.99).float().mean().item())
+    return {
+        "P(c<0)": float((flat < 0.0).float().mean().item()),
+        "P(c<0.01)": lt_001,
+        "P(c<0.05)": float((flat < 0.05).float().mean().item()),
+        "P(c>0.95)": float((flat > 0.95).float().mean().item()),
+        "P(c>0.99)": gt_099,
+        "P(c>1.0)": float((flat > 1.0).float().mean().item()),
+        "P(c>1.5)": float((flat > 1.5).float().mean().item()),
+        "P(c>2.0)": float((flat > 2.0).float().mean().item()),
+        "SATURATION_MASS_001": lt_001 + gt_099,
+    }
+
+
+def _logit_thresholds(flat: Tensor) -> Dict[str, float]:
+    if flat.numel() == 0:
+        return {
+            "P(s>4.595)": 0.0,
+            "P(s<-4.595)": 0.0,
+            "P(|s|>5)": 0.0,
+            "P(|s|>8)": 0.0,
+            "P(|s|>10)": 0.0,
+        }
+    return {
+        "P(s>4.595)": float((flat > 4.595).float().mean().item()),
+        "P(s<-4.595)": float((flat < -4.595).float().mean().item()),
+        "P(|s|>5)": float((flat.abs() > 5.0).float().mean().item()),
+        "P(|s|>8)": float((flat.abs() > 8.0).float().mean().item()),
+        "P(|s|>10)": float((flat.abs() > 10.0).float().mean().item()),
+    }
 
 
 def _aggregate_stats(rendered: Sequence[Mapping[str, Tensor]], per_view_stats: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
@@ -560,6 +629,11 @@ def _aggregate_stats(rendered: Sequence[Mapping[str, Tensor]], per_view_stats: S
         "tau_D_effective": ("tau_D_effective", STAT_Q),
         "T_D_effective": ("T_D_effective", T_Q),
         "clear_object_fullsh_raw": ("clear_object_fullsh_raw", (0.90, 0.95, 0.99)),
+        "direct_object_signal": ("direct_object_signal", (0.10, 0.50, 0.90)),
+        "medium_rgb": ("medium_rgb", (0.50, 0.90)),
+        "medium_bs": ("medium_bs", (0.50, 0.90)),
+        "b_inf": ("b_inf", (0.50, 0.90)),
+        "backscatter": ("backscatter", (0.50, 0.90)),
     }
     for out_key, (tensor_key, quantiles) in tensors.items():
         if out_key == "depth":
@@ -603,29 +677,36 @@ def _aggregate_stats(rendered: Sequence[Mapping[str, Tensor]], per_view_stats: S
         }
         out["clear_object_fullsh_raw_thresholds"][channel] = {
             "P(J<0)": float((j_flat < 0.0).float().mean().item()) if j_flat.numel() else 0.0,
+            "P(J>0.95)": float((j_flat > 0.95).float().mean().item()) if j_flat.numel() else 0.0,
+            "P(J>0.99)": float((j_flat > 0.99).float().mean().item()) if j_flat.numel() else 0.0,
             "P(J>1.0)": float((j_flat > 1.0).float().mean().item()) if j_flat.numel() else 0.0,
             "P(J>1.5)": float((j_flat > 1.5).float().mean().item()) if j_flat.numel() else 0.0,
             "P(J>2.0)": float((j_flat > 2.0).float().mean().item()) if j_flat.numel() else 0.0,
         }
     out["gaussian_view_rgb"] = {}
     out["gaussian_view_rgb_thresholds"] = {}
+    out["gaussian_view_logits"] = {}
+    out["gaussian_view_logits_thresholds"] = {}
+    out["gaussian_sigmoid_derivative"] = {}
+    out["gaussian_sigmoid_derivative_thresholds"] = {}
+    out["gaussian_view_full_minus_dc_abs"] = {}
     for index, channel in enumerate(CHANNELS):
         c_flat = _concat_gaussian_channel_values(rendered, "gaussian_view_rgb", index)
-        stats = {
-            "count": int(c_flat.numel()),
-            "mean": float(c_flat.mean().item()) if c_flat.numel() else 0.0,
-            "min": float(c_flat.min().item()) if c_flat.numel() else 0.0,
-            "max": float(c_flat.max().item()) if c_flat.numel() else 0.0,
+        out["gaussian_view_rgb"][channel] = _flat_stats(c_flat, GAUSSIAN_COLOR_Q)
+        out["gaussian_view_rgb_thresholds"][channel] = _gaussian_thresholds(c_flat)
+
+        logit_flat = _concat_gaussian_channel_values(rendered, "gaussian_view_logits", index)
+        out["gaussian_view_logits"][channel] = _flat_stats(logit_flat, LOGIT_Q)
+        out["gaussian_view_logits_thresholds"][channel] = _logit_thresholds(logit_flat)
+
+        deriv_flat = _concat_gaussian_channel_values(rendered, "gaussian_sigmoid_derivative", index)
+        out["gaussian_sigmoid_derivative"][channel] = _flat_stats(deriv_flat, DERIVATIVE_Q)
+        out["gaussian_sigmoid_derivative_thresholds"][channel] = {
+            "P(sigmoid_derivative<0.01)": float((deriv_flat < 0.01).float().mean().item()) if deriv_flat.numel() else 0.0
         }
-        for q in (0.90, 0.95, 0.99):
-            stats[f"p{int(round(q * 100)):02d}"] = _safe_quantile(c_flat, q)
-        out["gaussian_view_rgb"][channel] = stats
-        out["gaussian_view_rgb_thresholds"][channel] = {
-            "P(c<0)": float((c_flat < 0.0).float().mean().item()) if c_flat.numel() else 0.0,
-            "P(c>1.0)": float((c_flat > 1.0).float().mean().item()) if c_flat.numel() else 0.0,
-            "P(c>1.5)": float((c_flat > 1.5).float().mean().item()) if c_flat.numel() else 0.0,
-            "P(c>2.0)": float((c_flat > 2.0).float().mean().item()) if c_flat.numel() else 0.0,
-        }
+
+        full_minus_dc = _concat_gaussian_channel_values(rendered, "gaussian_view_full_minus_dc_abs", index)
+        out["gaussian_view_full_minus_dc_abs"][channel] = _flat_stats(full_minus_dc, (0.90, 0.95, 0.99))
     return out
 
 
@@ -765,6 +846,22 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             else:
                 gaussian_view_rgb_cpu = torch.empty(0, 3)
                 gaussian_visible_mask_cpu = torch.empty(0, dtype=torch.bool)
+            gaussian_view_logits = outputs.get("gaussian_view_logits")
+            gaussian_sigmoid_derivative = outputs.get("gaussian_sigmoid_derivative")
+            gaussian_view_full_minus_dc_abs = outputs.get("gaussian_view_full_minus_dc_abs")
+            gaussian_view_logits_cpu = (
+                gaussian_view_logits.detach().float().cpu() if gaussian_view_logits is not None else torch.empty(0, 3)
+            )
+            gaussian_sigmoid_derivative_cpu = (
+                gaussian_sigmoid_derivative.detach().float().cpu()
+                if gaussian_sigmoid_derivative is not None
+                else torch.empty(0, 3)
+            )
+            gaussian_view_full_minus_dc_abs_cpu = (
+                gaussian_view_full_minus_dc_abs.detach().float().cpu()
+                if gaussian_view_full_minus_dc_abs is not None
+                else torch.empty(0, 3)
+            )
             medium_rgb = _to_hwc(outputs["medium_rgb"], "medium_rgb").detach().float().cpu()
             rgb_medium_total = (
                 _to_hwc(outputs["rgb_medium_total"], "rgb_medium_total").detach().float().cpu()
@@ -905,13 +1002,55 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             c_stats_tensor = (
                 gaussian_view_rgb_cpu.reshape(1, -1, 3) if gaussian_view_rgb_cpu.numel() else torch.empty(1, 0, 3)
             )
+            logits_stats_tensor = (
+                gaussian_view_logits_cpu.reshape(1, -1, 3) if gaussian_view_logits_cpu.numel() else torch.empty(1, 0, 3)
+            )
+            derivative_stats_tensor = (
+                gaussian_sigmoid_derivative_cpu.reshape(1, -1, 3)
+                if gaussian_sigmoid_derivative_cpu.numel()
+                else torch.empty(1, 0, 3)
+            )
+            full_minus_dc_stats_tensor = (
+                gaussian_view_full_minus_dc_abs_cpu.reshape(1, -1, 3)
+                if gaussian_view_full_minus_dc_abs_cpu.numel()
+                else torch.empty(1, 0, 3)
+            )
             c_stats_mask = (
                 gaussian_visible_mask_cpu.reshape(1, -1, 1)
                 if gaussian_visible_mask_cpu.numel()
                 else torch.empty(1, 0, 1, dtype=torch.bool)
             )
-            c_lt = _threshold_fractions(c_stats_tensor, c_stats_mask, (0.0,), "lt")
-            c_gt = _threshold_fractions(c_stats_tensor, c_stats_mask, (1.0, 1.5, 2.0), "gt")
+            c_thresholds: Dict[str, Dict[str, float]] = {}
+            logit_thresholds: Dict[str, Dict[str, float]] = {}
+            derivative_thresholds: Dict[str, Dict[str, float]] = {}
+            for channel_index, channel in enumerate(CHANNELS):
+                c_flat = _concat_gaussian_channel_values(
+                    [{"gaussian_view_rgb": gaussian_view_rgb_cpu, "gaussian_visible_mask": gaussian_visible_mask_cpu}],
+                    "gaussian_view_rgb",
+                    channel_index,
+                )
+                logit_flat = _concat_gaussian_channel_values(
+                    [{"gaussian_view_logits": gaussian_view_logits_cpu, "gaussian_visible_mask": gaussian_visible_mask_cpu}],
+                    "gaussian_view_logits",
+                    channel_index,
+                )
+                derivative_flat = _concat_gaussian_channel_values(
+                    [
+                        {
+                            "gaussian_sigmoid_derivative": gaussian_sigmoid_derivative_cpu,
+                            "gaussian_visible_mask": gaussian_visible_mask_cpu,
+                        }
+                    ],
+                    "gaussian_sigmoid_derivative",
+                    channel_index,
+                )
+                c_thresholds[channel] = _gaussian_thresholds(c_flat)
+                logit_thresholds[channel] = _logit_thresholds(logit_flat)
+                derivative_thresholds[channel] = {
+                    "P(sigmoid_derivative<0.01)": float((derivative_flat < 0.01).float().mean().item())
+                    if derivative_flat.numel()
+                    else 0.0
+                }
             view_stats = {
                 "scene": args.scene,
                 "view_id": int(view_id),
@@ -929,18 +1068,30 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                 "tau_D_effective": _channel_stats(tau_effective, mask, STAT_Q),
                 "T_D_effective": _channel_stats(transmission, mask, T_Q),
                 "T_D_effective_thresholds": _threshold_fractions(transmission, mask, (0.30, 0.20, 0.10, 0.05), "lt"),
+                "direct_object_signal": _channel_stats(direct, mask, (0.10, 0.50, 0.90)),
                 "clear_object_fullsh_raw": _channel_stats(clear, mask, (0.90, 0.95, 0.99)),
                 "clear_object_fullsh_raw_thresholds": {
                     channel: {
                         "P(J<0)": _threshold_fractions(clear, mask, (0.0,), "lt")[channel]["P(lt0)"],
+                        "P(J>0.95)": _threshold_fractions(clear, mask, (0.95,), "gt")[channel]["P(gt0.95)"],
+                        "P(J>0.99)": _threshold_fractions(clear, mask, (0.99,), "gt")[channel]["P(gt0.99)"],
                         **_threshold_fractions(clear, mask, (1.0, 1.5, 2.0), "gt")[channel],
                     }
                     for channel in CHANNELS
                 },
-                "gaussian_view_rgb": _channel_stats(c_stats_tensor, c_stats_mask, (0.90, 0.95, 0.99)),
-                "gaussian_view_rgb_thresholds": {
-                    channel: {"P(c<0)": c_lt[channel]["P(lt0)"], **c_gt[channel]} for channel in CHANNELS
-                },
+                "gaussian_view_rgb": _channel_stats(c_stats_tensor, c_stats_mask, GAUSSIAN_COLOR_Q),
+                "gaussian_view_rgb_thresholds": c_thresholds,
+                "gaussian_view_logits": _channel_stats(logits_stats_tensor, c_stats_mask, LOGIT_Q),
+                "gaussian_view_logits_thresholds": logit_thresholds,
+                "gaussian_sigmoid_derivative": _channel_stats(derivative_stats_tensor, c_stats_mask, DERIVATIVE_Q),
+                "gaussian_sigmoid_derivative_thresholds": derivative_thresholds,
+                "gaussian_view_full_minus_dc_abs": _channel_stats(
+                    full_minus_dc_stats_tensor, c_stats_mask, (0.90, 0.95, 0.99)
+                ),
+                "medium_rgb": _channel_stats(medium_rgb, mask, (0.50, 0.90)),
+                "medium_bs": _channel_stats(medium_bs, mask, (0.50, 0.90)),
+                "b_inf": _channel_stats(b_inf, mask, (0.50, 0.90)),
+                "backscatter": _channel_stats(backscatter, mask, (0.50, 0.90)),
                 "correlations": _empty_correlations()
                 if args.stats_only
                 else _correlations(tau_effective, transmission, clear, mask, args.correlation_sample_cap),
@@ -958,8 +1109,16 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                     "tau_D_raw": tau_raw,
                     "tau_D_effective": tau_effective,
                     "T_D_effective": transmission,
+                    "direct_object_signal": direct,
                     "clear_object_fullsh_raw": clear,
+                    "medium_rgb": medium_rgb,
+                    "medium_bs": medium_bs,
+                    "b_inf": b_inf,
+                    "backscatter": backscatter,
                     "gaussian_view_rgb": gaussian_view_rgb_cpu,
+                    "gaussian_view_logits": gaussian_view_logits_cpu,
+                    "gaussian_sigmoid_derivative": gaussian_sigmoid_derivative_cpu,
+                    "gaussian_view_full_minus_dc_abs": gaussian_view_full_minus_dc_abs_cpu,
                     "gaussian_visible_mask": gaussian_visible_mask_cpu,
                 }
             )
@@ -996,6 +1155,12 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             "gmvc_J_proxy_raw": "outputs['J_proxy_raw'] if naturally present; this script does not enable GMVC/proxy context to create it.",
             "water_splatting_tonemap": "clear_object_fullsh_raw / (clear_object_fullsh_raw + 1)",
             "partial_deattenuation": "J_alpha = clear_object_fullsh_raw * T_D_effective^alpha",
+            "bounded_sh3_intrinsic": (
+                "If model.config.intrinsic_color_parameterization == 'sigmoid_sh', active full-SH output is treated "
+                "as RGB logits and sigmoid(logits) is the Gaussian color passed into underwater rasterization."
+            ),
+            "gaussian_view_logits": "pre-sigmoid active full-SH RGB logits for sigmoid_sh checkpoints; unavailable for legacy checkpoints.",
+            "gaussian_sigmoid_derivative": "sigmoid(logits) * (1 - sigmoid(logits)) for sigmoid_sh checkpoints.",
         },
         "mask": {
             "name": "object_support",

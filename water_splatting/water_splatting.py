@@ -46,6 +46,7 @@ from water_splatting.cleanup import build_cleanup_candidate_mask, format_cleanup
 from water_splatting.fields import (
     DirectionConditionedMediumField,
     MediumFieldOutput,
+    compute_bounded_gaussian_colors,
     compute_dual_gaussian_colors,
     compute_gaussian_colors,
     compute_gaussian_sh_residual,
@@ -115,6 +116,20 @@ def SH2RGB(sh):
     """
     C0 = 0.28209479177387814
     return sh * C0 + 0.5
+
+
+def RGB2SHLogits(rgb, eps: float = 1e-7):
+    """Map seed RGB to DC SH coefficients whose degree-0 output is logit(RGB)."""
+
+    C0 = 0.28209479177387814
+    return torch.logit(rgb, eps=float(eps)) / C0
+
+
+def SHLogits2RGB(sh):
+    """Map bounded-SH DC coefficients to the corresponding sigmoid RGB."""
+
+    C0 = 0.28209479177387814
+    return torch.sigmoid(sh * C0)
 
 
 @dataclass
@@ -288,6 +303,10 @@ class WaterSplattingModelConfig(ModelConfig):
     """Medium predictor structure flag. single preserves the current M1/M2 predictor."""
     direct_optical_depth_scale: float = 1.0
     """Scale applied only to direct attenuation beta_D before underwater rasterization."""
+    intrinsic_color_parameterization: Literal["legacy", "sigmoid_sh"] = "legacy"
+    """Gaussian intrinsic color mapping. legacy preserves SH+0.5/clamp; sigmoid_sh interprets active SH as logits."""
+    bounded_sh_logit_eps: float = 1e-7
+    """Epsilon used only for RGB-equivalent bounded-SH seed color logit initialization."""
     disable_population_refinement: bool = False
     """If True, skip split/duplicate/cull/prune operations while keeping normal parameter optimization."""
     intrinsic_bound_lambda: float = 0.0
@@ -883,7 +902,12 @@ class WaterSplattingModel(Model):
         ):
             shs = torch.zeros((self.seed_points[1].shape[0], dim_sh, 3)).float().cuda()
             if self.config.sh_degree > 0:
-                shs[:, 0, :3] = RGB2SH(self.seed_points[1] / 255)
+                seed_rgb = self.seed_points[1] / 255
+                if getattr(self.config, "intrinsic_color_parameterization", "legacy") == "sigmoid_sh":
+                    CONSOLE.log("use bounded SH-logit color parameterization")
+                    shs[:, 0, :3] = RGB2SHLogits(seed_rgb, eps=float(getattr(self.config, "bounded_sh_logit_eps", 1e-10)))
+                else:
+                    shs[:, 0, :3] = RGB2SH(seed_rgb)
                 shs[:, 1:, 3:] = 0.0
             else:
                 CONSOLE.log("use color only optimization with sigmoid activation")
@@ -960,6 +984,8 @@ class WaterSplattingModel(Model):
     @property
     def colors(self):
         if self.config.sh_degree > 0:
+            if getattr(self.config, "intrinsic_color_parameterization", "legacy") == "sigmoid_sh":
+                return SHLogits2RGB(self.features_dc)
             return SH2RGB(self.features_dc)
         else:
             return torch.sigmoid(self.features_dc)
@@ -3302,14 +3328,29 @@ class WaterSplattingModel(Model):
 
         n = self._get_active_sh_degree()
         self.last_active_sh_degree = int(n)
-        rgbs = compute_gaussian_colors(
-            means=means_crop,
-            features_dc=features_dc_crop,
-            features_rest=features_rest_crop,
-            camera_position=camera.camera_to_worlds[..., :3, 3],
-            sh_degree=self.config.sh_degree,
-            active_sh_degree=n,
-        )
+        color_parameterization = getattr(self.config, "intrinsic_color_parameterization", "legacy")
+        bounded_color = None
+        if color_parameterization == "legacy":
+            rgbs = compute_gaussian_colors(
+                means=means_crop,
+                features_dc=features_dc_crop,
+                features_rest=features_rest_crop,
+                camera_position=camera.camera_to_worlds[..., :3, 3],
+                sh_degree=self.config.sh_degree,
+                active_sh_degree=n,
+            )
+        elif color_parameterization == "sigmoid_sh":
+            bounded_color = compute_bounded_gaussian_colors(
+                means=means_crop,
+                features_dc=features_dc_crop,
+                features_rest=features_rest_crop,
+                camera_position=camera.camera_to_worlds[..., :3, 3],
+                sh_degree=self.config.sh_degree,
+                active_sh_degree=n,
+            )
+            rgbs = bounded_color.rgb
+        else:
+            raise ValueError(f"Unknown intrinsic_color_parameterization: {color_parameterization}")
         dual_color = None
         if getattr(self.config, "dual_color_enabled", False):
             dual_color = compute_dual_gaussian_colors(
@@ -3334,7 +3375,10 @@ class WaterSplattingModel(Model):
                 sh_degree=self.config.sh_degree,
                 active_sh_degree=n,
             )
-            dc_rgb = SH2RGB(features_dc_crop) if self.config.sh_degree > 0 else torch.sigmoid(features_dc_crop)
+            if color_parameterization == "sigmoid_sh" and bounded_color is not None:
+                dc_rgb = bounded_color.dc_rgb
+            else:
+                dc_rgb = SH2RGB(features_dc_crop) if self.config.sh_degree > 0 else torch.sigmoid(features_dc_crop)
 
         assert (num_tiles_hit > 0).any()  # type: ignore
 
@@ -3611,7 +3655,10 @@ class WaterSplattingModel(Model):
             proxy_opacities = opacities
             proxy_uses_dc_colors = False
             if gmvc_intrinsic_proxy_active and bool(getattr(self.config, "gmvc_intrinsic_use_dc_proxy", True)):
-                proxy_colors = SH2RGB(features_dc_crop) if self.config.sh_degree > 0 else torch.sigmoid(features_dc_crop)
+                if color_parameterization == "sigmoid_sh":
+                    proxy_colors = SHLogits2RGB(features_dc_crop) if self.config.sh_degree > 0 else torch.sigmoid(features_dc_crop)
+                else:
+                    proxy_colors = SH2RGB(features_dc_crop) if self.config.sh_degree > 0 else torch.sigmoid(features_dc_crop)
                 proxy_uses_dc_colors = True
             if gmvc_intrinsic_proxy_active or bool(getattr(self.config, "clear_proxy_appearance_only", False)):
                 proxy_geometry_grad_scale = 0.0
@@ -3790,6 +3837,13 @@ class WaterSplattingModel(Model):
             "gaussian_visible_mask": visible_mask.detach(),
             "projected_gaussian_depths": depths.detach(),
         }
+        outputs["intrinsic_color_parameterization"] = rgbs.new_tensor(1.0 if color_parameterization == "sigmoid_sh" else 0.0)
+        if bounded_color is not None:
+            outputs["gaussian_view_logits"] = bounded_color.logits
+            outputs["gaussian_sigmoid_derivative"] = bounded_color.sigmoid_derivative
+            outputs["gaussian_view_dc_rgb"] = bounded_color.dc_rgb
+            outputs["gaussian_view_dc_logits"] = bounded_color.dc_logits
+            outputs["gaussian_view_full_minus_dc_abs"] = torch.abs(rgbs - bounded_color.dc_rgb)
         if clear_proxy_render is not None:
             j_proxy_raw = clear_proxy_render.rgb
             outputs["J_proxy_raw"] = j_proxy_raw
@@ -3895,6 +3949,34 @@ class WaterSplattingModel(Model):
                 metrics_dict[f"b_inf_{i}"] = outputs["b_inf"][:, :, i].mean()
         if "direct_optical_depth_scale" in outputs:
             metrics_dict["direct_optical_depth_scale"] = outputs["direct_optical_depth_scale"]
+        if "intrinsic_color_parameterization" in outputs:
+            metrics_dict["intrinsic_color_parameterization"] = outputs["intrinsic_color_parameterization"]
+        if "gaussian_view_rgb" in outputs:
+            colors = outputs["gaussian_view_rgb"].detach()
+            visible = outputs.get("gaussian_visible_mask")
+            if visible is not None:
+                valid = visible.detach().bool().reshape(-1)
+                colors = colors[valid] if valid.any() else colors.reshape(0, colors.shape[-1])
+            if colors.numel():
+                metrics_dict["gaussian_view_rgb_min"] = colors.min()
+                metrics_dict["gaussian_view_rgb_max"] = colors.max()
+                metrics_dict["gaussian_view_rgb_gt0p99_fraction"] = (colors > 0.99).float().mean()
+        if "gaussian_view_logits" in outputs:
+            logits = outputs["gaussian_view_logits"].detach()
+            derivative = outputs.get("gaussian_sigmoid_derivative")
+            visible = outputs.get("gaussian_visible_mask")
+            if visible is not None:
+                valid = visible.detach().bool().reshape(-1)
+                logits = logits[valid] if valid.any() else logits.reshape(0, logits.shape[-1])
+                if derivative is not None:
+                    derivative = derivative.detach()[valid] if valid.any() else derivative.detach().reshape(0, derivative.shape[-1])
+            if logits.numel():
+                metrics_dict["gaussian_view_logit_min"] = logits.min()
+                metrics_dict["gaussian_view_logit_max"] = logits.max()
+                metrics_dict["gaussian_view_logit_abs_gt5_fraction"] = (logits.abs() > 5.0).float().mean()
+            if derivative is not None and derivative.numel():
+                metrics_dict["gaussian_sigmoid_derivative_mean"] = derivative.mean()
+                metrics_dict["gaussian_sigmoid_derivative_lt0p01_fraction"] = (derivative < 0.01).float().mean()
         if "b_inf_minus_A_abs" in outputs:
             metrics_dict["b_inf_minus_A_abs_mean"] = outputs["b_inf_minus_A_abs"].mean()
             metrics_dict["b_inf_minus_A_abs_max"] = outputs["b_inf_minus_A_abs"].max()

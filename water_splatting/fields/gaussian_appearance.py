@@ -21,6 +21,22 @@ class DualColorOutput:
     chroma_residual: Tensor
 
 
+@dataclass
+class GaussianColorOutput:
+    """Current-view Gaussian colors plus bounded-parameterization diagnostics."""
+
+    rgb: Tensor
+    logits: Tensor | None = None
+    sigmoid_derivative: Tensor | None = None
+    dc_rgb: Tensor | None = None
+    dc_logits: Tensor | None = None
+
+
+def _sh_viewdirs(means: Tensor, camera_position: Tensor) -> Tensor:
+    viewdirs = means.detach() - camera_position.detach()
+    return viewdirs / viewdirs.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+
+
 def compute_gaussian_colors(
     *,
     means: Tensor,
@@ -40,6 +56,39 @@ def compute_gaussian_colors(
         return torch.clamp(rgbs + 0.5, min=0.0)
 
     return torch.sigmoid(colors[:, 0, :])
+
+
+def compute_bounded_gaussian_colors(
+    *,
+    means: Tensor,
+    features_dc: Tensor,
+    features_rest: Tensor,
+    camera_position: Tensor,
+    sh_degree: int,
+    active_sh_degree: int,
+) -> GaussianColorOutput:
+    """Compute bounded SH-logit Gaussian RGB values.
+
+    For SH>0, the full active SH evaluation is interpreted as RGB logits and
+    passed through sigmoid. There is no legacy +0.5 offset in this branch.
+    """
+
+    colors = torch.cat((features_dc[:, None, :], features_rest), dim=1)
+    if sh_degree > 0:
+        viewdirs = _sh_viewdirs(means, camera_position)
+        logits = spherical_harmonics(active_sh_degree, viewdirs, colors)
+        dc_logits = spherical_harmonics(0, viewdirs, colors[:, :1, :])
+    else:
+        logits = colors[:, 0, :]
+        dc_logits = logits
+    rgb = torch.sigmoid(logits)
+    return GaussianColorOutput(
+        rgb=rgb,
+        logits=logits,
+        sigmoid_derivative=rgb * (1.0 - rgb),
+        dc_rgb=torch.sigmoid(dc_logits),
+        dc_logits=dc_logits,
+    )
 
 
 def compute_dual_gaussian_colors(
@@ -67,8 +116,7 @@ def compute_dual_gaussian_colors(
         )
 
     colors = torch.cat((features_dc[:, None, :], features_rest), dim=1)
-    viewdirs = means.detach() - camera_position.detach()
-    viewdirs = viewdirs / viewdirs.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    viewdirs = _sh_viewdirs(means, camera_position)
 
     if active_sh_degree <= 0 or features_rest.numel() == 0:
         dc_rgb = torch.clamp(spherical_harmonics(0, viewdirs, colors[:, :1, :]) + 0.5, min=0.0)
@@ -114,8 +162,7 @@ def compute_gaussian_sh_residual(
         return torch.zeros_like(features_dc)
 
     colors = torch.cat((features_dc[:, None, :], features_rest), dim=1)
-    viewdirs = means.detach() - camera_position.detach()
-    viewdirs = viewdirs / viewdirs.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    viewdirs = _sh_viewdirs(means, camera_position)
     active_color = spherical_harmonics(active_sh_degree, viewdirs, colors)
     dc_color = spherical_harmonics(0, viewdirs, colors[:, :1, :])
     return active_color - dc_color
