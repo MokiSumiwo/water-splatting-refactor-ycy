@@ -157,39 +157,3 @@ class UnderwaterRasterizer:
             last_depth=last_depth,
             final_transmittance=final_transmittance,
         )
-
-    def rasterize_clear_proxy(
-        self,
-        *,
-        xys: Tensor,
-        xys_grad_abs: Tensor,
-        depths: Tensor,
-        radii: Tensor,
-        conics: Tensor,
-        num_tiles_hit: Tensor,
-        colors: Tensor,
-        opacities: Tensor,
-        height: int,
-        width: int,
-        step: int,
-    ) -> UnderwaterRenderOutput:
-        zeros = colors.new_zeros(height, width, colors.shape[-1])
-        black = colors.new_zeros(colors.shape[-1])
-        return self.rasterize(
-            xys=xys,
-            xys_grad_abs=xys_grad_abs,
-            depths=depths,
-            radii=radii,
-            conics=conics,
-            num_tiles_hit=num_tiles_hit,
-            colors=colors,
-            opacities=opacities,
-            medium_rgb=zeros,
-            medium_bs=zeros,
-            medium_attn=zeros,
-            height=height,
-            width=width,
-            background=black,
-            step=step,
-            force_white_background=False,
-        )

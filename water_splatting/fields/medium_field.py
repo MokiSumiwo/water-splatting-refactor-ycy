@@ -27,15 +27,12 @@ class MediumFieldOutput:
     attn: Tensor
     directions: Tensor
     b_inf: Optional[Tensor] = None
-    b_inf_residual: Optional[Tensor] = None
 
 
 MediumContextMode = Literal[
     "dir_only",
     "dir_xy",
-    "dir_xy_depth",
     "dir_xy_camera",
-    "dir_xy_depth_camera",
 ]
 
 
@@ -46,12 +43,8 @@ def get_medium_context_extra_dim(mode: MediumContextMode) -> int:
         return 0
     if mode == "dir_xy":
         return 3
-    if mode == "dir_xy_depth":
-        return 4
     if mode == "dir_xy_camera":
         return 6
-    if mode == "dir_xy_depth_camera":
-        return 7
     raise ValueError(f"Unknown medium_context_mode: {mode}")
 
 
@@ -88,10 +81,7 @@ class DirectionConditionedMediumField:
         camera_context_scale: float = 1.0,
         camera_context_dropout: float = 0.0,
         training: bool = False,
-        depth_context: Optional[Tensor] = None,
-        enable_b_inf: bool = False,
-        b_inf_mode: Literal["implicit", "tied", "bounded_residual", "independent"] = "implicit",
-        b_inf_residual_scale: float = 0.02,
+        b_inf_mode: Literal["implicit", "tied"] = "implicit",
     ) -> MediumFieldOutput:
         y = torch.linspace(0.0, height, height, device=rotation_world_from_camera.device)
         x = torch.linspace(0.0, width, width, device=rotation_world_from_camera.device)
@@ -121,7 +111,6 @@ class DirectionConditionedMediumField:
             camera_context_scale=camera_context_scale,
             camera_context_dropout=camera_context_dropout,
             training=training,
-            depth_context=depth_context,
         )
         outputs_shape = directions.shape[:-1]
 
@@ -145,7 +134,6 @@ class DirectionConditionedMediumField:
             .view(*outputs_shape, -1)
             .to(directions)
         )
-        b_inf_raw = medium_base_out[..., 9:12] if enable_b_inf else None
 
         if zero_medium:
             medium_rgb = torch.zeros_like(medium_rgb)
@@ -153,21 +141,10 @@ class DirectionConditionedMediumField:
             medium_attn = torch.zeros_like(medium_attn)
 
         b_inf = None
-        b_inf_residual = None
         if b_inf_mode == "implicit":
             b_inf = None
         elif b_inf_mode == "tied":
             b_inf = medium_rgb
-        elif b_inf_mode == "independent":
-            if b_inf_raw is None:
-                raise RuntimeError("b_inf_mode='independent' requires enable_b_inf=True")
-            b_inf = self.colour_activation(b_inf_raw).view(*outputs_shape, -1).to(directions)
-        elif b_inf_mode == "bounded_residual":
-            if b_inf_raw is None:
-                raise RuntimeError("b_inf_mode='bounded_residual' requires enable_b_inf=True")
-            b_inf_residual = torch.tanh(b_inf_raw).view(*outputs_shape, -1).to(directions)
-            rgb_logit = torch.logit(medium_rgb.clamp(1e-4, 1.0 - 1e-4))
-            b_inf = torch.sigmoid(rgb_logit + float(b_inf_residual_scale) * b_inf_residual)
         else:
             raise ValueError(f"Unknown b_inf_mode: {b_inf_mode}")
 
@@ -177,7 +154,6 @@ class DirectionConditionedMediumField:
             attn=medium_attn,
             directions=directions,
             b_inf=b_inf,
-            b_inf_residual=b_inf_residual,
         )
 
     def _append_context(
@@ -195,22 +171,12 @@ class DirectionConditionedMediumField:
         camera_context_scale: float,
         camera_context_dropout: float,
         training: bool,
-        depth_context: Optional[Tensor],
     ) -> Tensor:
         if mode == "dir_only":
             return directions_encoded
 
         r = torch.sqrt(image_xx.square() + image_yy.square())
         features = [directions_encoded, torch.stack([image_xx, image_yy, r], dim=-1).view(-1, 3)]
-
-        if "depth" in mode:
-            if depth_context is None:
-                depth_feature = torch.zeros(height, width, 1, device=image_xx.device, dtype=image_xx.dtype)
-            else:
-                depth_feature = depth_context.to(device=image_xx.device, dtype=image_xx.dtype)
-                if depth_feature.ndim == 2:
-                    depth_feature = depth_feature[..., None]
-            features.append(depth_feature.view(-1, 1))
 
         if "camera" in mode:
             if camera_center is None:
