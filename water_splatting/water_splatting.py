@@ -288,6 +288,22 @@ class WaterSplattingModelConfig(ModelConfig):
     """Medium predictor structure flag. single preserves the current M1/M2 predictor."""
     direct_optical_depth_scale: float = 1.0
     """Scale applied only to direct attenuation beta_D before underwater rasterization."""
+    disable_population_refinement: bool = False
+    """If True, skip split/duplicate/cull/prune operations while keeping normal parameter optimization."""
+    intrinsic_bound_lambda: float = 0.0
+    """Default-off weak bound on current-view full-SH Gaussian colors."""
+    intrinsic_bound_visible_only: bool = True
+    """Apply intrinsic bound only to projected visible Gaussians."""
+    foreground_aware_weighting_enabled: bool = False
+    """Enable default-off foreground inverse-intensity weighted RGB auxiliary."""
+    foreground_aware_weighting_lambda: float = 0.0
+    """Weight for foreground-aware reconstruction auxiliary."""
+    foreground_aware_accumulation_threshold: float = 0.05
+    """Renderer accumulation threshold for the foreground-aware support mask."""
+    foreground_aware_weight_epsilon: float = 1e-3
+    """Epsilon for inverse-intensity foreground weighting."""
+    foreground_aware_weight_cap: float = -1.0
+    """If positive, cap foreground inverse-intensity weights at this value."""
     medium_background_supervision_enabled: bool = False
     """Enable training-only direct medium_rgb supervision on detached background-water masks."""
     medium_background_supervision_lambda: float = 0.0
@@ -460,6 +476,8 @@ class WaterSplattingModelConfig(ModelConfig):
     """Linear ramp length for backscatter-closure auxiliary losses."""
     lambda_background_medium_render: float = 0.0
     """Renderer-consistent background loss on rgb_medium_finite + rgb_tail."""
+    lambda_background_finite_medium_render: float = 0.0
+    """Renderer-consistent background loss on rgb_medium_finite only."""
     lambda_background_tail_render: float = 0.0
     """Renderer-consistent background loss on rgb_tail only."""
     background_render_loss_start_step: int = 0
@@ -1189,7 +1207,9 @@ class WaterSplattingModel(Model):
                 and (self.step % reset_interval > self.num_train_data + self.config.refine_every)
             )
             cleanup_cull_mask = self._compute_cleanup_candidate_mask()
-            if do_densification:
+            if getattr(self.config, "disable_population_refinement", False):
+                deleted_mask = None
+            elif do_densification:
                 # then we densify
                 assert self.xys_grad_norm is not None and self.vis_counts is not None and self.max_2Dsize is not None
                 n_before_densification = self.num_points
@@ -3766,6 +3786,9 @@ class WaterSplattingModel(Model):
             "medium_attn": medium_attn,
             "medium_attn_raw": medium_attn_raw,
             "direct_optical_depth_scale": medium_attn.new_tensor(direct_optical_depth_scale),
+            "gaussian_view_rgb": rgbs,
+            "gaussian_visible_mask": visible_mask.detach(),
+            "projected_gaussian_depths": depths.detach(),
         }
         if clear_proxy_render is not None:
             j_proxy_raw = clear_proxy_render.rgb
@@ -4122,6 +4145,59 @@ class WaterSplattingModel(Model):
             ),
         }
 
+        intrinsic_bound_weight = float(getattr(self.config, "intrinsic_bound_lambda", 0.0))
+        if intrinsic_bound_weight > 0.0 and "gaussian_view_rgb" in outputs:
+            colors = outputs["gaussian_view_rgb"]
+            visible = outputs.get("gaussian_visible_mask")
+            if bool(getattr(self.config, "intrinsic_bound_visible_only", True)) and visible is not None:
+                weights = visible.detach().to(device=colors.device, dtype=colors.dtype).reshape(-1, 1)
+            else:
+                weights = torch.ones(colors.shape[0], 1, device=colors.device, dtype=colors.dtype)
+            penalty = F.relu(colors - 1.0).square() + F.relu(-colors).square()
+            intrinsic_bound_raw = (weights * penalty).sum() / weights.sum().clamp_min(1e-6)
+            loss_dict["intrinsic_bound_loss"] = intrinsic_bound_weight * intrinsic_bound_raw
+            if metrics_dict is not None:
+                metrics_dict["intrinsic_bound_raw"] = intrinsic_bound_raw.detach()
+                metrics_dict["intrinsic_bound_lambda"] = torch.tensor(intrinsic_bound_weight, device=self.device)
+                metrics_dict["intrinsic_bound_visible_coverage"] = weights.detach().mean()
+                with torch.no_grad():
+                    valid = weights.reshape(-1) > 0.0
+                    c_valid = colors.detach()[valid] if valid.any() else colors.detach().reshape(0, colors.shape[-1])
+                    metrics_dict["gaussian_view_rgb_gt1_fraction"] = (
+                        (c_valid > 1.0).float().mean() if c_valid.numel() else torch.zeros((), device=self.device)
+                    )
+                    metrics_dict["gaussian_view_rgb_gt1p5_fraction"] = (
+                        (c_valid > 1.5).float().mean() if c_valid.numel() else torch.zeros((), device=self.device)
+                    )
+
+        fg_aux_weight = float(getattr(self.config, "foreground_aware_weighting_lambda", 0.0))
+        if bool(getattr(self.config, "foreground_aware_weighting_enabled", False)) and fg_aux_weight > 0.0:
+            fg_mask = (
+                outputs["accumulation"].detach()
+                > float(getattr(self.config, "foreground_aware_accumulation_threshold", 0.05))
+            ).to(device=pred_img.device, dtype=pred_img.dtype)
+            if image_mask is not None:
+                fg_mask = (fg_mask * image_mask.detach()).clamp(0.0, 1.0)
+            eps = float(getattr(self.config, "foreground_aware_weight_epsilon", 1e-3))
+            fg_weight_map = 1.0 / (pred_img.detach() + eps)
+            cap = float(getattr(self.config, "foreground_aware_weight_cap", -1.0))
+            if cap > 0.0:
+                fg_weight_map = fg_weight_map.clamp_max(cap)
+            fg_residual = torch.abs(pred_img - gt_img)
+            foreground_aware_raw = (fg_mask * fg_weight_map * fg_residual).sum() / fg_mask.sum().clamp_min(1e-6)
+            loss_dict["foreground_aware_weighted_l1_loss"] = fg_aux_weight * foreground_aware_raw
+            if metrics_dict is not None:
+                metrics_dict["foreground_aware_weighted_l1_raw"] = foreground_aware_raw.detach()
+                metrics_dict["foreground_aware_weighting_lambda"] = torch.tensor(fg_aux_weight, device=self.device)
+                metrics_dict["foreground_aware_mask_coverage"] = fg_mask.detach().mean()
+                valid_weights = fg_weight_map.detach()[fg_mask.expand_as(fg_weight_map) > 0.0]
+                metrics_dict["foreground_aware_weight_mean"] = (
+                    valid_weights.mean() if valid_weights.numel() else torch.zeros((), device=self.device)
+                )
+                metrics_dict["foreground_aware_weight_max"] = (
+                    valid_weights.max() if valid_weights.numel() else torch.zeros((), device=self.device)
+                )
+
         if self._gmvc_requested():
             gmvc_bank = self._load_gmvc_training_bank()
             if gmvc_bank is not None:
@@ -4320,10 +4396,13 @@ class WaterSplattingModel(Model):
         bg_medium_weight = self._background_render_ramp_weight(
             getattr(self.config, "lambda_background_medium_render", 0.0)
         )
+        bg_finite_medium_weight = self._background_render_ramp_weight(
+            getattr(self.config, "lambda_background_finite_medium_render", 0.0)
+        )
         bg_tail_weight = self._background_render_ramp_weight(
             getattr(self.config, "lambda_background_tail_render", 0.0)
         )
-        if bg_medium_weight > 0.0 or bg_tail_weight > 0.0:
+        if bg_medium_weight > 0.0 or bg_finite_medium_weight > 0.0 or bg_tail_weight > 0.0:
             bg_mask = self._load_backscatter_region_mask(
                 outputs=outputs,
                 key=getattr(self.config, "background_water_mask_key", "water"),
@@ -4335,6 +4414,15 @@ class WaterSplattingModel(Model):
                         outputs["rgb_medium_total"],
                         gt_img,
                         bg_mask,
+                    )
+                if bg_finite_medium_weight > 0.0:
+                    loss_dict["background_finite_medium_render_loss"] = (
+                        bg_finite_medium_weight
+                        * masked_rgb_l1_loss(
+                            outputs["rgb_medium_finite"],
+                            gt_img,
+                            bg_mask,
+                        )
                     )
                 if bg_tail_weight > 0.0:
                     loss_dict["background_tail_render_loss"] = bg_tail_weight * masked_rgb_l1_loss(

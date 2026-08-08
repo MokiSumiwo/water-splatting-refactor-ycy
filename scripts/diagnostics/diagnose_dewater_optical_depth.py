@@ -411,6 +411,8 @@ def _background_mask_stats(
     *,
     mask: Optional[Tensor],
     medium_rgb: Tensor,
+    rgb_medium_total: Optional[Tensor],
+    rgb_medium_finite: Optional[Tensor],
     medium_bs: Tensor,
     beta_raw: Tensor,
     beta_effective: Tensor,
@@ -424,7 +426,7 @@ def _background_mask_stats(
     denom = mask.sum().clamp_min(1e-6)
     residual = torch.abs(_to_hwc(medium_rgb, "medium_rgb") - _to_hwc(gt, "gt"))
     weight = 1.0 / (_to_hwc(medium_rgb, "medium_rgb").detach() + 1e-3)
-    return {
+    out = {
         "available": True,
         "coverage": float(mask.mean().item()),
         "pixel_count": int((mask > 0.5).sum().item()),
@@ -435,6 +437,15 @@ def _background_mask_stats(
         "medium_attn_raw_mean": _masked_rgb_mean(beta_raw, mask),
         "medium_attn_effective_mean": _masked_rgb_mean(beta_effective, mask),
     }
+    if rgb_medium_total is not None:
+        total_residual = torch.abs(_to_hwc(rgb_medium_total, "rgb_medium_total") - _to_hwc(gt, "gt"))
+        out["background_integrated_medium_total_l1"] = float((mask * total_residual).sum().item() / denom.item())
+        out["rgb_medium_total_mean"] = _masked_rgb_mean(rgb_medium_total, mask)
+    if rgb_medium_finite is not None:
+        finite_residual = torch.abs(_to_hwc(rgb_medium_finite, "rgb_medium_finite") - _to_hwc(gt, "gt"))
+        out["background_integrated_medium_finite_l1"] = float((mask * finite_residual).sum().item() / denom.item())
+        out["rgb_medium_finite_mean"] = _masked_rgb_mean(rgb_medium_finite, mask)
+    return out
 
 
 def _model_state_summary(model: Any) -> Dict[str, Any]:
@@ -478,8 +489,17 @@ def _aggregate_background_stats(rows: Sequence[Mapping[str, Any]]) -> Dict[str, 
         },
         "background_medium_l1": weighted_mean("background_medium_l1"),
         "weighted_background_medium_l1": weighted_mean("weighted_background_medium_l1"),
+        "background_integrated_medium_total_l1": weighted_mean("background_integrated_medium_total_l1"),
+        "background_integrated_medium_finite_l1": weighted_mean("background_integrated_medium_finite_l1"),
     }
-    for key in ("medium_rgb_mean", "medium_bs_mean", "medium_attn_raw_mean", "medium_attn_effective_mean"):
+    for key in (
+        "medium_rgb_mean",
+        "rgb_medium_total_mean",
+        "rgb_medium_finite_mean",
+        "medium_bs_mean",
+        "medium_attn_raw_mean",
+        "medium_attn_effective_mean",
+    ):
         out[key] = {
             channel: float(
                 sum(float(row.get(key, {}).get(channel, 0.0)) * weight for row, weight in zip(bg_rows, weights)) / denom
@@ -505,6 +525,19 @@ def _concat_channel_values(per_view: Sequence[Mapping[str, Tensor]], key: str, c
         if tensor.shape[-1] == 1:
             tensor = tensor.expand(-1, -1, 3)
         values.append(tensor[..., channel_index][mask].detach().float().cpu())
+    return torch.cat(values) if values else torch.empty(0)
+
+
+def _concat_gaussian_channel_values(per_view: Sequence[Mapping[str, Tensor]], key: str, channel_index: int) -> Tensor:
+    values = []
+    for item in per_view:
+        if key not in item or "gaussian_visible_mask" not in item:
+            continue
+        mask = item["gaussian_visible_mask"].detach().bool().reshape(-1)
+        tensor = item[key].detach().float()
+        if tensor.ndim != 2 or tensor.shape[-1] < channel_index + 1:
+            continue
+        values.append(tensor[:, channel_index][mask].detach().float().cpu())
     return torch.cat(values) if values else torch.empty(0)
 
 
@@ -574,6 +607,25 @@ def _aggregate_stats(rendered: Sequence[Mapping[str, Tensor]], per_view_stats: S
             "P(J>1.5)": float((j_flat > 1.5).float().mean().item()) if j_flat.numel() else 0.0,
             "P(J>2.0)": float((j_flat > 2.0).float().mean().item()) if j_flat.numel() else 0.0,
         }
+    out["gaussian_view_rgb"] = {}
+    out["gaussian_view_rgb_thresholds"] = {}
+    for index, channel in enumerate(CHANNELS):
+        c_flat = _concat_gaussian_channel_values(rendered, "gaussian_view_rgb", index)
+        stats = {
+            "count": int(c_flat.numel()),
+            "mean": float(c_flat.mean().item()) if c_flat.numel() else 0.0,
+            "min": float(c_flat.min().item()) if c_flat.numel() else 0.0,
+            "max": float(c_flat.max().item()) if c_flat.numel() else 0.0,
+        }
+        for q in (0.90, 0.95, 0.99):
+            stats[f"p{int(round(q * 100)):02d}"] = _safe_quantile(c_flat, q)
+        out["gaussian_view_rgb"][channel] = stats
+        out["gaussian_view_rgb_thresholds"][channel] = {
+            "P(c<0)": float((c_flat < 0.0).float().mean().item()) if c_flat.numel() else 0.0,
+            "P(c>1.0)": float((c_flat > 1.0).float().mean().item()) if c_flat.numel() else 0.0,
+            "P(c>1.5)": float((c_flat > 1.5).float().mean().item()) if c_flat.numel() else 0.0,
+            "P(c>2.0)": float((c_flat > 2.0).float().mean().item()) if c_flat.numel() else 0.0,
+        }
     return out
 
 
@@ -603,6 +655,11 @@ def _write_csv(path: Path, per_view_rows: Sequence[Mapping[str, Any]], aggregate
                 f"J_{channel}_gt_1",
                 f"J_{channel}_gt_1p5",
                 f"J_{channel}_gt_2",
+                f"c_{channel}_p95",
+                f"c_{channel}_p99",
+                f"c_{channel}_gt_1",
+                f"c_{channel}_gt_1p5",
+                f"c_{channel}_gt_2",
             ]
         )
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -637,6 +694,13 @@ def _write_csv(path: Path, per_view_rows: Sequence[Mapping[str, Any]], aggregate
                 flat[f"J_{channel}_gt_1"] = j_thresholds["P(gt1)"]
                 flat[f"J_{channel}_gt_1p5"] = j_thresholds["P(gt1.5)"]
                 flat[f"J_{channel}_gt_2"] = j_thresholds["P(gt2)"]
+                c_stats = row.get("gaussian_view_rgb", {}).get(channel, {})
+                c_thresholds = row.get("gaussian_view_rgb_thresholds", {}).get(channel, {})
+                flat[f"c_{channel}_p95"] = c_stats.get("p95", "")
+                flat[f"c_{channel}_p99"] = c_stats.get("p99", "")
+                flat[f"c_{channel}_gt_1"] = c_thresholds.get("P(c>1.0)", c_thresholds.get("P(gt1)", ""))
+                flat[f"c_{channel}_gt_1p5"] = c_thresholds.get("P(c>1.5)", c_thresholds.get("P(gt1.5)", ""))
+                flat[f"c_{channel}_gt_2"] = c_thresholds.get("P(c>2.0)", c_thresholds.get("P(gt2)", ""))
             writer.writerow(flat)
 
 
@@ -693,7 +757,25 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             tau_raw = beta_raw * depth
             tau_effective = beta_effective * depth
             transmission = torch.exp(-tau_effective.clamp_min(0.0))
+            gaussian_view_rgb = outputs.get("gaussian_view_rgb")
+            gaussian_visible_mask = outputs.get("gaussian_visible_mask")
+            if gaussian_view_rgb is not None and gaussian_visible_mask is not None:
+                gaussian_view_rgb_cpu = gaussian_view_rgb.detach().float().cpu()
+                gaussian_visible_mask_cpu = gaussian_visible_mask.detach().bool().cpu().reshape(-1)
+            else:
+                gaussian_view_rgb_cpu = torch.empty(0, 3)
+                gaussian_visible_mask_cpu = torch.empty(0, dtype=torch.bool)
             medium_rgb = _to_hwc(outputs["medium_rgb"], "medium_rgb").detach().float().cpu()
+            rgb_medium_total = (
+                _to_hwc(outputs["rgb_medium_total"], "rgb_medium_total").detach().float().cpu()
+                if "rgb_medium_total" in outputs
+                else None
+            )
+            rgb_medium_finite = (
+                _to_hwc(outputs["rgb_medium_finite"], "rgb_medium_finite").detach().float().cpu()
+                if "rgb_medium_finite" in outputs
+                else None
+            )
             b_inf = _to_hwc(outputs.get("b_inf", outputs["medium_rgb"]), "b_inf").detach().float().cpu()
             medium_bs = _to_hwc(outputs["medium_bs"], "medium_bs").detach().float().cpu()
             backscatter = b_inf * (1.0 - torch.exp(-(medium_bs * depth).clamp_min(0.0)))
@@ -701,6 +783,8 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             bg_stats = _background_mask_stats(
                 mask=bg_mask,
                 medium_rgb=medium_rgb,
+                rgb_medium_total=rgb_medium_total,
+                rgb_medium_finite=rgb_medium_finite,
                 medium_bs=medium_bs,
                 beta_raw=beta_raw,
                 beta_effective=beta_effective,
@@ -818,6 +902,16 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             elif "J_proxy_raw" not in outputs:
                 paths["gmvc_J_proxy_raw"] = Path("unavailable")
 
+            c_stats_tensor = (
+                gaussian_view_rgb_cpu.reshape(1, -1, 3) if gaussian_view_rgb_cpu.numel() else torch.empty(1, 0, 3)
+            )
+            c_stats_mask = (
+                gaussian_visible_mask_cpu.reshape(1, -1, 1)
+                if gaussian_visible_mask_cpu.numel()
+                else torch.empty(1, 0, 1, dtype=torch.bool)
+            )
+            c_lt = _threshold_fractions(c_stats_tensor, c_stats_mask, (0.0,), "lt")
+            c_gt = _threshold_fractions(c_stats_tensor, c_stats_mask, (1.0, 1.5, 2.0), "gt")
             view_stats = {
                 "scene": args.scene,
                 "view_id": int(view_id),
@@ -843,6 +937,10 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                     }
                     for channel in CHANNELS
                 },
+                "gaussian_view_rgb": _channel_stats(c_stats_tensor, c_stats_mask, (0.90, 0.95, 0.99)),
+                "gaussian_view_rgb_thresholds": {
+                    channel: {"P(c<0)": c_lt[channel]["P(lt0)"], **c_gt[channel]} for channel in CHANNELS
+                },
                 "correlations": _empty_correlations()
                 if args.stats_only
                 else _correlations(tau_effective, transmission, clear, mask, args.correlation_sample_cap),
@@ -861,6 +959,8 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                     "tau_D_effective": tau_effective,
                     "T_D_effective": transmission,
                     "clear_object_fullsh_raw": clear,
+                    "gaussian_view_rgb": gaussian_view_rgb_cpu,
+                    "gaussian_visible_mask": gaussian_visible_mask_cpu,
                 }
             )
             view_image_paths[int(view_id)] = paths

@@ -26,13 +26,14 @@ This note records source-code facts only. No SeaFree-inspired training experimen
 
 ## Scope
 
-The audit covers five implementation areas requested for future controlled experiments:
+The audit covers six implementation areas requested for future controlled experiments:
 
 1. LOS distance `/10` complete call path.
 2. Intrinsic color boundedness.
 3. Foreground-aware content loss.
 4. Background-water supervision.
 5. Coarse depth loss.
+6. SH capacity.
 
 For each area, the note separates:
 
@@ -272,6 +273,39 @@ For each area, the note separates:
 - Only if the diagnostic correlation is meaningful and depth inputs are already available locally, run one coefficient-matched coarse-depth experiment at `lambda_pseudo_depth=0.1`.
 - Do not combine coarse depth with D010, background supervision, or foreground-aware content loss in the first run.
 
+## 6. SH Capacity
+
+### SeaFree Code Fact
+
+- `SeaFreeGsModelConfig` has a class default `sh_degree=3`, but the registered public `SeaFreeGsMethod` overrides it to `sh_degree=0` (`seafree_model.py:151`, `seafree_gs/seafree_config.py:32-36`).
+- With `sh_degree=0`, SeaFree uses only DC/color parameters for each Gaussian. In the render path, `colors_crop` is sigmoid-activated and `sh_degree_to_use=None`, so no view-dependent SH bases are evaluated by rasterization (`seafree_model.py:595-599`, `seafree_model.py:663-678`).
+- `features_rest` is still present as an empty SH-rest tensor when `dim_sh - 1 == 0`; it does not provide higher-order view-dependent color capacity under the public SH0 method (`seafree_model.py:251-270`).
+
+### WaterSplatting Code Fact
+
+- Current WaterSplatting M1/D010 baseline uses `sh_degree=3` and active SH degree scheduling through `_get_active_sh_degree()` (`water_splatting.py:183`, `water_splatting.py:3002-3008`, `water_splatting.py:3283-3292`).
+- The current-view Gaussian color is computed by evaluating `features_dc + features_rest` with spherical harmonics and then applying `torch.clamp(rgbs + 0.5, min=0.0)`; there is no upper bound (`water_splatting/fields/gaussian_appearance.py:24-36`).
+- The image-space clear-object tensor `J_gaussian_raw` is the alpha-composited render of those current-view full-SH colors without medium attenuation/backscatter (`water_splatting/rendering/underwater_rasterizer.py:92-126`, `water_splatting.py:3405-3410`).
+
+### Structural Difference
+
+- SeaFree reduces intrinsic appearance capacity by using SH0 in the public method and bounds color through sigmoid.
+- WaterSplatting preserves SH3 view-dependent capacity and only lower-bounds evaluated colors at zero; high positive values remain available as a compensation channel.
+- Therefore, SeaFree's stable intrinsic appearance may be caused by bounded color, reduced SH capacity, or both. These cannot be separated by switching WaterSplatting directly to SH0.
+
+### Reasonable Inference
+
+- If WaterSplatting full-SH evaluated colors `c_i(v)` have substantial mass above 1.0, then the remaining pure-J issue after D010 can originate at Gaussian-level appearance rather than only image-space alpha accumulation.
+- SH0 is a confounded intervention because it changes both boundedness and view-dependent capacity.
+
+### Proposed Controlled Experiment
+
+- Do not run SH0 in the current round.
+- Preserve SH3 and test only a weak current-view full-SH color bound:
+  `mean(ReLU(c_i(v)-1)^2 + ReLU(-c_i(v))^2)` on visible Gaussians.
+- Select the bound weight by no-update gradient matching against RGB gradients on `features_dc` and `features_rest`.
+- Report both Gaussian-level `c_i(v)` statistics and image-space `J_gaussian_raw` statistics to distinguish appearance-parameter overflow from alpha-composition effects.
+
 ## Implementation Boundary for Next Work
 
 - No SeaFree-GS code should be copied into WaterSplatting.
@@ -286,6 +320,6 @@ For each area, the note separates:
 ## Audit Status
 
 - Source audit completed.
-- New training experiments: not started.
+- WaterSplatting-native controlled training experiments are recorded separately in `research_notes/DEWATERING_SEAFREE_FACTOR_AUDIT_2026-08-08.md`.
 - SeaFree reference repository: read-only, clean.
-- WaterSplatting output directories were not modified by this audit.
+- SeaFree-GS code was not modified or copied into WaterSplatting.
