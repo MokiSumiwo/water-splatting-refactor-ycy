@@ -19,8 +19,11 @@ Python package for combining 3DGS with volume rendering to enable water/fog mode
 
 from __future__ import annotations
 
+import json
 import math
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Type, Union
 
 import numpy as np
@@ -197,6 +200,14 @@ class WaterSplattingModelConfig(ModelConfig):
     """Gaussian intrinsic color mapping. bounded_sh3 applies sigmoid to active full-SH logits."""
     bounded_sh_logit_eps: float = 1e-7
     """Epsilon used only for RGB-equivalent bounded-SH seed color logit initialization."""
+    appearance_lr_scale: float = 1.0
+    """Scale applied only to features_dc and features_rest optimizer LR trajectories."""
+    appearance_audit_log_dir: Optional[str] = None
+    """Optional directory for AOPT LR/update JSONL diagnostics."""
+    appearance_lr_audit_steps: str = "0,1,1000,3000,5000,8000,10000,13000,14999"
+    """Comma-separated training steps where AOPT LR diagnostics are written."""
+    appearance_update_audit_steps: str = "100,1000,5000,10000,14999"
+    """Comma-separated training steps where AOPT one-step update diagnostics are written."""
 
 
 class WaterSplattingModel(Model):
@@ -315,6 +326,8 @@ class WaterSplattingModel(Model):
         self.ssim = SSIM(data_range=1.0, size_average=True, channel=3)
         self.lpips = LearnedPerceptualImagePatchSimilarity(normalize=True)
         self.step = 0
+        self._appearance_lr_scale_applied = False
+        self._appearance_update_pre: Optional[Dict[str, Union[int, torch.Tensor]]] = None
 
         self.crop_box: Optional[OrientedBox] = None
         if self.config.background_color == "random":
@@ -705,7 +718,20 @@ class WaterSplattingModel(Model):
     ) -> List[TrainingCallback]:
         cbs = []
         cbs.append(TrainingCallback([TrainingCallbackLocation.BEFORE_TRAIN_ITERATION], self.step_cb))
+        cbs.append(
+            TrainingCallback(
+                [TrainingCallbackLocation.BEFORE_TRAIN_ITERATION],
+                self.aopt_before_train_iteration,
+                args=[training_callback_attributes.optimizers],
+            )
+        )
         # The order of these matters
+        cbs.append(
+            TrainingCallback(
+                [TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
+                self.aopt_after_train_iteration,
+            )
+        )
         cbs.append(
             TrainingCallback(
                 [TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
@@ -724,6 +750,132 @@ class WaterSplattingModel(Model):
 
     def step_cb(self, step):
         self.step = step
+
+    def _parse_aopt_steps(self, value: str) -> set[int]:
+        steps: set[int] = set()
+        for item in str(value).split(","):
+            item = item.strip()
+            if not item:
+                continue
+            steps.add(int(item))
+        return steps
+
+    def _aopt_log_jsonl(self, filename: str, row: Dict[str, Union[str, int, float, bool]]) -> None:
+        if not self.config.appearance_audit_log_dir:
+            return
+        path = Path(os.path.expanduser(self.config.appearance_audit_log_dir)) / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf8") as handle:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+    def _apply_appearance_lr_scale(self, optimizers: Optimizers) -> None:
+        scale = float(self.config.appearance_lr_scale)
+        if scale <= 0.0:
+            raise ValueError(f"appearance_lr_scale must be positive, got {scale}")
+        if self._appearance_lr_scale_applied:
+            return
+
+        rows = []
+        for group in ("features_dc", "features_rest"):
+            if group not in optimizers.optimizers:
+                raise RuntimeError(f"Missing optimizer group for appearance LR scale: {group}")
+            base_lr = float(optimizers.config[group]["optimizer"].lr)
+            target_base_lr = base_lr * scale
+            optimizer = optimizers.optimizers[group]
+            current_base_lr = float(optimizer.param_groups[0].get("initial_lr", base_lr))
+            if not math.isclose(current_base_lr, target_base_lr, rel_tol=1e-9, abs_tol=1e-12):
+                ratio = target_base_lr / max(current_base_lr, 1e-30)
+                for param_group in optimizer.param_groups:
+                    param_group["lr"] = float(param_group["lr"]) * ratio
+                    param_group["initial_lr"] = target_base_lr
+
+            scheduler = optimizers.schedulers.get(group)
+            if scheduler is not None:
+                base_lrs = []
+                for base in scheduler.base_lrs:
+                    base = float(base)
+                    if math.isclose(base, target_base_lr, rel_tol=1e-9, abs_tol=1e-12):
+                        base_lrs.append(base)
+                    else:
+                        base_lrs.append(target_base_lr)
+                scheduler.base_lrs = base_lrs
+
+            rows.append(
+                {
+                    "group": group,
+                    "base_lr": base_lr,
+                    "target_base_lr": target_base_lr,
+                    "actual_lr": float(optimizer.param_groups[0]["lr"]),
+                    "scale": scale,
+                    "scheduler_base_lr": float(optimizers.schedulers[group].base_lrs[0])
+                    if group in optimizers.schedulers
+                    else float("nan"),
+                }
+            )
+
+        self._appearance_lr_scale_applied = True
+        self._aopt_log_jsonl(
+            "aopt_lr_scale_application.jsonl",
+            {
+                "step": int(self.step),
+                "scale": scale,
+                "features_dc_actual_lr": rows[0]["actual_lr"],
+                "features_rest_actual_lr": rows[1]["actual_lr"],
+                "features_dc_scheduler_base_lr": rows[0]["scheduler_base_lr"],
+                "features_rest_scheduler_base_lr": rows[1]["scheduler_base_lr"],
+            },
+        )
+        if scale != 1.0:
+            CONSOLE.log(f"Applied appearance_lr_scale={scale} to features_dc/features_rest only")
+
+    def _aopt_lr_row(self, optimizers: Optimizers, step: int) -> Dict[str, Union[str, int, float]]:
+        row: Dict[str, Union[str, int, float]] = {
+            "step": int(step),
+            "appearance_lr_scale": float(self.config.appearance_lr_scale),
+        }
+        for group in ("features_dc", "features_rest", "means", "scales", "quats", "opacities", "medium_mlp"):
+            if group in optimizers.optimizers:
+                row[f"{group}_lr"] = float(optimizers.optimizers[group].param_groups[0]["lr"])
+        return row
+
+    def aopt_before_train_iteration(self, optimizers: Optimizers, step: int) -> None:
+        self._apply_appearance_lr_scale(optimizers)
+        if step in self._parse_aopt_steps(self.config.appearance_lr_audit_steps):
+            self._aopt_log_jsonl("aopt_lr_trajectory.jsonl", self._aopt_lr_row(optimizers, step))
+        if step in self._parse_aopt_steps(self.config.appearance_update_audit_steps):
+            self._appearance_update_pre = {
+                "step": int(step),
+                "features_dc": self.features_dc.detach().clone(),
+                "features_rest": self.features_rest.detach().clone(),
+            }
+
+    def aopt_after_train_iteration(self, step: int) -> None:
+        if self._appearance_update_pre is None:
+            return
+        if int(self._appearance_update_pre["step"]) != int(step):
+            return
+        row: Dict[str, Union[str, int, float]] = {
+            "step": int(step),
+            "appearance_lr_scale": float(self.config.appearance_lr_scale),
+        }
+        for name, param in (("features_dc", self.features_dc), ("features_rest", self.features_rest)):
+            before = self._appearance_update_pre[name]
+            if not isinstance(before, torch.Tensor) or before.shape != param.shape:
+                row[f"{name}_status"] = "shape_changed"
+                continue
+            current = param.detach()
+            delta = current - before.to(device=current.device, dtype=current.dtype)
+            grad = param.grad.detach().float() if param.grad is not None else None
+            theta_norm = float(torch.linalg.norm(before.float()).item())
+            update_norm = float(torch.linalg.norm(delta.float()).item())
+            row[f"{name}_status"] = "ok"
+            row[f"{name}_update_l2"] = update_norm
+            row[f"{name}_theta_l2_before"] = theta_norm
+            row[f"{name}_normalized_update"] = update_norm / max(theta_norm, 1e-12)
+            row[f"{name}_grad_l2"] = float(torch.linalg.norm(grad).item()) if grad is not None else 0.0
+            row[f"{name}_grad_mean_abs"] = float(grad.abs().mean().item()) if grad is not None else 0.0
+        self._aopt_log_jsonl("aopt_parameter_updates.jsonl", row)
+        self._appearance_update_pre = None
 
     def get_gaussian_param_groups(self) -> Dict[str, List[Parameter]]:
         # Here we explicitly use the means, scales as parameters so that the user can override this function and
