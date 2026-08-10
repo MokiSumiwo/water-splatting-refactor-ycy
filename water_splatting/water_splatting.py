@@ -24,7 +24,7 @@ import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import numpy as np
 import torch
@@ -208,6 +208,14 @@ class WaterSplattingModelConfig(ModelConfig):
     """Comma-separated training steps where AOPT LR diagnostics are written."""
     appearance_update_audit_steps: str = "100,1000,5000,10000,14999"
     """Comma-separated training steps where AOPT one-step update diagnostics are written."""
+    medium_hold_start_step: int = -1
+    """Checkpoint boundary after which medium parameters are temporarily held. Disabled when negative."""
+    medium_hold_end_step: int = -1
+    """Last training update whose medium optimizer update is skipped. Disabled when <= start."""
+    medium_hold_audit_log_dir: Optional[str] = None
+    """Optional directory for medium-hold schedule and update JSONL diagnostics."""
+    medium_hold_audit_steps: str = "10001,10500,11000,11500,12000,12500,12501,13000,14000,14999"
+    """Comma-separated training steps where medium-hold diagnostics are written."""
 
 
 class WaterSplattingModel(Model):
@@ -328,6 +336,8 @@ class WaterSplattingModel(Model):
         self.step = 0
         self._appearance_lr_scale_applied = False
         self._appearance_update_pre: Optional[Dict[str, Union[int, torch.Tensor]]] = None
+        self._medium_hold_update_pre: Optional[Dict[str, Any]] = None
+        self._medium_hold_last_active: Optional[bool] = None
 
         self.crop_box: Optional[OrientedBox] = None
         if self.config.background_color == "random":
@@ -725,11 +735,25 @@ class WaterSplattingModel(Model):
                 args=[training_callback_attributes.optimizers],
             )
         )
+        cbs.append(
+            TrainingCallback(
+                [TrainingCallbackLocation.BEFORE_TRAIN_ITERATION],
+                self.medium_hold_before_train_iteration,
+                args=[training_callback_attributes.optimizers],
+            )
+        )
         # The order of these matters
         cbs.append(
             TrainingCallback(
                 [TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
                 self.aopt_after_train_iteration,
+            )
+        )
+        cbs.append(
+            TrainingCallback(
+                [TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
+                self.medium_hold_after_train_iteration,
+                args=[training_callback_attributes.optimizers],
             )
         )
         cbs.append(
@@ -876,6 +900,276 @@ class WaterSplattingModel(Model):
             row[f"{name}_grad_mean_abs"] = float(grad.abs().mean().item()) if grad is not None else 0.0
         self._aopt_log_jsonl("aopt_parameter_updates.jsonl", row)
         self._appearance_update_pre = None
+
+    def _medium_hold_enabled(self) -> bool:
+        start = int(self.config.medium_hold_start_step)
+        end = int(self.config.medium_hold_end_step)
+        return start >= 0 and end > start
+
+    def _medium_hold_active(self, step: int) -> bool:
+        """Return True for training updates whose medium optimizer step is skipped.
+
+        The schedule is defined by checkpoint boundaries: after loading a checkpoint
+        saved at ``medium_hold_start_step``, the first held update is
+        ``start + 1`` and the last held update is ``medium_hold_end_step``.
+        This gives exactly 2500 held updates for a 10000->12500 schedule.
+        """
+
+        if not self._medium_hold_enabled():
+            return False
+        start = int(self.config.medium_hold_start_step)
+        end = int(self.config.medium_hold_end_step)
+        return start < int(step) <= end
+
+    def _medium_hold_phase(self, step: int) -> str:
+        if not self._medium_hold_enabled():
+            return "DISABLED"
+        if self._medium_hold_active(step):
+            return "MEDIUM_HOLD"
+        if int(step) > int(self.config.medium_hold_end_step):
+            return "JOINT"
+        return "PRE_HOLD"
+
+    def _medium_hold_groups(self) -> Tuple[str, str]:
+        return ("medium_mlp", "direction_encoding")
+
+    def _medium_hold_log_jsonl(self, filename: str, row: Dict[str, Any]) -> None:
+        if not self.config.medium_hold_audit_log_dir:
+            return
+        path = Path(os.path.expanduser(self.config.medium_hold_audit_log_dir)) / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf8") as handle:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+    def _parse_medium_hold_audit_steps(self) -> set[int]:
+        steps = self._parse_aopt_steps(self.config.medium_hold_audit_steps)
+        if self._medium_hold_enabled():
+            start = int(self.config.medium_hold_start_step)
+            end = int(self.config.medium_hold_end_step)
+            steps.update({start + 1, end, end + 1})
+        return steps
+
+    def _set_medium_requires_grad(self, enabled: bool) -> None:
+        for group in self._medium_hold_groups():
+            params = getattr(self, group).parameters()
+            for param in params:
+                param.requires_grad_(enabled)
+
+    def _snapshot_parameters(self, optimizers: Optimizers, groups: Tuple[str, ...]) -> Dict[str, List[torch.Tensor]]:
+        snapshots: Dict[str, List[torch.Tensor]] = {}
+        for group in groups:
+            tensors = []
+            for param in optimizers.parameters.get(group, []):
+                tensors.append(param.detach().clone())
+            snapshots[group] = tensors
+        return snapshots
+
+    def _snapshot_optimizer_state(self, optimizers: Optimizers, groups: Tuple[str, ...]) -> Dict[str, List[Dict[str, Any]]]:
+        snapshots: Dict[str, List[Dict[str, Any]]] = {}
+        for group in groups:
+            optimizer = optimizers.optimizers.get(group)
+            if optimizer is None:
+                snapshots[group] = []
+                continue
+            group_rows: List[Dict[str, Any]] = []
+            for param_group in optimizer.param_groups:
+                for param in param_group["params"]:
+                    state = optimizer.state.get(param, {})
+                    row: Dict[str, Any] = {}
+                    for key in ("exp_avg", "exp_avg_sq"):
+                        value = state.get(key)
+                        row[key] = value.detach().clone() if isinstance(value, torch.Tensor) else None
+                    step_value = state.get("step")
+                    if isinstance(step_value, torch.Tensor):
+                        row["step"] = step_value.detach().clone()
+                    elif step_value is None:
+                        row["step"] = None
+                    else:
+                        row["step"] = float(step_value)
+                    group_rows.append(row)
+            snapshots[group] = group_rows
+        return snapshots
+
+    def _write_param_delta(
+        self,
+        row: Dict[str, Any],
+        prefix: str,
+        before: Dict[str, List[torch.Tensor]],
+        optimizers: Optimizers,
+        groups: Tuple[str, ...],
+    ) -> None:
+        for group in groups:
+            current = list(optimizers.parameters.get(group, []))
+            old = before.get(group, [])
+            if len(current) != len(old) or any(param.shape != old_param.shape for param, old_param in zip(current, old)):
+                row[f"{prefix}_{group}_status"] = "shape_changed"
+                continue
+            max_abs = 0.0
+            l2_sq = 0.0
+            theta_sq = 0.0
+            for param, old_param in zip(current, old):
+                delta = param.detach().float() - old_param.to(device=param.device, dtype=torch.float32)
+                max_abs = max(max_abs, float(delta.abs().max().item()) if delta.numel() else 0.0)
+                l2_sq += float(delta.square().sum().item())
+                theta_sq += float(old_param.float().square().sum().item())
+            row[f"{prefix}_{group}_status"] = "ok"
+            row[f"{prefix}_{group}_max_abs_delta"] = max_abs
+            row[f"{prefix}_{group}_l2_delta"] = math.sqrt(l2_sq)
+            row[f"{prefix}_{group}_normalized_l2_delta"] = math.sqrt(l2_sq) / max(math.sqrt(theta_sq), 1e-12)
+
+    def _write_optimizer_state_delta(
+        self,
+        row: Dict[str, Any],
+        before: Dict[str, List[Dict[str, Any]]],
+        optimizers: Optimizers,
+        groups: Tuple[str, ...],
+    ) -> None:
+        after = self._snapshot_optimizer_state(optimizers, groups)
+        for group in groups:
+            old_rows = before.get(group, [])
+            new_rows = after.get(group, [])
+            if len(old_rows) != len(new_rows):
+                row[f"{group}_optimizer_state_status"] = "shape_changed"
+                continue
+            row[f"{group}_optimizer_state_status"] = "ok"
+            for state_key in ("exp_avg", "exp_avg_sq"):
+                max_abs = 0.0
+                l2_sq = 0.0
+                valid = False
+                for old_state, new_state in zip(old_rows, new_rows):
+                    old_tensor = old_state.get(state_key)
+                    new_tensor = new_state.get(state_key)
+                    if not isinstance(old_tensor, torch.Tensor) or not isinstance(new_tensor, torch.Tensor):
+                        continue
+                    valid = True
+                    delta = new_tensor.float() - old_tensor.to(device=new_tensor.device, dtype=torch.float32)
+                    max_abs = max(max_abs, float(delta.abs().max().item()) if delta.numel() else 0.0)
+                    l2_sq += float(delta.square().sum().item())
+                row[f"{group}_{state_key}_max_abs_delta"] = max_abs if valid else 0.0
+                row[f"{group}_{state_key}_l2_delta"] = math.sqrt(l2_sq) if valid else 0.0
+
+            step_delta = 0.0
+            valid_step = False
+            for old_state, new_state in zip(old_rows, new_rows):
+                old_step = old_state.get("step")
+                new_step = new_state.get("step")
+                if isinstance(old_step, torch.Tensor):
+                    old_value = float(old_step.detach().cpu().reshape(-1)[0].item())
+                elif old_step is None:
+                    old_value = 0.0
+                else:
+                    old_value = float(old_step)
+                if isinstance(new_step, torch.Tensor):
+                    new_value = float(new_step.detach().cpu().reshape(-1)[0].item())
+                elif new_step is None:
+                    new_value = 0.0
+                else:
+                    new_value = float(new_step)
+                step_delta = max(step_delta, abs(new_value - old_value))
+                valid_step = True
+            row[f"{group}_optimizer_step_max_delta"] = step_delta if valid_step else 0.0
+
+    def _write_grad_summary(self, row: Dict[str, Any], optimizers: Optimizers, groups: Tuple[str, ...]) -> None:
+        for group in groups:
+            grad_l2_sq = 0.0
+            grad_max_abs = 0.0
+            grad_param_count = 0
+            for param in optimizers.parameters.get(group, []):
+                if param.grad is None:
+                    continue
+                grad = param.grad.detach().float()
+                grad_l2_sq += float(grad.square().sum().item())
+                grad_max_abs = max(grad_max_abs, float(grad.abs().max().item()) if grad.numel() else 0.0)
+                grad_param_count += 1
+            row[f"{group}_grad_l2"] = math.sqrt(grad_l2_sq)
+            row[f"{group}_grad_max_abs"] = grad_max_abs
+            row[f"{group}_grad_param_count"] = grad_param_count
+
+    def medium_hold_before_train_iteration(self, optimizers: Optimizers, step: int) -> None:
+        active = self._medium_hold_active(step)
+        if self._medium_hold_enabled():
+            self._set_medium_requires_grad(not active)
+        self._medium_hold_last_active = active
+
+        if not self._medium_hold_enabled():
+            return
+        audit_steps = self._parse_medium_hold_audit_steps()
+        if int(step) not in audit_steps:
+            return
+
+        medium_groups = self._medium_hold_groups()
+        object_groups = ("features_dc", "features_rest", "means", "scales", "opacities")
+        self._medium_hold_update_pre = {
+            "step": int(step),
+            "medium_params": self._snapshot_parameters(optimizers, medium_groups),
+            "object_params": self._snapshot_parameters(optimizers, object_groups),
+            "medium_optimizer_state": self._snapshot_optimizer_state(optimizers, medium_groups),
+        }
+
+    def medium_hold_after_train_iteration(self, optimizers: Optimizers, step: int) -> None:
+        if self._medium_hold_update_pre is None:
+            return
+        if int(self._medium_hold_update_pre["step"]) != int(step):
+            return
+
+        active = self._medium_hold_active(step)
+        row: Dict[str, Any] = {
+            "step": int(step),
+            "phase": self._medium_hold_phase(step),
+            "medium_hold_start_step": int(self.config.medium_hold_start_step),
+            "medium_hold_end_step": int(self.config.medium_hold_end_step),
+            "medium_requires_grad": not active,
+            "gaussian_count": int(self.num_points),
+        }
+        for group in self._medium_hold_groups():
+            if group in optimizers.optimizers:
+                row[f"{group}_lr"] = float(optimizers.optimizers[group].param_groups[0]["lr"])
+            if group in optimizers.schedulers:
+                row[f"{group}_scheduler_last_lr"] = float(optimizers.schedulers[group].get_last_lr()[0])
+
+        self._write_param_delta(
+            row,
+            "medium_param",
+            self._medium_hold_update_pre["medium_params"],
+            optimizers,
+            self._medium_hold_groups(),
+        )
+        self._write_optimizer_state_delta(
+            row,
+            self._medium_hold_update_pre["medium_optimizer_state"],
+            optimizers,
+            self._medium_hold_groups(),
+        )
+        self._write_param_delta(
+            row,
+            "object_param",
+            self._medium_hold_update_pre["object_params"],
+            optimizers,
+            ("features_dc", "features_rest", "means", "scales", "opacities"),
+        )
+        self._write_grad_summary(
+            row,
+            optimizers,
+            self._medium_hold_groups() + ("features_dc", "features_rest", "means", "opacities"),
+        )
+        self._medium_hold_log_jsonl("stage_transition_audit.jsonl", row)
+        self._medium_hold_log_jsonl(
+            "lr_scheduler_audit.jsonl",
+            {
+                key: value
+                for key, value in row.items()
+                if key
+                in {
+                    "step",
+                    "phase",
+                    "medium_mlp_lr",
+                    "direction_encoding_lr",
+                    "medium_mlp_scheduler_last_lr",
+                    "direction_encoding_scheduler_last_lr",
+                }
+            },
+        )
+        self._medium_hold_update_pre = None
 
     def get_gaussian_param_groups(self) -> Dict[str, List[Parameter]]:
         # Here we explicitly use the means, scales as parameters so that the user can override this function and

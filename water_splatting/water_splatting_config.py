@@ -6,12 +6,14 @@ from nerfstudio.engine.schedulers import ExponentialDecaySchedulerConfig
 from nerfstudio.engine.optimizers import AdamOptimizerConfig
 from nerfstudio.configs.base_config import ViewerConfig
 from water_splatting.data import CheckpointableFullImageDatamanagerConfig
+from water_splatting.trainer import WaterSplattingTrainer
 from water_splatting.water_splatting import WaterSplattingModelConfig
 
 NUM_STEPS = 15000
 # Base method configuration
 water_splatting_method = MethodSpecification(
     config=TrainerConfig(
+        _target=WaterSplattingTrainer,
         method_name="water-splatting",
         steps_per_eval_image=1000,
         steps_per_eval_batch=0,
@@ -97,6 +99,7 @@ water_splatting_method = MethodSpecification(
 
 water_splatting_method_big = MethodSpecification(
     config=TrainerConfig(
+        _target=WaterSplattingTrainer,
         method_name="water-splatting-big",
         steps_per_eval_image=100,
         steps_per_eval_batch=0,
