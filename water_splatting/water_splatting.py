@@ -165,6 +165,8 @@ class WaterSplattingModelConfig(ModelConfig):
     """main loss to use"""
     ssim_loss: Literal["reg_ssim", "ssim"] = "reg_ssim"
     """ssim loss to use"""
+    photometric_normalization_mode: Literal["relative_pred_detached", "absolute"] = "relative_pred_detached"
+    """Photometric normalization for the main RGB objective. The default preserves historical reg_l1/reg_ssim behavior."""
     stop_split_at: int = 10000
     """stop splitting at this step"""
     sh_degree: int = 3
@@ -1578,17 +1580,23 @@ class WaterSplattingModel(Model):
             gt_img = gt_img * mask
             pred_img = pred_img * mask
 
-        if self.config.main_loss == "l1":
+        if self.config.photometric_normalization_mode == "absolute":
             recon_loss = torch.abs(gt_img - pred_img).mean()
-        elif self.config.main_loss == "reg_l1":
-            recon_loss = torch.abs((gt_img - pred_img) / (pred_img.detach() + 1e-3)).mean()
-        else:
-            recon_loss = (((pred_img - gt_img) / (pred_img.detach() + 1e-3)) ** 2).mean()
-
-        if self.config.ssim_loss != "ssim":
-            simloss = 1 - self.ssim((gt_img / (pred_img.detach() + 1e-3)).permute(2, 0, 1)[None, ...], (pred_img / (pred_img.detach() + 1e-3)).permute(2, 0, 1)[None, ...])
-        else:
             simloss = 1 - self.ssim(gt_img.permute(2, 0, 1)[None, ...], pred_img.permute(2, 0, 1)[None, ...])
+        elif self.config.photometric_normalization_mode == "relative_pred_detached":
+            if self.config.main_loss == "l1":
+                recon_loss = torch.abs(gt_img - pred_img).mean()
+            elif self.config.main_loss == "reg_l1":
+                recon_loss = torch.abs((gt_img - pred_img) / (pred_img.detach() + 1e-3)).mean()
+            else:
+                recon_loss = (((pred_img - gt_img) / (pred_img.detach() + 1e-3)) ** 2).mean()
+
+            if self.config.ssim_loss != "ssim":
+                simloss = 1 - self.ssim((gt_img / (pred_img.detach() + 1e-3)).permute(2, 0, 1)[None, ...], (pred_img / (pred_img.detach() + 1e-3)).permute(2, 0, 1)[None, ...])
+            else:
+                simloss = 1 - self.ssim(gt_img.permute(2, 0, 1)[None, ...], pred_img.permute(2, 0, 1)[None, ...])
+        else:
+            raise ValueError(f"Unknown photometric_normalization_mode: {self.config.photometric_normalization_mode}")
 
         return {
             "main_loss": (1 - self.config.ssim_lambda) * recon_loss + self.config.ssim_lambda * simloss,
