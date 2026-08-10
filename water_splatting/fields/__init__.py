@@ -3,6 +3,7 @@
 from .gaussian_appearance import (
     GaussianColorOutput,
     compute_bounded_gaussian_colors,
+    compute_bounded_headroom_gaussian_colors,
     compute_gaussian_colors,
     compute_gaussian_sh_residual,
 )
@@ -13,6 +14,7 @@ __all__ = [
     "GaussianColorOutput",
     "MediumFieldOutput",
     "compute_bounded_gaussian_colors",
+    "compute_bounded_headroom_gaussian_colors",
     "compute_gaussian_colors",
     "compute_gaussian_sh_residual",
     "get_medium_context_extra_dim",

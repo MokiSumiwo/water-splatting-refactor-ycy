@@ -33,6 +33,7 @@ from water_splatting._torch_impl import quat_to_rotmat
 from water_splatting.fields import (
     DirectionConditionedMediumField,
     compute_bounded_gaussian_colors,
+    compute_bounded_headroom_gaussian_colors,
     compute_gaussian_colors,
     get_medium_context_extra_dim,
 )
@@ -196,8 +197,8 @@ class WaterSplattingModelConfig(ModelConfig):
     """Kept for M1 config compatibility; clean branch does not implement infinite-water ownership."""
     b_inf_mode: Literal["implicit", "tied"] = "implicit"
     """Backscatter tail mode. M1+BND uses tied, where B_inf equals medium_rgb."""
-    intrinsic_color_parameterization: Literal["legacy", "bounded_sh3"] = "legacy"
-    """Gaussian intrinsic color mapping. bounded_sh3 applies sigmoid to active full-SH logits."""
+    intrinsic_color_parameterization: Literal["legacy", "bounded_sh3", "bounded_headroom_sh3"] = "legacy"
+    """Gaussian intrinsic color mapping."""
     bounded_sh_logit_eps: float = 1e-7
     """Epsilon used only for RGB-equivalent bounded-SH seed color logit initialization."""
     appearance_lr_scale: float = 1.0
@@ -299,7 +300,7 @@ class WaterSplattingModel(Model):
             shs = torch.zeros((self.seed_points[1].shape[0], dim_sh, 3)).float().cuda()
             if self.config.sh_degree > 0:
                 seed_rgb = self.seed_points[1] / 255
-                if self.config.intrinsic_color_parameterization == "bounded_sh3":
+                if self.config.intrinsic_color_parameterization in ("bounded_sh3", "bounded_headroom_sh3"):
                     CONSOLE.log("use bounded SH3 intrinsic color parameterization")
                     shs[:, 0, :3] = RGB2SHLogits(seed_rgb, eps=self.config.bounded_sh_logit_eps)
                 else:
@@ -350,7 +351,7 @@ class WaterSplattingModel(Model):
     @property
     def colors(self):
         if self.config.sh_degree > 0:
-            if self.config.intrinsic_color_parameterization == "bounded_sh3":
+            if self.config.intrinsic_color_parameterization in ("bounded_sh3", "bounded_headroom_sh3"):
                 return SHLogits2RGB(self.features_dc)
             return SH2RGB(self.features_dc)
         else:
@@ -1396,6 +1397,16 @@ class WaterSplattingModel(Model):
                 active_sh_degree=n,
             )
             rgbs = bounded_color.rgb
+        elif self.config.intrinsic_color_parameterization == "bounded_headroom_sh3":
+            bounded_color = compute_bounded_headroom_gaussian_colors(
+                means=means_crop,
+                features_dc=features_dc_crop,
+                features_rest=features_rest_crop,
+                camera_position=camera.camera_to_worlds[..., :3, 3],
+                sh_degree=self.config.sh_degree,
+                active_sh_degree=n,
+            )
+            rgbs = bounded_color.rgb
         else:
             raise ValueError(f"Unknown intrinsic_color_parameterization: {self.config.intrinsic_color_parameterization}")
 
@@ -1472,17 +1483,33 @@ class WaterSplattingModel(Model):
             "tau_D": tau_d,
             "appearance_active_sh_degree": rgbs.new_tensor(float(n)),
             "intrinsic_color_parameterization": rgbs.new_tensor(
-                1.0 if self.config.intrinsic_color_parameterization == "bounded_sh3" else 0.0
+                {
+                    "legacy": 0.0,
+                    "bounded_sh3": 1.0,
+                    "bounded_headroom_sh3": 2.0,
+                }[self.config.intrinsic_color_parameterization]
             ),
             "gaussian_view_rgb": rgbs.detach(),
             "gaussian_visible_mask": (self.radii > 0).reshape(-1).detach(),
             "projected_gaussian_depths": depths.detach(),
         }
         if bounded_color is not None:
-            outputs["gaussian_view_logits"] = bounded_color.logits
-            outputs["gaussian_sigmoid_derivative"] = bounded_color.sigmoid_derivative
-            outputs["gaussian_view_dc_rgb"] = bounded_color.dc_rgb
-            outputs["gaussian_view_dc_logits"] = bounded_color.dc_logits
+            if bounded_color.logits is not None:
+                outputs["gaussian_view_logits"] = bounded_color.logits
+            if bounded_color.sigmoid_derivative is not None:
+                outputs["gaussian_sigmoid_derivative"] = bounded_color.sigmoid_derivative
+            if bounded_color.dc_rgb is not None:
+                outputs["gaussian_view_dc_rgb"] = bounded_color.dc_rgb
+            if bounded_color.dc_logits is not None:
+                outputs["gaussian_view_dc_logits"] = bounded_color.dc_logits
+            if bounded_color.sh_residual is not None:
+                outputs["gaussian_sh_residual"] = bounded_color.sh_residual
+            if bounded_color.color_residual is not None:
+                outputs["gaussian_color_residual"] = bounded_color.color_residual
+            if bounded_color.positive_utilization is not None:
+                outputs["gaussian_headroom_u_pos"] = bounded_color.positive_utilization
+            if bounded_color.negative_utilization is not None:
+                outputs["gaussian_headroom_u_neg"] = bounded_color.negative_utilization
         return outputs  # type: ignore
         
     def get_gt_img(self, image: torch.Tensor):

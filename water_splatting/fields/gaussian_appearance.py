@@ -19,6 +19,10 @@ class GaussianColorOutput:
     sigmoid_derivative: Tensor | None = None
     dc_rgb: Tensor | None = None
     dc_logits: Tensor | None = None
+    sh_residual: Tensor | None = None
+    color_residual: Tensor | None = None
+    positive_utilization: Tensor | None = None
+    negative_utilization: Tensor | None = None
 
 
 def _sh_viewdirs(means: Tensor, camera_position: Tensor) -> Tensor:
@@ -76,6 +80,62 @@ def compute_bounded_gaussian_colors(
         sigmoid_derivative=rgb * (1.0 - rgb),
         dc_rgb=torch.sigmoid(dc_logits),
         dc_logits=dc_logits,
+        sh_residual=logits - dc_logits,
+        color_residual=rgb - torch.sigmoid(dc_logits),
+    )
+
+
+def compute_bounded_headroom_gaussian_colors(
+    *,
+    means: Tensor,
+    features_dc: Tensor,
+    features_rest: Tensor,
+    camera_position: Tensor,
+    sh_degree: int,
+    active_sh_degree: int,
+) -> GaussianColorOutput:
+    """Compute bounded headroom-SH Gaussian RGB values.
+
+    The degree-0 SH contribution is interpreted as the base logit ``s0``.
+    The active non-DC SH contribution ``r`` is mapped through asymmetric
+    positive/negative RGB headroom while preserving the BND-v1 first-order
+    Jacobian at ``r=0``.
+    """
+
+    colors = torch.cat((features_dc[:, None, :], features_rest), dim=1)
+    if sh_degree > 0:
+        viewdirs = _sh_viewdirs(means, camera_position)
+        full_logits = spherical_harmonics(active_sh_degree, viewdirs, colors)
+        dc_logits = spherical_harmonics(0, viewdirs, colors[:, :1, :])
+    else:
+        full_logits = colors[:, 0, :]
+        dc_logits = full_logits
+
+    c0 = torch.sigmoid(dc_logits)
+    residual = full_logits - dc_logits
+    positive_rgb = c0 + (1.0 - c0) * torch.tanh(c0 * residual)
+    negative_rgb = c0 + c0 * torch.tanh((1.0 - c0) * residual)
+    rgb = torch.where(residual >= 0.0, positive_rgb, negative_rgb)
+    color_residual = rgb - c0
+    positive_utilization = torch.where(
+        color_residual > 0.0,
+        color_residual / (1.0 - c0).clamp_min(1e-8),
+        torch.zeros_like(color_residual),
+    )
+    negative_utilization = torch.where(
+        color_residual < 0.0,
+        (-color_residual) / c0.clamp_min(1e-8),
+        torch.zeros_like(color_residual),
+    )
+    return GaussianColorOutput(
+        rgb=rgb,
+        logits=full_logits,
+        dc_rgb=c0,
+        dc_logits=dc_logits,
+        sh_residual=residual,
+        color_residual=color_residual,
+        positive_utilization=positive_utilization,
+        negative_utilization=negative_utilization,
     )
 
 
