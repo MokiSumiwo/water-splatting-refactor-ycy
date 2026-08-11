@@ -41,6 +41,7 @@ from water_splatting.rendering import UnderwaterRasterizer
 from water_splatting.sh import num_sh_bases
 from pytorch_msssim import SSIM
 from torch.nn import Parameter
+from torchmetrics.functional.regression import pearson_corrcoef
 from typing_extensions import Literal
 
 from nerfstudio.cameras.cameras import Cameras
@@ -219,6 +220,10 @@ class WaterSplattingModelConfig(ModelConfig):
     """Optional directory for medium-hold schedule and update JSONL diagnostics."""
     medium_hold_audit_steps: str = "10001,10500,11000,11500,12000,12500,12501,13000,14000,14999"
     """Comma-separated training steps where medium-hold diagnostics are written."""
+    coarse_depth_supervision_enabled: bool = False
+    """Enable SeaFree-style coarse-depth supervision from batch['depth_image']; disabled preserves old configs."""
+    coarse_depth_supervision_weight: float = 0.1
+    """Weight for SeaFree-style coarse-depth supervision."""
 
 
 class WaterSplattingModel(Model):
@@ -1570,6 +1575,8 @@ class WaterSplattingModel(Model):
         gt_img = self.composite_with_background(self.get_gt_img(batch["image"]), outputs["background"])
         pred_img = outputs["pred_image"]
 
+        mask = None
+
         # Set masked part of both ground-truth and rendered image to black.
         # This is a little bit sketchy for the SSIM loss.
         if "mask" in batch:
@@ -1598,9 +1605,53 @@ class WaterSplattingModel(Model):
         else:
             raise ValueError(f"Unknown photometric_normalization_mode: {self.config.photometric_normalization_mode}")
 
-        return {
+        loss_dict = {
             "main_loss": (1 - self.config.ssim_lambda) * recon_loss + self.config.ssim_lambda * simloss,
         }
+        if self.config.coarse_depth_supervision_enabled:
+            coarse_depth_raw = self._seafree_coarse_depth_loss(outputs, batch, mask)
+            coarse_depth_weighted = float(self.config.coarse_depth_supervision_weight) * coarse_depth_raw
+            loss_dict["coarse_depth_loss"] = coarse_depth_weighted
+            if metrics_dict is not None:
+                metrics_dict["coarse_depth_loss_raw"] = coarse_depth_raw.detach()
+                metrics_dict["coarse_depth_loss_weighted"] = coarse_depth_weighted.detach()
+        return loss_dict
+
+    def _seafree_coarse_depth_loss(
+        self,
+        outputs: Dict[str, torch.Tensor],
+        batch: Dict[str, torch.Tensor],
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """SeaFree fixed-reference coarse-depth term: 1 - corr(pseudo_depth, 1/(10*depth+1))."""
+
+        if "depth_image" not in batch:
+            raise KeyError(
+                "coarse_depth_supervision_enabled=True requires batch['depth_image']; "
+                "enable datamanager load_depths and set dataparser depths_path."
+            )
+        pseudo_depth = self._downscale_if_required(batch["depth_image"]).to(self.device)
+        if pseudo_depth.ndim == 2:
+            pseudo_depth = pseudo_depth[..., None]
+        pseudo_depth = pseudo_depth / pseudo_depth.max().clamp_min(1e-8)
+        rendered_depth = outputs["depth"]
+        if rendered_depth.ndim == 2:
+            rendered_depth = rendered_depth[..., None]
+        accumulation = outputs.get("accumulation")
+        if accumulation is not None:
+            if accumulation.ndim == 2:
+                accumulation = accumulation[..., None]
+            valid_depth = rendered_depth[accumulation > 0].detach()
+            if valid_depth.numel() > 0:
+                depth_quantile = valid_depth.quantile(0.95)
+                rendered_depth = torch.where(accumulation > 0, rendered_depth, depth_quantile)
+        if mask is not None:
+            pseudo_depth = pseudo_depth * mask
+            rendered_depth = rendered_depth * mask
+        pseudo_depth_flattened = pseudo_depth.flatten()
+        rendered_depth_flattened = rendered_depth.flatten()
+        approximate_rendered_disparity = 1 / (rendered_depth_flattened * 10 + 1)
+        return 1 - pearson_corrcoef(pseudo_depth_flattened, approximate_rendered_disparity)
 
     @torch.no_grad()
     def get_outputs_for_camera(self, camera: Cameras, obb_box: Optional[OrientedBox] = None) -> Dict[str, torch.Tensor]:

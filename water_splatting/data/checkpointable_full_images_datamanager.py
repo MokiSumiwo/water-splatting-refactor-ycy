@@ -5,6 +5,7 @@ from __future__ import annotations
 import pickle
 import random
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Any, Dict, List, Type
 
 import numpy as np
@@ -14,6 +15,7 @@ from nerfstudio.data.datamanagers.full_images_datamanager import (
     FullImageDatamanager,
     FullImageDatamanagerConfig,
 )
+from nerfstudio.data.datasets.depth_dataset import DepthDataset
 from nerfstudio.data.datasets.base_dataset import InputDataset
 from nerfstudio.utils.rich_utils import CONSOLE
 
@@ -33,6 +35,8 @@ class CheckpointableFullImageDatamanagerConfig(FullImageDatamanagerConfig):
     """Config for the checkpointable full-image datamanager."""
 
     _target: Type = field(default_factory=lambda: CheckpointableFullImageDatamanager)
+    load_depths: bool = False
+    """Load dataparser depth images into batches. Disabled preserves historical WaterSplatting behavior."""
 
 
 class CheckpointableFullImageDatamanager(FullImageDatamanager[InputDataset]):
@@ -46,6 +50,28 @@ class CheckpointableFullImageDatamanager(FullImageDatamanager[InputDataset]):
     """
 
     _STATE_PREFIX = "_ws_full_image_sampler_"
+
+    @cached_property
+    def dataset_type(self) -> Type[InputDataset]:
+        """Select the standard image dataset unless a diagnostic explicitly asks for depth images."""
+
+        if self.config.load_depths:
+            return DepthDataset
+        return super().dataset_type
+
+    def _load_images(self, split: str, cache_images_device: str) -> List[Dict[str, torch.Tensor]]:
+        """Load full-image caches and keep optional depth tensors on the same cache device."""
+
+        caches = super()._load_images(split, cache_images_device)
+        if cache_images_device == "gpu":
+            for cache in caches:
+                if "depth_image" in cache:
+                    cache["depth_image"] = cache["depth_image"].to(self.device)
+        elif cache_images_device == "cpu":
+            for cache in caches:
+                if "depth_image" in cache:
+                    cache["depth_image"] = cache["depth_image"].pin_memory()
+        return caches
 
     def _save_to_state_dict(
         self,
