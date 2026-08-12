@@ -24,7 +24,7 @@ import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Type, Union
 
 import numpy as np
 import torch
@@ -170,6 +170,14 @@ class WaterSplattingModelConfig(ModelConfig):
     """Photometric normalization for the main RGB objective. The default preserves historical reg_l1/reg_ssim behavior."""
     stop_split_at: int = 10000
     """stop splitting at this step"""
+    refinement_priority_mode: Literal["baseline", "locked_hardness", "brightness_control"] = "baseline"
+    """Optional budget-matched refinement selection priority. Baseline preserves the original masks."""
+    refinement_reference_budget_schedule: Optional[str] = None
+    """JSON schedule containing reference split/duplicate quotas keyed by absolute refinement step."""
+    refinement_guidance_sidecar: Optional[str] = None
+    """Optional torch sidecar with frozen per-Gaussian hardness/brightness guidance vectors."""
+    refinement_guidance_pool_multiplier: int = 2
+    """Fixed candidate-pool multiplier for guided refinement selection."""
     sh_degree: int = 3
     """maximum degree of spherical harmonics to use"""
     rasterize_mode: Literal["classic", "antialiased"] = "classic"
@@ -346,6 +354,10 @@ class WaterSplattingModel(Model):
         self._appearance_update_pre: Optional[Dict[str, Union[int, torch.Tensor]]] = None
         self._medium_hold_update_pre: Optional[Dict[str, Any]] = None
         self._medium_hold_last_active: Optional[bool] = None
+        self._refinement_guidance_hardness: Optional[torch.Tensor] = None
+        self._refinement_guidance_brightness: Optional[torch.Tensor] = None
+        self._refinement_budget_schedule: Optional[Dict[str, Any]] = None
+        self._refinement_last_event: Dict[str, Any] = {}
 
         self.crop_box: Optional[OrientedBox] = None
         if self.config.background_color == "random":
@@ -546,7 +558,24 @@ class WaterSplattingModel(Model):
         assert step == self.step
         if self.step <= self.config.warmup_length:
             return
+        priority_mode = getattr(self.config, "refinement_priority_mode", "baseline")
+        self._refinement_last_event = {
+            "step": int(self.step),
+            "priority_mode": priority_mode,
+            "refinement_called": True,
+            "K_split": 0,
+            "K_duplicate": 0,
+            "quota_shortfall_split": 0,
+            "quota_shortfall_duplicate": 0,
+            "N_before": int(self.num_points),
+            "N_after": int(self.num_points),
+            "N_pruned": 0,
+            "children_added": 0,
+            "opacity_reset": False,
+        }
         with torch.no_grad():
+            new_guidance_h = None
+            new_guidance_b = None
             # Offset all the opacity reset logic by refine_every so that we don't
             # save checkpoints right when the opacity is reset (saves every 2k)
             # then cull
@@ -563,22 +592,87 @@ class WaterSplattingModel(Model):
 
                 high_grads = (avg_grad_norm > self.config.densify_grad_thresh).squeeze()
 
-                splits = (self.scales.exp().max(dim=-1).values > self.config.densify_size_thresh).squeeze()
+                split_types = (self.scales.exp().max(dim=-1).values > self.config.densify_size_thresh).squeeze()
                 if self.step < self.config.stop_screen_size_at:
-                    splits |= (self.max_2Dsize > self.config.split_screen_size).squeeze()
-                splits &= high_grads
+                    split_types |= (self.max_2Dsize > self.config.split_screen_size).squeeze()
+
+                baseline_splits = split_types & high_grads
+                duplicate_types = ~((self.scales.exp().max(dim=-1).values > self.config.densify_size_thresh).squeeze())
+                baseline_dups = duplicate_types & high_grads
+                if priority_mode == "baseline":
+                    splits = baseline_splits
+                    dups = baseline_dups
+                    self._refinement_last_event.update(
+                        {
+                            "K_split": int(splits.sum().item()),
+                            "K_duplicate": int(dups.sum().item()),
+                            "selection_mode": "original_threshold_masks",
+                        }
+                    )
+                else:
+                    if self._refinement_budget_schedule is None:
+                        raise RuntimeError(f"{priority_mode} requires a reference refinement budget schedule")
+                    ref_split = self._reference_quota("split")
+                    ref_dup = self._reference_quota("duplicate")
+                    if ref_split is None or ref_dup is None:
+                        raise RuntimeError(f"Missing reference quotas for refinement step {self.step}")
+                    splits, split_stats = self._guided_selection(
+                        base_score=avg_grad_norm.reshape(-1),
+                        type_mask=split_types.reshape(-1),
+                        kind="split",
+                        quota=ref_split,
+                    )
+                    dups, dup_stats = self._guided_selection(
+                        base_score=avg_grad_norm.reshape(-1),
+                        type_mask=duplicate_types.reshape(-1),
+                        kind="duplicate",
+                        quota=ref_dup,
+                    )
+                    self._refinement_last_event.update(
+                        {
+                            "K_split": int(splits.sum().item()),
+                            "K_duplicate": int(dups.sum().item()),
+                            "selection_mode": priority_mode,
+                            "split_selection": split_stats,
+                            "duplicate_selection": dup_stats,
+                            "quota_shortfall_split": int(split_stats["quota_shortfall"]),
+                            "quota_shortfall_duplicate": int(dup_stats["quota_shortfall"]),
+                        }
+                    )
 
                 nsamps = self.config.n_split_samples
                 split_params = self.split_gaussians(splits, nsamps)
 
-                dups = (self.scales.exp().max(dim=-1).values <= self.config.densify_size_thresh).squeeze()
-                dups &= high_grads
-
                 dup_params = self.dup_gaussians(dups)
+                self._refinement_last_event["children_added"] = int(nsamps * splits.sum().item() + dups.sum().item())
+                guidance_h = self._refinement_guidance_hardness
+                guidance_b = self._refinement_guidance_brightness
+                if priority_mode != "baseline":
+                    assert guidance_h is not None and guidance_b is not None
+                    new_guidance_h = torch.cat(
+                        [
+                            guidance_h,
+                            guidance_h[splits].repeat(nsamps),
+                            guidance_h[dups],
+                        ],
+                        dim=0,
+                    )
+                    new_guidance_b = torch.cat(
+                        [
+                            guidance_b,
+                            guidance_b[splits].repeat(nsamps),
+                            guidance_b[dups],
+                        ],
+                        dim=0,
+                    )
                 for name, param in self.gauss_params.items():
                     self.gauss_params[name] = torch.nn.Parameter(
                         torch.cat([param.detach(), split_params[name], dup_params[name]], dim=0)
                     )
+                if priority_mode != "baseline":
+                    assert new_guidance_h is not None and new_guidance_b is not None
+                    self._refinement_guidance_hardness = new_guidance_h
+                    self._refinement_guidance_brightness = new_guidance_b
 
                 # append zeros to the max_2Dsize tensor
                 self.max_2Dsize = torch.cat(
@@ -616,6 +710,14 @@ class WaterSplattingModel(Model):
                 deleted_mask = None
     
             if deleted_mask is not None:
+                self._refinement_last_event["N_pruned"] = int(deleted_mask.sum().item())
+                if priority_mode != "baseline":
+                    if new_guidance_h is not None and new_guidance_b is not None:
+                        self._refinement_guidance_hardness = new_guidance_h[~deleted_mask]
+                        self._refinement_guidance_brightness = new_guidance_b[~deleted_mask]
+                    elif self._refinement_guidance_hardness is not None and self._refinement_guidance_brightness is not None:
+                        self._refinement_guidance_hardness = self._refinement_guidance_hardness[~deleted_mask]
+                        self._refinement_guidance_brightness = self._refinement_guidance_brightness[~deleted_mask]
                 self.remove_from_all_optim(optimizers, deleted_mask)
 
                 # reset the exp of optimizer
@@ -641,11 +743,13 @@ class WaterSplattingModel(Model):
                 param_state = optim.state[param]
                 param_state["exp_avg"] = torch.zeros_like(param_state["exp_avg"])
                 param_state["exp_avg_sq"] = torch.zeros_like(param_state["exp_avg_sq"])
+                self._refinement_last_event["opacity_reset"] = True
             
             self.xys_grad_norm = None
             self.vis_counts = None
             self.depths_accum = None
             self.max_2Dsize = None
+            self._refinement_last_event["N_after"] = int(self.num_points)
 
     def cull_gaussians(self, extra_cull_mask: Optional[torch.Tensor] = None):
         """
@@ -1197,6 +1301,120 @@ class WaterSplattingModel(Model):
         gps["medium_mlp"] = list(self.medium_mlp.parameters())
         gps["direction_encoding"] = list(self.direction_encoding.parameters())
         return gps
+
+    def set_refinement_guidance(
+        self,
+        hardness: Optional[torch.Tensor],
+        brightness: Optional[torch.Tensor],
+    ) -> None:
+        """Attach frozen sidecar scores without making them model parameters."""
+        mode = getattr(self.config, "refinement_priority_mode", "baseline")
+        if mode == "baseline":
+            self._refinement_guidance_hardness = None
+            self._refinement_guidance_brightness = None
+            return
+        if hardness is None or brightness is None:
+            raise ValueError(f"{mode} requires both hardness and brightness guidance")
+        h = torch.as_tensor(hardness, device=self.device, dtype=torch.float32).detach()
+        b = torch.as_tensor(brightness, device=self.device, dtype=torch.float32).detach()
+        if h.ndim != 1 or b.ndim != 1 or h.shape != b.shape:
+            raise ValueError(f"Guidance vectors must be matching 1D tensors, got {h.shape} and {b.shape}")
+        if h.shape[0] != self.num_points:
+            raise ValueError(f"Guidance length {h.shape[0]} does not match Gaussian count {self.num_points}")
+        if not bool(torch.isfinite(h).all() and torch.isfinite(b).all()):
+            raise ValueError("Guidance vectors must be finite")
+        if bool((h < 0).any() or (h > 1).any() or (b < 0).any() or (b > 1).any()):
+            raise ValueError("Guidance vectors must be in [0, 1]")
+        self._refinement_guidance_hardness = h
+        self._refinement_guidance_brightness = b
+
+    def set_refinement_budget_schedule(self, schedule: Optional[Mapping[str, Any]]) -> None:
+        """Attach an immutable reference quota schedule for guided branches."""
+        self._refinement_budget_schedule = None if schedule is None else dict(schedule)
+
+    def _guidance_vectors(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        h = self._refinement_guidance_hardness
+        b = self._refinement_guidance_brightness
+        if h is None or b is None:
+            raise RuntimeError("Guidance vectors are not attached")
+        if h.shape[0] != self.num_points or b.shape[0] != self.num_points:
+            raise RuntimeError("Guidance vector length is not aligned with Gaussian population")
+        if not bool(torch.isfinite(h).all() and torch.isfinite(b).all()):
+            raise RuntimeError("Guidance vectors became non-finite")
+        return h, b
+
+    def _reference_quota(self, kind: str) -> Optional[int]:
+        if self._refinement_budget_schedule is None:
+            return None
+        row = self._refinement_budget_schedule.get(str(int(self.step)))
+        if row is None:
+            return None
+        return int(row[f"K_{kind}"])
+
+    def _guided_selection(
+        self,
+        *,
+        base_score: torch.Tensor,
+        type_mask: torch.Tensor,
+        kind: str,
+        quota: int,
+    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        h, b = self._guidance_vectors()
+        if quota <= 0:
+            return torch.zeros_like(type_mask), {
+                "kind": kind,
+                "quota_reference": int(quota),
+                "candidate_count": 0,
+                "pool_count": 0,
+                "selected_count": 0,
+                "quota_shortfall": 0,
+                "below_threshold_fraction": 0.0,
+                "mean_selected_guidance": 0.0,
+                "mean_candidate_guidance": 0.0,
+                "mean_selected_brightness": 0.0,
+                "mean_candidate_brightness": 0.0,
+                "mean_selected_base_score": 0.0,
+                "mean_candidate_base_score": 0.0,
+            }
+        visible = self.max_2Dsize.reshape(-1) > 0
+        valid = type_mask & visible & torch.isfinite(base_score)
+        candidate_indices = torch.where(valid)[0]
+        pool_count = min(int(candidate_indices.numel()), int(getattr(self.config, "refinement_guidance_pool_multiplier", 2)) * int(quota))
+        if pool_count > 0:
+            pool_order = torch.argsort(base_score[candidate_indices], descending=True)[:pool_count]
+            pool = candidate_indices[pool_order]
+        else:
+            pool = candidate_indices
+        mode = getattr(self.config, "refinement_priority_mode", "baseline")
+        guidance = h if mode == "locked_hardness" else b
+        if pool.numel() > 0:
+            pool_score = base_score[pool]
+            pool_rank = torch.empty_like(pool_score, dtype=torch.float32)
+            pool_rank[torch.argsort(pool_score)] = torch.linspace(0.0, 1.0, pool.numel(), device=pool_score.device)
+            priority = 0.5 * pool_rank + 0.5 * guidance[pool]
+            chosen = pool[torch.argsort(priority, descending=True)[: min(int(quota), int(pool.numel()))]]
+        else:
+            chosen = pool
+        selected = torch.zeros_like(type_mask)
+        selected[chosen] = True
+        selected_count = int(chosen.numel())
+        candidate_count = int(candidate_indices.numel())
+        below = float((base_score[chosen] <= self.config.densify_grad_thresh).float().mean().item()) if selected_count else 0.0
+        return selected, {
+            "kind": kind,
+            "quota_reference": int(quota),
+            "candidate_count": candidate_count,
+            "pool_count": int(pool.numel()),
+            "selected_count": selected_count,
+            "quota_shortfall": max(0, int(quota) - selected_count),
+            "below_threshold_fraction": below,
+            "mean_selected_guidance": float(guidance[chosen].mean().item()) if selected_count else 0.0,
+            "mean_candidate_guidance": float(guidance[pool].mean().item()) if pool.numel() else 0.0,
+            "mean_selected_brightness": float(b[chosen].mean().item()) if selected_count else 0.0,
+            "mean_candidate_brightness": float(b[pool].mean().item()) if pool.numel() else 0.0,
+            "mean_selected_base_score": float(base_score[chosen].mean().item()) if selected_count else 0.0,
+            "mean_candidate_base_score": float(base_score[pool].mean().item()) if pool.numel() else 0.0,
+        }
 
     def _get_downscale_factor(self):
         if self.training:
