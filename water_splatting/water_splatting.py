@@ -228,6 +228,16 @@ class WaterSplattingModelConfig(ModelConfig):
     """Optional directory for medium-hold schedule and update JSONL diagnostics."""
     medium_hold_audit_steps: str = "10001,10500,11000,11500,12000,12500,12501,13000,14000,14999"
     """Comma-separated training steps where medium-hold diagnostics are written."""
+    medium_identifiability_enabled: bool = False
+    """Enable BND-MIC beta_D raw contextual variance regularization."""
+    medium_identifiability_weight: float = 0.0
+    """Scalar weight for the BND-MIC regularizer; zero preserves baseline behavior."""
+    medium_identifiability_start_step: int = 0
+    """First step where the BND-MIC regularizer is active when enabled."""
+    medium_identifiability_end_step: int = -1
+    """Last step where BND-MIC is active; negative means no end cutoff."""
+    medium_identifiability_target: Literal["beta_D_raw_variance"] = "beta_D_raw_variance"
+    """Medium-only weak-mode target selected by the IUI3 medium-identifiability preflight."""
     coarse_depth_supervision_enabled: bool = False
     """Enable SeaFree-style coarse-depth supervision from batch['depth_image']; disabled preserves old configs."""
     coarse_depth_supervision_weight: float = 0.1
@@ -1482,6 +1492,28 @@ class WaterSplattingModel(Model):
             b_inf_mode=self._effective_b_inf_mode(),
         )
 
+    def _attach_medium_identifiability_outputs(
+        self,
+        outputs: Dict[str, torch.Tensor],
+        medium: Any,
+        height: int,
+        width: int,
+    ) -> Dict[str, torch.Tensor]:
+        if getattr(self.config, "medium_identifiability_enabled", False) and medium.raw is not None:
+            outputs["medium_raw"] = medium.raw.view(height, width, 9)
+        return outputs
+
+    def _medium_identifiability_active(self) -> bool:
+        if not getattr(self.config, "medium_identifiability_enabled", False):
+            return False
+        if float(getattr(self.config, "medium_identifiability_weight", 0.0)) == 0.0:
+            return False
+        start = int(getattr(self.config, "medium_identifiability_start_step", 0))
+        end = int(getattr(self.config, "medium_identifiability_end_step", -1))
+        if int(self.step) < start:
+            return False
+        return end < 0 or int(self.step) <= end
+
     def get_outputs(self, camera: Cameras, obb_box: Optional[OrientedBox] = None) -> Dict[str, Union[torch.Tensor, List]]:
         """Takes in a Ray Bundle and returns a dictionary of outputs.
 
@@ -1540,13 +1572,13 @@ class WaterSplattingModel(Model):
                 clear = torch.zeros_like(rgb)
                 tau_d = medium_attn * depth
                 transmission = torch.exp(-tau_d.clamp_min(0.0)).clamp(0.0, 1.0)
-                return {"rgb": rgb, "depth": depth, "accumulation": accumulation, "background": medium_rgb,
+                return self._attach_medium_identifiability_outputs({"rgb": rgb, "depth": depth, "accumulation": accumulation, "background": medium_rgb,
                         "rgb_object": torch.zeros_like(rgb), "rgb_clear": torch.zeros_like(rgb),
                         "rgb_clear_clamp": clear, "clear_object_fullsh_raw": clear,
                         "J_gaussian_raw": clear, "J_gaussian": clear, "rgb_medium": medium_rgb,
                         "pred_image": rgb, "medium_rgb": medium_rgb, "medium_bs": medium_bs,
                         "medium_attn": medium_attn, "b_inf": medium.b_inf,
-                        "direct_object_signal": clear, "transmission": transmission, "tau_D": tau_d}
+                        "direct_object_signal": clear, "transmission": transmission, "tau_D": tau_d}, medium, H, W)
         else:
             crop_ids = None
 
@@ -1591,12 +1623,12 @@ class WaterSplattingModel(Model):
             clear = torch.zeros_like(rgb)
             tau_d = medium_attn * depth
             transmission = torch.exp(-tau_d.clamp_min(0.0)).clamp(0.0, 1.0)
-            return {"rgb": rgb, "depth": depth, "accumulation": accumulation, "background": medium_rgb,
+            return self._attach_medium_identifiability_outputs({"rgb": rgb, "depth": depth, "accumulation": accumulation, "background": medium_rgb,
                     "rgb_object": clear, "rgb_clear": clear, "rgb_clear_clamp": clear,
                     "clear_object_fullsh_raw": clear, "J_gaussian_raw": clear, "J_gaussian": clear,
                     "rgb_medium": medium_rgb, "pred_image": rgb, "medium_rgb": medium_rgb,
                     "medium_bs": medium_bs, "medium_attn": medium_attn, "b_inf": medium.b_inf,
-                    "direct_object_signal": clear, "transmission": transmission, "tau_D": tau_d}
+                    "direct_object_signal": clear, "transmission": transmission, "tau_D": tau_d}, medium, H, W)
 
         if self.training:
             self.xys.retain_grad()
@@ -1735,7 +1767,7 @@ class WaterSplattingModel(Model):
                 outputs["gaussian_headroom_u_pos"] = bounded_color.positive_utilization
             if bounded_color.negative_utilization is not None:
                 outputs["gaussian_headroom_u_neg"] = bounded_color.negative_utilization
-        return outputs  # type: ignore
+        return self._attach_medium_identifiability_outputs(outputs, medium, H, W)  # type: ignore
         
     def get_gt_img(self, image: torch.Tensor):
         """Compute groundtruth image with iteration dependent downscale factor for evaluation purpose
@@ -1833,7 +1865,27 @@ class WaterSplattingModel(Model):
             if metrics_dict is not None:
                 metrics_dict["coarse_depth_loss_raw"] = coarse_depth_raw.detach()
                 metrics_dict["coarse_depth_loss_weighted"] = coarse_depth_weighted.detach()
+        if self._medium_identifiability_active():
+            mic_raw = self._medium_identifiability_loss(outputs)
+            mic_weighted = float(self.config.medium_identifiability_weight) * mic_raw
+            loss_dict["medium_identifiability_loss"] = mic_weighted
+            if metrics_dict is not None:
+                metrics_dict["medium_identifiability_loss_raw"] = mic_raw.detach()
+                metrics_dict["medium_identifiability_loss_weighted"] = mic_weighted.detach()
         return loss_dict
+
+    def _medium_identifiability_loss(self, outputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """BND-MIC beta_D raw contextual variance loss."""
+
+        target = getattr(self.config, "medium_identifiability_target", "beta_D_raw_variance")
+        if target != "beta_D_raw_variance":
+            raise ValueError(f"Unsupported medium_identifiability_target: {target}")
+        medium_raw = outputs.get("medium_raw")
+        if medium_raw is None:
+            raise KeyError("medium_identifiability_enabled=True requires outputs['medium_raw']")
+        beta_d_raw = medium_raw[..., 6:9]
+        mean = beta_d_raw.mean(dim=(0, 1), keepdim=True).detach()
+        return (beta_d_raw - mean).square().mean()
 
     def _seafree_coarse_depth_loss(
         self,

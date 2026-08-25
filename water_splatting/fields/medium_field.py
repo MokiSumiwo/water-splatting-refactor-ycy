@@ -27,6 +27,7 @@ class MediumFieldOutput:
     attn: Tensor
     directions: Tensor
     b_inf: Optional[Tensor] = None
+    raw: Optional[Tensor] = None
 
 
 MediumContextMode = Literal[
@@ -154,6 +155,7 @@ class DirectionConditionedMediumField:
             attn=medium_attn,
             directions=directions,
             b_inf=b_inf,
+            raw=medium_base_out,
         )
 
     def _append_context(
