@@ -204,6 +204,12 @@ class WaterSplattingModelConfig(ModelConfig):
     """Multiplier applied after scene-box camera-center normalization."""
     medium_camera_context_dropout: float = 0.0
     """Dropout applied to the 3D camera context feature during training."""
+    medium_camera_context_ablation: bool = False
+    """If True, replace only the 3D camera-center context with the neutral zero feature."""
+    camera_medium_observability_enabled: bool = False
+    """Enable default-off OCMC projection of camera-conditioned medium residuals."""
+    camera_medium_observability_strength: float = 1.0
+    """Blend strength for the detached camera-medium observability projector."""
     infinite_water_enabled: bool = False
     """Kept for M1 config compatibility; clean branch does not implement infinite-water ownership."""
     b_inf_mode: Literal["implicit", "tied"] = "implicit"
@@ -368,6 +374,9 @@ class WaterSplattingModel(Model):
         self._refinement_guidance_brightness: Optional[torch.Tensor] = None
         self._refinement_budget_schedule: Optional[Dict[str, Any]] = None
         self._refinement_last_event: Dict[str, Any] = {}
+        self._camera_medium_observability_projector: Optional[torch.Tensor] = None
+        self._camera_medium_observability_spectrum: Optional[torch.Tensor] = None
+        self._camera_medium_observability_scale: Optional[torch.Tensor] = None
 
         self.crop_box: Optional[OrientedBox] = None
         if self.config.background_color == "random":
@@ -1458,6 +1467,31 @@ class WaterSplattingModel(Model):
             raise ValueError(f"Unsupported b_inf_mode on clean M1+BND branch: {mode}")
         return mode
 
+    def set_camera_medium_observability_projector(
+        self,
+        projector: Optional[torch.Tensor],
+        spectrum: Optional[torch.Tensor] = None,
+        scale: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Install a detached 9-D medium-output projector for the OCMC prototype."""
+
+        if projector is None:
+            self._camera_medium_observability_projector = None
+            self._camera_medium_observability_spectrum = None
+            self._camera_medium_observability_scale = None
+            return
+        if tuple(projector.shape) != (9, 9):
+            raise ValueError(f"camera-medium observability projector must be 9x9, got {tuple(projector.shape)}")
+        if scale is not None and tuple(scale.reshape(-1).shape) != (9,):
+            raise ValueError(f"camera-medium observability scale must have 9 values, got {tuple(scale.shape)}")
+        self._camera_medium_observability_projector = projector.detach().to(device=self.device, dtype=torch.float32)
+        self._camera_medium_observability_spectrum = (
+            spectrum.detach().to(device=self.device, dtype=torch.float32) if spectrum is not None else None
+        )
+        self._camera_medium_observability_scale = (
+            scale.reshape(9).detach().to(device=self.device, dtype=torch.float32) if scale is not None else None
+        )
+
     def _predict_medium(
         self,
         *,
@@ -1488,6 +1522,11 @@ class WaterSplattingModel(Model):
             scene_scale=scene_scale,
             camera_context_scale=getattr(self.config, "medium_camera_context_scale", 1.0),
             camera_context_dropout=getattr(self.config, "medium_camera_context_dropout", 0.0),
+            camera_context_ablation=getattr(self.config, "medium_camera_context_ablation", False),
+            camera_observability_enabled=getattr(self.config, "camera_medium_observability_enabled", False),
+            camera_observability_projector=self._camera_medium_observability_projector,
+            camera_observability_scale=self._camera_medium_observability_scale,
+            camera_observability_strength=getattr(self.config, "camera_medium_observability_strength", 1.0),
             training=self.training,
             b_inf_mode=self._effective_b_inf_mode(),
         )
@@ -1501,6 +1540,16 @@ class WaterSplattingModel(Model):
     ) -> Dict[str, torch.Tensor]:
         if getattr(self.config, "medium_identifiability_enabled", False) and medium.raw is not None:
             outputs["medium_raw"] = medium.raw.view(height, width, 9)
+        if getattr(self.config, "camera_medium_observability_enabled", False):
+            for key, value in (
+                ("camera_medium_raw_unprojected", getattr(medium, "raw_unprojected", None)),
+                ("camera_medium_raw_base", getattr(medium, "raw_base", None)),
+                ("camera_medium_delta_raw", getattr(medium, "camera_delta_raw", None)),
+                ("camera_medium_delta_projected_raw", getattr(medium, "camera_delta_projected_raw", None)),
+                ("camera_medium_delta_suppressed_raw", getattr(medium, "camera_delta_suppressed_raw", None)),
+            ):
+                if value is not None:
+                    outputs[key] = value.view(height, width, 9)
         return outputs
 
     def _medium_identifiability_active(self) -> bool:

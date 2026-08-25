@@ -28,6 +28,11 @@ class MediumFieldOutput:
     directions: Tensor
     b_inf: Optional[Tensor] = None
     raw: Optional[Tensor] = None
+    raw_unprojected: Optional[Tensor] = None
+    raw_base: Optional[Tensor] = None
+    camera_delta_raw: Optional[Tensor] = None
+    camera_delta_projected_raw: Optional[Tensor] = None
+    camera_delta_suppressed_raw: Optional[Tensor] = None
 
 
 MediumContextMode = Literal[
@@ -81,6 +86,11 @@ class DirectionConditionedMediumField:
         scene_scale: Optional[Union[Tensor, float]] = None,
         camera_context_scale: float = 1.0,
         camera_context_dropout: float = 0.0,
+        camera_context_ablation: bool = False,
+        camera_observability_enabled: bool = False,
+        camera_observability_projector: Optional[Tensor] = None,
+        camera_observability_scale: Optional[Tensor] = None,
+        camera_observability_strength: float = 1.0,
         training: bool = False,
         b_inf_mode: Literal["implicit", "tied"] = "implicit",
     ) -> MediumFieldOutput:
@@ -111,6 +121,7 @@ class DirectionConditionedMediumField:
             scene_scale=scene_scale,
             camera_context_scale=camera_context_scale,
             camera_context_dropout=camera_context_dropout,
+            camera_context_ablation=camera_context_ablation,
             training=training,
         )
         outputs_shape = directions.shape[:-1]
@@ -119,6 +130,48 @@ class DirectionConditionedMediumField:
             medium_base_out = self.medium_mlp(mlp_input)
         else:
             medium_base_out = self.medium_mlp(mlp_input.float())
+
+        raw_unprojected = None
+        raw_neutral = None
+        camera_delta_raw = None
+        camera_delta_projected_raw = None
+        camera_delta_suppressed_raw = None
+        if camera_observability_enabled and camera_observability_projector is not None:
+            neutral_input = self._append_context(
+                directions_encoded=directions_encoded,
+                image_xx=image_xx,
+                image_yy=image_yy,
+                height=height,
+                width=width,
+                mode=context_mode,
+                camera_center=camera_center,
+                scene_center=scene_center,
+                scene_scale=scene_scale,
+                camera_context_scale=camera_context_scale,
+                camera_context_dropout=0.0,
+                camera_context_ablation=True,
+                training=training,
+            )
+            if mlp_type == "tcnn":
+                raw_neutral = self.medium_mlp(neutral_input)
+            else:
+                raw_neutral = self.medium_mlp(neutral_input.float())
+            raw_unprojected = medium_base_out
+            camera_delta_raw = raw_unprojected - raw_neutral
+            projector = camera_observability_projector.to(device=camera_delta_raw.device, dtype=camera_delta_raw.dtype)
+            if camera_observability_scale is None:
+                camera_delta_projected_raw = camera_delta_raw @ projector.T
+            else:
+                scale = camera_observability_scale.to(device=camera_delta_raw.device, dtype=camera_delta_raw.dtype)
+                scale = scale.reshape(1, 9).clamp_min(1e-6)
+                delta_std = camera_delta_raw / scale
+                camera_delta_projected_raw = (delta_std @ projector.T) * scale
+            strength = float(camera_observability_strength)
+            strength = min(max(strength, 0.0), 1.0)
+            medium_base_out = raw_neutral + camera_delta_raw + strength * (
+                camera_delta_projected_raw - camera_delta_raw
+            )
+            camera_delta_suppressed_raw = camera_delta_raw - camera_delta_projected_raw
 
         medium_rgb = (
             self.colour_activation(medium_base_out[..., :3])
@@ -156,6 +209,11 @@ class DirectionConditionedMediumField:
             directions=directions,
             b_inf=b_inf,
             raw=medium_base_out,
+            raw_unprojected=raw_unprojected,
+            raw_base=raw_neutral,
+            camera_delta_raw=camera_delta_raw,
+            camera_delta_projected_raw=camera_delta_projected_raw,
+            camera_delta_suppressed_raw=camera_delta_suppressed_raw,
         )
 
     def _append_context(
@@ -172,6 +230,7 @@ class DirectionConditionedMediumField:
         scene_scale: Optional[Union[Tensor, float]],
         camera_context_scale: float,
         camera_context_dropout: float,
+        camera_context_ablation: bool,
         training: bool,
     ) -> Tensor:
         if mode == "dir_only":
@@ -181,7 +240,7 @@ class DirectionConditionedMediumField:
         features = [directions_encoded, torch.stack([image_xx, image_yy, r], dim=-1).view(-1, 3)]
 
         if "camera" in mode:
-            if camera_center is None:
+            if camera_context_ablation or camera_center is None:
                 camera_feature = torch.zeros(3, device=image_xx.device, dtype=image_xx.dtype)
             else:
                 camera_feature = camera_center.reshape(-1, 3)[0].to(device=image_xx.device, dtype=image_xx.dtype)
