@@ -8,7 +8,7 @@ existing checkpoints remain loadable.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional, Union
+from typing import Literal, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -16,6 +16,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from nerfstudio.cameras.cameras import Cameras
+from water_splatting.raoc import apply_standardized_projector
 
 
 @dataclass
@@ -33,6 +34,10 @@ class MediumFieldOutput:
     camera_delta_raw: Optional[Tensor] = None
     camera_delta_projected_raw: Optional[Tensor] = None
     camera_delta_suppressed_raw: Optional[Tensor] = None
+    camera_delta_raoc_raw: Optional[Tensor] = None
+    camera_medium_local_evidence: Optional[Tensor] = None
+    camera_medium_local_gate: Optional[Tensor] = None
+    camera_medium_keep_gate: Optional[Tensor] = None
 
 
 MediumContextMode = Literal[
@@ -136,7 +141,7 @@ class DirectionConditionedMediumField:
         camera_delta_raw = None
         camera_delta_projected_raw = None
         camera_delta_suppressed_raw = None
-        if camera_observability_enabled and camera_observability_projector is not None:
+        if camera_observability_enabled:
             neutral_input = self._append_context(
                 directions_encoded=directions_encoded,
                 image_xx=image_xx,
@@ -158,49 +163,33 @@ class DirectionConditionedMediumField:
                 raw_neutral = self.medium_mlp(neutral_input.float())
             raw_unprojected = medium_base_out
             camera_delta_raw = raw_unprojected - raw_neutral
-            projector = camera_observability_projector.to(device=camera_delta_raw.device, dtype=camera_delta_raw.dtype)
-            if camera_observability_scale is None:
-                camera_delta_projected_raw = camera_delta_raw @ projector.T
-            else:
-                scale = camera_observability_scale.to(device=camera_delta_raw.device, dtype=camera_delta_raw.dtype)
-                scale = scale.reshape(1, 9).clamp_min(1e-6)
-                delta_std = camera_delta_raw / scale
-                camera_delta_projected_raw = (delta_std @ projector.T) * scale
-            strength = float(camera_observability_strength)
-            strength = min(max(strength, 0.0), 1.0)
-            medium_base_out = raw_neutral + camera_delta_raw + strength * (
-                camera_delta_projected_raw - camera_delta_raw
-            )
-            camera_delta_suppressed_raw = camera_delta_raw - camera_delta_projected_raw
+            if camera_observability_projector is not None:
+                projector = camera_observability_projector.to(device=camera_delta_raw.device)
+                if camera_observability_scale is None:
+                    camera_delta_projected_raw = (camera_delta_raw.float() @ projector.float().T).to(
+                        dtype=camera_delta_raw.dtype
+                    )
+                else:
+                    camera_delta_projected_raw = apply_standardized_projector(
+                        camera_delta_raw, projector, camera_observability_scale
+                    )
+                strength = float(camera_observability_strength)
+                strength = min(max(strength, 0.0), 1.0)
+                # Combine in residual space so the strength=1 OCMC path has
+                # the same raw addition order as the RAOC reduction control.
+                medium_base_out = raw_neutral + (
+                    (1.0 - strength) * camera_delta_raw + strength * camera_delta_projected_raw
+                )
+                camera_delta_suppressed_raw = camera_delta_raw - camera_delta_projected_raw
 
-        medium_rgb = (
-            self.colour_activation(medium_base_out[..., :3])
-            .view(*outputs_shape, -1)
-            .to(directions)
+        medium_rgb, medium_bs, medium_attn, b_inf = self.activate_raw(
+            medium_base_out,
+            outputs_shape=outputs_shape,
+            directions=directions,
+            density_bias=density_bias,
+            zero_medium=zero_medium,
+            b_inf_mode=b_inf_mode,
         )
-        medium_bs = (
-            self.sigma_activation(medium_base_out[..., 3:6] + density_bias)
-            .view(*outputs_shape, -1)
-            .to(directions)
-        )
-        medium_attn = (
-            self.sigma_activation(medium_base_out[..., 6:9] + density_bias)
-            .view(*outputs_shape, -1)
-            .to(directions)
-        )
-
-        if zero_medium:
-            medium_rgb = torch.zeros_like(medium_rgb)
-            medium_bs = torch.zeros_like(medium_bs)
-            medium_attn = torch.zeros_like(medium_attn)
-
-        b_inf = None
-        if b_inf_mode == "implicit":
-            b_inf = None
-        elif b_inf_mode == "tied":
-            b_inf = medium_rgb
-        else:
-            raise ValueError(f"Unknown b_inf_mode: {b_inf_mode}")
 
         return MediumFieldOutput(
             rgb=medium_rgb,
@@ -215,6 +204,34 @@ class DirectionConditionedMediumField:
             camera_delta_projected_raw=camera_delta_projected_raw,
             camera_delta_suppressed_raw=camera_delta_suppressed_raw,
         )
+
+    def activate_raw(
+        self,
+        raw: Tensor,
+        *,
+        outputs_shape: Tuple[int, ...],
+        directions: Tensor,
+        density_bias: float,
+        zero_medium: bool,
+        b_inf_mode: Literal["implicit", "tied"],
+    ) -> Tuple[Tensor, Tensor, Tensor, Optional[Tensor]]:
+        """Apply the unchanged medium output parameterization to raw values."""
+
+        medium_rgb = self.colour_activation(raw[..., :3]).view(*outputs_shape, -1).to(directions)
+        medium_bs = self.sigma_activation(raw[..., 3:6] + density_bias).view(*outputs_shape, -1).to(directions)
+        medium_attn = self.sigma_activation(raw[..., 6:9] + density_bias).view(*outputs_shape, -1).to(directions)
+        if zero_medium:
+            medium_rgb = torch.zeros_like(medium_rgb)
+            medium_bs = torch.zeros_like(medium_bs)
+            medium_attn = torch.zeros_like(medium_attn)
+
+        if b_inf_mode == "implicit":
+            b_inf = None
+        elif b_inf_mode == "tied":
+            b_inf = medium_rgb
+        else:
+            raise ValueError(f"Unknown b_inf_mode: {b_inf_mode}")
+        return medium_rgb, medium_bs, medium_attn, b_inf
 
     def _append_context(
         self,

@@ -37,6 +37,16 @@ from water_splatting.fields import (
     compute_gaussian_colors,
     get_medium_context_extra_dim,
 )
+from water_splatting.raoc import (
+    apply_modal_keep_gate,
+    apply_standardized_projector,
+    calibrate_local_scales,
+    local_keep_gates,
+    modal_coefficients,
+    observability_gates,
+    ray_keep_gates,
+)
+from water_splatting.rendering.medium_jacobian import analytic_medium_jacobian_actions
 from water_splatting.rendering import UnderwaterRasterizer
 from water_splatting.sh import num_sh_bases
 from pytorch_msssim import SSIM
@@ -210,6 +220,8 @@ class WaterSplattingModelConfig(ModelConfig):
     """Enable default-off OCMC projection of camera-conditioned medium residuals."""
     camera_medium_observability_strength: float = 1.0
     """Blend strength for the detached camera-medium observability projector."""
+    camera_medium_ray_adaptive_observability_enabled: bool = False
+    """Enable default-off RAOC ray/context-adaptive medium capacity control."""
     infinite_water_enabled: bool = False
     """Kept for M1 config compatibility; clean branch does not implement infinite-water ownership."""
     b_inf_mode: Literal["implicit", "tied"] = "implicit"
@@ -377,6 +389,14 @@ class WaterSplattingModel(Model):
         self._camera_medium_observability_projector: Optional[torch.Tensor] = None
         self._camera_medium_observability_spectrum: Optional[torch.Tensor] = None
         self._camera_medium_observability_scale: Optional[torch.Tensor] = None
+        self.register_buffer("_camera_medium_raoc_basis", torch.eye(9, dtype=torch.float32), persistent=True)
+        self.register_buffer("_camera_medium_raoc_spectrum", torch.zeros(9, dtype=torch.float32), persistent=True)
+        self.register_buffer("_camera_medium_raoc_global_gate", torch.zeros(9, dtype=torch.float32), persistent=True)
+        self.register_buffer("_camera_medium_raoc_local_scale", torch.zeros(9, dtype=torch.float32), persistent=True)
+        self.register_buffer("_camera_medium_raoc_active", torch.zeros(9, dtype=torch.bool), persistent=True)
+        self.register_buffer("_camera_medium_raoc_standardization_scale", torch.ones(9, dtype=torch.float32), persistent=True)
+        self.register_buffer("_camera_medium_raoc_state_present", torch.tensor(False), persistent=True)
+        self._camera_medium_raoc_local_gate_override: Optional[torch.Tensor] = None
 
         self.crop_box: Optional[OrientedBox] = None
         if self.config.background_color == "random":
@@ -444,6 +464,19 @@ class WaterSplattingModel(Model):
         self.step = self.config.num_steps
         dict = dict.copy()
         dict.pop("gaussian_lineage_ids", None)
+        # Archived checkpoints predate RAOC.  Supplying the initialized buffers
+        # keeps strict model loading backward compatible while leaving RAOC off.
+        for key in (
+            "_camera_medium_raoc_basis",
+            "_camera_medium_raoc_spectrum",
+            "_camera_medium_raoc_global_gate",
+            "_camera_medium_raoc_local_scale",
+            "_camera_medium_raoc_active",
+            "_camera_medium_raoc_standardization_scale",
+            "_camera_medium_raoc_state_present",
+        ):
+            if key not in dict:
+                dict[key] = getattr(self, key).detach().clone()
         if "means" in dict:
             # For backwards compatibility, we remap the names of parameters from
             # means->gauss_params.means since old checkpoints have that format
@@ -1492,6 +1525,95 @@ class WaterSplattingModel(Model):
             scale.reshape(9).detach().to(device=self.device, dtype=torch.float32) if scale is not None else None
         )
 
+    def clear_camera_medium_ray_adaptive_observability_state(self) -> None:
+        """Clear the installed detached RAOC calibration state."""
+
+        self._camera_medium_raoc_basis.copy_(torch.eye(9, device=self.device, dtype=torch.float32))
+        self._camera_medium_raoc_spectrum.zero_()
+        self._camera_medium_raoc_global_gate.zero_()
+        self._camera_medium_raoc_local_scale.zero_()
+        self._camera_medium_raoc_active.zero_()
+        self._camera_medium_raoc_standardization_scale.fill_(1.0)
+        self._camera_medium_raoc_state_present.fill_(False)
+        self._camera_medium_raoc_local_gate_override = None
+
+    def set_camera_medium_ray_adaptive_observability_state(
+        self,
+        basis: torch.Tensor,
+        spectrum: torch.Tensor,
+        local_scale: torch.Tensor,
+        standardization_scale: torch.Tensor,
+        *,
+        active: Optional[torch.Tensor] = None,
+        global_gate: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Install or replace a detached, serialized 9-D RAOC state."""
+
+        values = {
+            "basis": torch.as_tensor(basis),
+            "spectrum": torch.as_tensor(spectrum),
+            "local_scale": torch.as_tensor(local_scale),
+            "standardization_scale": torch.as_tensor(standardization_scale),
+        }
+        if tuple(values["basis"].shape) != (9, 9):
+            raise ValueError(f"RAOC basis must be 9x9, got {tuple(values['basis'].shape)}")
+        for name in ("spectrum", "local_scale", "standardization_scale"):
+            if tuple(values[name].reshape(-1).shape) != (9,):
+                raise ValueError(f"RAOC {name} must contain 9 values, got {tuple(values[name].shape)}")
+        basis_t = values["basis"].reshape(9, 9).float()
+        spectrum_t = values["spectrum"].reshape(9).float()
+        local_scale_t = values["local_scale"].reshape(9).float()
+        standardization_t = values["standardization_scale"].reshape(9).float()
+        if not bool(torch.isfinite(basis_t).all() and torch.isfinite(spectrum_t).all() and torch.isfinite(local_scale_t).all() and torch.isfinite(standardization_t).all()):
+            raise ValueError("RAOC state must be finite")
+        if bool((standardization_t <= 0).any() or (local_scale_t < 0).any() or (spectrum_t < 0).any()):
+            raise ValueError("RAOC scales and spectrum must be non-negative; standardization must be positive")
+        if active is None:
+            active_t = local_scale_t > 1e-12
+        else:
+            active_t = torch.as_tensor(active).reshape(9).bool()
+        if global_gate is None:
+            global_gate_t = observability_gates(spectrum_t)
+        else:
+            global_gate_t = torch.as_tensor(global_gate).reshape(9).float()
+        if not bool(torch.isfinite(global_gate_t).all() and ((global_gate_t >= 0) & (global_gate_t <= 1)).all()):
+            raise ValueError("RAOC global gates must be finite and in [0, 1]")
+        with torch.no_grad():
+            self._camera_medium_raoc_basis.copy_(basis_t.to(self.device))
+            self._camera_medium_raoc_spectrum.copy_(spectrum_t.to(self.device))
+            self._camera_medium_raoc_global_gate.copy_(global_gate_t.to(self.device))
+            self._camera_medium_raoc_local_scale.copy_(local_scale_t.to(self.device))
+            self._camera_medium_raoc_active.copy_(active_t.to(self.device))
+            self._camera_medium_raoc_standardization_scale.copy_(standardization_t.to(self.device))
+            self._camera_medium_raoc_state_present.fill_(True)
+        self._camera_medium_raoc_local_gate_override = None
+
+    def get_camera_medium_ray_adaptive_observability_state(self) -> Dict[str, torch.Tensor]:
+        """Return a detached copy of the installed RAOC state."""
+
+        return {
+            "basis": self._camera_medium_raoc_basis.detach().clone(),
+            "spectrum": self._camera_medium_raoc_spectrum.detach().clone(),
+            "global_gate": self._camera_medium_raoc_global_gate.detach().clone(),
+            "local_scale": self._camera_medium_raoc_local_scale.detach().clone(),
+            "active": self._camera_medium_raoc_active.detach().clone(),
+            "standardization_scale": self._camera_medium_raoc_standardization_scale.detach().clone(),
+            "state_present": self._camera_medium_raoc_state_present.detach().clone(),
+        }
+
+    def _set_camera_medium_ray_adaptive_observability_gate_override(self, local_gate: Optional[torch.Tensor]) -> None:
+        """Set a detached test-only local gate override for equivalence audits."""
+
+        if local_gate is None:
+            self._camera_medium_raoc_local_gate_override = None
+            return
+        gate = torch.as_tensor(local_gate, device=self.device, dtype=torch.float32)
+        if gate.ndim != 2 or gate.shape[1] != 9:
+            raise ValueError(f"RAOC local gate override must have shape [rays, 9], got {tuple(gate.shape)}")
+        if not bool(torch.isfinite(gate).all() and ((gate >= 0) & (gate <= 1)).all()):
+            raise ValueError("RAOC local gate override must be finite and in [0, 1]")
+        self._camera_medium_raoc_local_gate_override = gate.detach().clone()
+
     def _predict_medium(
         self,
         *,
@@ -1502,6 +1624,10 @@ class WaterSplattingModel(Model):
         cx: float,
         cy: float,
     ):
+        ocmc_enabled = bool(getattr(self.config, "camera_medium_observability_enabled", False))
+        raoc_enabled = bool(getattr(self.config, "camera_medium_ray_adaptive_observability_enabled", False))
+        if ocmc_enabled and raoc_enabled:
+            raise ValueError("camera_medium_observability_enabled and camera_medium_ray_adaptive_observability_enabled are mutually exclusive")
         scene_center, scene_scale = self._get_scene_normalization(
             dtype=rotation_world_from_camera.dtype,
             device=rotation_world_from_camera.device,
@@ -1523,13 +1649,127 @@ class WaterSplattingModel(Model):
             camera_context_scale=getattr(self.config, "medium_camera_context_scale", 1.0),
             camera_context_dropout=getattr(self.config, "medium_camera_context_dropout", 0.0),
             camera_context_ablation=getattr(self.config, "medium_camera_context_ablation", False),
-            camera_observability_enabled=getattr(self.config, "camera_medium_observability_enabled", False),
-            camera_observability_projector=self._camera_medium_observability_projector,
+            camera_observability_enabled=ocmc_enabled or raoc_enabled,
+            camera_observability_projector=self._camera_medium_observability_projector if ocmc_enabled else None,
             camera_observability_scale=self._camera_medium_observability_scale,
             camera_observability_strength=getattr(self.config, "camera_medium_observability_strength", 1.0),
             training=self.training,
             b_inf_mode=self._effective_b_inf_mode(),
         )
+
+    def _apply_camera_medium_ray_adaptive_control(
+        self,
+        medium: Any,
+        *,
+        xys: Optional[torch.Tensor] = None,
+        depths: Optional[torch.Tensor] = None,
+        radii: Optional[torch.Tensor] = None,
+        conics: Optional[torch.Tensor] = None,
+        colors: Optional[torch.Tensor] = None,
+        opacities: Optional[torch.Tensor] = None,
+        num_tiles_hit: Optional[torch.Tensor] = None,
+        height: int,
+        width: int,
+    ) -> Any:
+        """Apply RAOC after raw medium prediction and before rasterization."""
+
+        if not bool(getattr(self.config, "camera_medium_ray_adaptive_observability_enabled", False)):
+            return medium
+        if bool(getattr(self.config, "camera_medium_observability_enabled", False)):
+            raise ValueError("RAOC cannot be stacked after OCMC")
+        if not bool(self._camera_medium_raoc_state_present.item()):
+            raise RuntimeError("RAOC is enabled but no calibrated state is installed")
+        raw_full = medium.raw_unprojected
+        raw_base = medium.raw_base
+        delta_raw = medium.camera_delta_raw
+        if raw_full is None or raw_base is None or delta_raw is None:
+            raise RuntimeError("RAOC requires full, neutral, and camera-residual raw medium outputs")
+
+        raw_full_flat = raw_full.reshape(-1, 9)
+        raw_base_flat = raw_base.reshape(-1, 9)
+        delta_raw_flat = delta_raw.reshape(-1, 9)
+        scale = self._camera_medium_raoc_standardization_scale.detach().to(
+            device=raw_full_flat.device, dtype=torch.float32
+        ).clamp_min(1e-6)
+        basis = self._camera_medium_raoc_basis.detach().to(device=raw_full_flat.device, dtype=torch.float32)
+        global_gate = self._camera_medium_raoc_global_gate.detach().to(
+            device=raw_full_flat.device, dtype=torch.float32
+        )
+
+        mode_raw_directions = basis.T * scale.reshape(1, 9)
+        if xys is None or depths is None or radii is None or conics is None or opacities is None or num_tiles_hit is None:
+            local_actions = (
+                torch.sigmoid(raw_full_flat[:, None, :3])
+                * (1.0 - torch.sigmoid(raw_full_flat[:, None, :3]))
+                * mode_raw_directions[None, :, :3]
+            )
+        else:
+            if colors is None:
+                colors = raw_full_flat.new_empty((0, 3))
+            local_actions = analytic_medium_jacobian_actions(
+                xys=xys,
+                depths=depths,
+                radii=radii,
+                conics=conics,
+                colors=colors,
+                opacities=opacities,
+                num_tiles_hit=num_tiles_hit,
+                height=height,
+                width=width,
+                block_width=self.underwater_rasterizer.block_width,
+                raw_medium=raw_full_flat,
+                raw_directions=mode_raw_directions,
+                density_bias=float(self.medium_density_bias),
+            )
+
+        delta_std = delta_raw_flat / scale.reshape(1, 9)
+        coefficients = modal_coefficients(delta_std.detach(), basis)
+        sensitivity = torch.linalg.norm(local_actions, dim=-1)
+        evidence = coefficients.abs() * sensitivity
+        q = self._camera_medium_raoc_local_scale.detach().to(device=evidence.device, dtype=evidence.dtype)
+        active = self._camera_medium_raoc_active.detach().to(device=evidence.device)
+        if self._camera_medium_raoc_local_gate_override is not None:
+            local_gate = self._camera_medium_raoc_local_gate_override.to(
+                device=evidence.device, dtype=evidence.dtype
+            )
+            if local_gate.shape != evidence.shape:
+                raise ValueError(
+                    f"RAOC local gate override shape {tuple(local_gate.shape)} does not match {tuple(evidence.shape)}"
+                )
+        else:
+            local_gate = local_keep_gates(evidence, q, active)
+        keep_gate = ray_keep_gates(global_gate, local_gate)
+        global_projector = basis.float() @ torch.diag(global_gate.float()) @ basis.float().T
+        zero_local_rows = (local_gate == 0).all(dim=1)
+        all_keep_rows = (keep_gate == 1).all(dim=1)
+        ocmc_delta_raw = apply_standardized_projector(delta_raw_flat, global_projector, scale)
+        delta_raoc_std = apply_modal_keep_gate(delta_std, basis, keep_gate)
+        delta_raoc_std = torch.where(all_keep_rows[:, None], delta_std, delta_raoc_std)
+        delta_raoc_raw = (delta_raoc_std * scale.reshape(1, 9)).to(dtype=raw_full_flat.dtype)
+        delta_raoc_raw = torch.where(zero_local_rows[:, None], ocmc_delta_raw, delta_raoc_raw)
+        effective_raw = raw_base_flat + delta_raoc_raw
+        effective_raw = torch.where(all_keep_rows[:, None], raw_full_flat, effective_raw)
+        delta_raoc_raw = torch.where(all_keep_rows[:, None], delta_raw_flat, delta_raoc_raw)
+        rgb, bs, attn, b_inf = self.medium_field.activate_raw(
+            effective_raw,
+            outputs_shape=(height, width),
+            directions=medium.directions,
+            density_bias=self.medium_density_bias,
+            zero_medium=self.config.zero_medium,
+            b_inf_mode=self._effective_b_inf_mode(),
+        )
+        medium.raw = effective_raw
+        medium.rgb = rgb
+        medium.bs = bs
+        medium.attn = attn
+        medium.b_inf = b_inf
+        medium.camera_delta_projected_raw = delta_raoc_raw
+        medium.camera_delta_raoc_raw = delta_raoc_raw
+        medium.camera_delta_suppressed_raw = delta_raw_flat - delta_raoc_raw
+        medium.camera_medium_local_evidence = evidence
+        medium.camera_medium_local_gate = local_gate
+        medium.camera_medium_keep_gate = keep_gate
+        return medium
 
     def _attach_medium_identifiability_outputs(
         self,
@@ -1550,6 +1790,21 @@ class WaterSplattingModel(Model):
             ):
                 if value is not None:
                     outputs[key] = value.view(height, width, 9)
+        if getattr(self.config, "camera_medium_ray_adaptive_observability_enabled", False):
+            outputs["medium_raw"] = medium.raw.view(height, width, 9)
+            for key, value in (
+                ("camera_medium_raw_unprojected", getattr(medium, "raw_unprojected", None)),
+                ("camera_medium_raw_base", getattr(medium, "raw_base", None)),
+                ("camera_medium_delta_raw", getattr(medium, "camera_delta_raw", None)),
+                ("camera_medium_delta_raoc_raw", getattr(medium, "camera_delta_raoc_raw", None)),
+                ("camera_medium_delta_suppressed_raw", getattr(medium, "camera_delta_suppressed_raw", None)),
+                ("camera_medium_local_evidence", getattr(medium, "camera_medium_local_evidence", None)),
+                ("camera_medium_local_gate", getattr(medium, "camera_medium_local_gate", None)),
+                ("camera_medium_keep_gate", getattr(medium, "camera_medium_keep_gate", None)),
+            ):
+                if value is not None:
+                    outputs[key] = value.view(height, width, 9)
+            outputs["camera_medium_global_gate"] = self._camera_medium_raoc_global_gate.detach().view(1, 1, 9).expand(height, width, 9)
         return outputs
 
     def _medium_identifiability_active(self) -> bool:
@@ -1615,6 +1870,14 @@ class WaterSplattingModel(Model):
         if self.crop_box is not None and not self.training:
             crop_ids = self.crop_box.within(self.means).squeeze()
             if crop_ids.sum() == 0:
+                medium = self._apply_camera_medium_ray_adaptive_control(
+                    medium,
+                    height=H,
+                    width=W,
+                )
+                medium_rgb = medium.rgb
+                medium_bs = medium.bs
+                medium_attn = medium.attn
                 rgb = medium_rgb
                 depth = medium_rgb.new_ones(*rgb.shape[:2], 1) * 10
                 accumulation = medium_rgb.new_zeros(*rgb.shape[:2], 1)
@@ -1666,6 +1929,21 @@ class WaterSplattingModel(Model):
         camera.rescale_output_resolution(camera_downscale)
 
         if (self.radii).sum() == 0:
+            medium = self._apply_camera_medium_ray_adaptive_control(
+                medium,
+                xys=self.xys,
+                depths=depths,
+                radii=self.radii,
+                conics=conics,
+                colors=medium.rgb.new_empty((0, 3)),
+                opacities=opacities_crop,
+                num_tiles_hit=num_tiles_hit,
+                height=H,
+                width=W,
+            )
+            medium_rgb = medium.rgb
+            medium_bs = medium.bs
+            medium_attn = medium.attn
             rgb = medium_rgb
             depth = medium_rgb.new_ones(*rgb.shape[:2], 1) * 10
             accumulation = medium_rgb.new_zeros(*rgb.shape[:2], 1)
@@ -1726,7 +2004,23 @@ class WaterSplattingModel(Model):
             opacities = torch.sigmoid(opacities_crop)
         else:
             raise ValueError("Unknown rasterize_mode: %s", self.config.rasterize_mode)
-        
+
+        medium = self._apply_camera_medium_ray_adaptive_control(
+            medium,
+            xys=self.xys,
+            depths=depths,
+            radii=self.radii,
+            conics=conics,
+            colors=rgbs,
+            opacities=opacities,
+            num_tiles_hit=num_tiles_hit,
+            height=H,
+            width=W,
+        )
+        medium_rgb = medium.rgb
+        medium_bs = medium.bs
+        medium_attn = medium.attn
+
         self.xys_grad_abs = torch.zeros_like(self.xys)
 
         render = self.underwater_rasterizer.rasterize(  # type: ignore
