@@ -672,7 +672,9 @@ def _quantile_flat(values: Tensor, q: float) -> float:
     if flat.numel() == 0:
         return float("nan")
     if flat.numel() > QUANTILE_MAX_N:
-        idx = torch.linspace(0, flat.numel() - 1, QUANTILE_MAX_N, device=flat.device).long()
+        # Integer conversion can round the last linspace sample to N; clamp
+        # the deterministic subsample indices to the valid flattened range.
+        idx = torch.linspace(0, flat.numel() - 1, QUANTILE_MAX_N, device=flat.device).long().clamp_max(flat.numel() - 1)
         flat = flat[idx]
     return float(torch.quantile(flat.cpu(), q).item())
 
@@ -1033,7 +1035,7 @@ def _stats(values: Tensor, prefix: str) -> Dict[str, Any]:
     if flat.numel() == 0:
         return {f"{prefix}{name}": float("nan") for name in ("mean", "std", "p01", "p50", "p90", "p99", "max")}
     if flat.numel() > QUANTILE_MAX_N:
-        idx = torch.linspace(0, flat.numel() - 1, QUANTILE_MAX_N, device=flat.device).long()
+        idx = torch.linspace(0, flat.numel() - 1, QUANTILE_MAX_N, device=flat.device).long().clamp_max(flat.numel() - 1)
         flat = flat[idx]
     return {
         f"{prefix}mean": float(flat.mean().item()),

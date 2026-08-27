@@ -27,7 +27,7 @@ def analytic_medium_jacobian_actions(
     raw_medium: Tensor,
     raw_directions: Tensor,
     density_bias: float,
-    chunk_size: int = 16384,
+    chunk_size: int = 4096,
     pixel_indices: Optional[Tensor] = None,
 ) -> Tensor:
     """Evaluate ``J_p v_i`` for every pixel and every raw-medium direction.
@@ -42,6 +42,8 @@ def analytic_medium_jacobian_actions(
 
     raw = raw_medium.detach().float().reshape(-1, 9)
     directions = raw_directions.detach().float().reshape(-1, 9).to(device=raw.device)
+    if int(chunk_size) < 1:
+        raise ValueError(f"chunk_size must be positive, got {chunk_size}")
     if raw.shape[0] != height * width:
         raise ValueError(f"raw_medium has {raw.shape[0]} pixels, expected {height * width}")
     if directions.shape[1] != 9 or directions.shape[0] == 0:
