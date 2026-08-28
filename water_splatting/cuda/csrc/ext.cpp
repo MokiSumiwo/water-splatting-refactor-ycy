@@ -11,6 +11,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("project_gaussians_backward", &project_gaussians_backward_tensor);
     m.def("compute_sh_forward", &compute_sh_forward_tensor);
     m.def("compute_sh_backward", &compute_sh_backward_tensor);
+    m.def("raoc_fused_forward", &raoc_fused_forward_tensor);
+    m.def("raoc_fused_backward", &raoc_fused_backward_tensor);
     // utils
     m.def("compute_cov2d_bounds", &compute_cov2d_bounds_tensor);
     m.def("map_gaussian_to_intersects", &map_gaussian_to_intersects_tensor);

@@ -64,7 +64,13 @@ def get_extensions():
 
     nvcc_flags = os.getenv("NVCC_FLAGS", "")
     nvcc_flags = [] if nvcc_flags == "" else nvcc_flags.split(" ")
-    nvcc_flags += ["-O3", "--use_fast_math"]
+    nvcc_flags += ["-O3"]
+    if os.getenv("RAOC_PRECISE_MATH", "0") == "1":
+        # The RAOC reference uses torch.exp and FP32 pointwise arithmetic.
+        # Keep a reproducible precise build for strict equivalence audits.
+        nvcc_flags += ["--fmad=false", "--prec-div=true", "--prec-sqrt=true", "--ftz=false"]
+    else:
+        nvcc_flags += ["--use_fast_math"]
     if LINE_INFO:
         nvcc_flags += ["-lineinfo"]
     if torch.version.hip:

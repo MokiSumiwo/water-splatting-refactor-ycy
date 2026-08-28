@@ -45,6 +45,7 @@ from water_splatting.raoc import (
     modal_coefficients,
     observability_gates,
     ray_keep_gates,
+    fused_modal_control,
 )
 from water_splatting.rendering.medium_jacobian import analytic_medium_jacobian_actions
 from water_splatting.rendering import UnderwaterRasterizer
@@ -222,6 +223,10 @@ class WaterSplattingModelConfig(ModelConfig):
     """Blend strength for the detached camera-medium observability projector."""
     camera_medium_ray_adaptive_observability_enabled: bool = False
     """Enable default-off RAOC ray/context-adaptive medium capacity control."""
+    camera_medium_raoc_local_scale_quantile: float = 0.50
+    """Train-bank evidence quantile used for the detached RAOC local scale."""
+    camera_medium_raoc_backend: Literal["reference", "cuda_fused"] = "reference"
+    """Execution backend for the frozen RAOC equations."""
     infinite_water_enabled: bool = False
     """Kept for M1 config compatibility; clean branch does not implement infinite-water ownership."""
     b_inf_mode: Literal["implicit", "tied"] = "implicit"
@@ -1697,56 +1702,117 @@ class WaterSplattingModel(Model):
         )
 
         mode_raw_directions = basis.T * scale.reshape(1, 9)
-        if xys is None or depths is None or radii is None or conics is None or opacities is None or num_tiles_hit is None:
-            local_actions = (
-                torch.sigmoid(raw_full_flat[:, None, :3])
-                * (1.0 - torch.sigmoid(raw_full_flat[:, None, :3]))
-                * mode_raw_directions[None, :, :3]
-            )
-        else:
-            if colors is None:
-                colors = raw_full_flat.new_empty((0, 3))
-            local_actions = analytic_medium_jacobian_actions(
-                xys=xys,
-                depths=depths,
-                radii=radii,
-                conics=conics,
-                colors=colors,
-                opacities=opacities,
-                num_tiles_hit=num_tiles_hit,
-                height=height,
-                width=width,
-                block_width=self.underwater_rasterizer.block_width,
+        delta_std = delta_raw_flat / scale.reshape(1, 9)
+        backend = str(getattr(self.config, "camera_medium_raoc_backend", "reference"))
+        if backend not in {"reference", "cuda_fused"}:
+            raise ValueError(f"Unknown RAOC backend {backend!r}")
+        override = self._camera_medium_raoc_local_gate_override
+        use_fused = backend == "cuda_fused" and override is None
+        if use_fused:
+            from water_splatting.utils import bin_and_sort_gaussians, compute_cumulative_intersects
+
+            # Keep activation values and derivatives bitwise aligned with the
+            # reference Jacobian.  These are detached control inputs; the
+            # final activate_raw call below remains the differentiable path.
+            raw_control = raw_full_flat.float()
+            medium_rgb = torch.sigmoid(raw_control[:, :3])
+            medium_bs = torch.nn.functional.softplus(raw_control[:, 3:6] + float(self.medium_density_bias))
+            medium_attn = torch.nn.functional.softplus(raw_control[:, 6:9] + float(self.medium_density_bias))
+            d_rgb = medium_rgb * (1.0 - medium_rgb)
+            d_bs = torch.sigmoid(raw_control[:, 3:6] + float(self.medium_density_bias))
+            d_attn = torch.sigmoid(raw_control[:, 6:9] + float(self.medium_density_bias))
+
+            if xys is None or depths is None or radii is None or conics is None or opacities is None or num_tiles_hit is None:
+                empty_xys = raw_full_flat.new_empty((0, 2))
+                empty_depths = raw_full_flat.new_empty((0,))
+                empty_radii = torch.empty((0,), device=raw_full_flat.device, dtype=torch.int32)
+                empty_conics = raw_full_flat.new_empty((0, 3))
+                empty_colors = raw_full_flat.new_empty((0, 3))
+                empty_opacities = raw_full_flat.new_empty((0,))
+                empty_ids = torch.empty((0,), device=raw_full_flat.device, dtype=torch.int32)
+                tiles_x = (int(width) + self.underwater_rasterizer.block_width - 1) // self.underwater_rasterizer.block_width
+                tiles_y = (int(height) + self.underwater_rasterizer.block_width - 1) // self.underwater_rasterizer.block_width
+                tile_bins = torch.zeros((tiles_x * tiles_y, 2), device=raw_full_flat.device, dtype=torch.int32)
+                geometry = (empty_xys, empty_depths, empty_radii, empty_conics, empty_colors, empty_opacities, empty_ids, tile_bins, 0)
+            else:
+                num_intersects, cumulative = compute_cumulative_intersects(num_tiles_hit.detach())
+                if num_intersects > 0:
+                    _iu, _gu, _is, ids, tile_bins = bin_and_sort_gaussians(
+                        xys.shape[0], num_intersects, xys.detach(), depths.detach(), radii.detach(), cumulative,
+                        ((int(width) + self.underwater_rasterizer.block_width - 1) // self.underwater_rasterizer.block_width,
+                         (int(height) + self.underwater_rasterizer.block_width - 1) // self.underwater_rasterizer.block_width, 1),
+                        self.underwater_rasterizer.block_width,
+                    )
+                else:
+                    tiles_x = (int(width) + self.underwater_rasterizer.block_width - 1) // self.underwater_rasterizer.block_width
+                    tiles_y = (int(height) + self.underwater_rasterizer.block_width - 1) // self.underwater_rasterizer.block_width
+                    ids = torch.empty((0,), device=raw_full_flat.device, dtype=torch.int32)
+                    tile_bins = torch.zeros((tiles_x * tiles_y, 2), device=raw_full_flat.device, dtype=torch.int32)
+                # The CUDA binding keeps one color row per projected Gaussian
+                # even when all radii are zero; colors are not read when the
+                # intersection count is zero, but the shape contract remains
+                # valid for the empty-visibility edge case.
+                control_colors = colors if colors is not None and colors.numel() else raw_full_flat.new_zeros((xys.shape[0], 3))
+                geometry = (xys, depths, radii, conics, control_colors, opacities, ids, tile_bins, num_intersects)
+            q = self._camera_medium_raoc_local_scale.detach().to(device=raw_full_flat.device, dtype=torch.float32)
+            active = self._camera_medium_raoc_active.detach().to(device=raw_full_flat.device)
+            delta_raoc_std, evidence, local_gate, keep_gate, sensitivity = fused_modal_control(
+                delta_std=delta_std,
+                basis=basis,
+                global_gate=global_gate,
+                local_scale=q,
+                active=active,
                 raw_medium=raw_full_flat,
                 raw_directions=mode_raw_directions,
-                density_bias=float(self.medium_density_bias),
+                medium_rgb=medium_rgb,
+                medium_bs=medium_bs,
+                medium_attn=medium_attn,
+                d_rgb=d_rgb,
+                d_bs=d_bs,
+                d_attn=d_attn,
+                xys=geometry[0], depths=geometry[1], radii=geometry[2], conics=geometry[3], colors=geometry[4],
+                opacities=geometry[5], gaussian_ids_sorted=geometry[6], tile_bins=geometry[7],
+                height=height, width=width, block_width=self.underwater_rasterizer.block_width,
+                num_intersects=geometry[8], density_bias=float(self.medium_density_bias),
             )
-
-        delta_std = delta_raw_flat / scale.reshape(1, 9)
-        coefficients = modal_coefficients(delta_std.detach(), basis)
-        sensitivity = torch.linalg.norm(local_actions, dim=-1)
-        evidence = coefficients.abs() * sensitivity
-        q = self._camera_medium_raoc_local_scale.detach().to(device=evidence.device, dtype=evidence.dtype)
-        active = self._camera_medium_raoc_active.detach().to(device=evidence.device)
-        if self._camera_medium_raoc_local_gate_override is not None:
-            local_gate = self._camera_medium_raoc_local_gate_override.to(
-                device=evidence.device, dtype=evidence.dtype
-            )
-            if local_gate.shape != evidence.shape:
-                raise ValueError(
-                    f"RAOC local gate override shape {tuple(local_gate.shape)} does not match {tuple(evidence.shape)}"
-                )
         else:
-            local_gate = local_keep_gates(evidence, q, active)
-        keep_gate = ray_keep_gates(global_gate, local_gate)
-        global_projector = basis.float() @ torch.diag(global_gate.float()) @ basis.float().T
+            if xys is None or depths is None or radii is None or conics is None or opacities is None or num_tiles_hit is None:
+                local_actions = torch.sigmoid(raw_full_flat[:, None, :3]) * (1.0 - torch.sigmoid(raw_full_flat[:, None, :3])) * mode_raw_directions[None, :, :3]
+            else:
+                if colors is None:
+                    colors = raw_full_flat.new_empty((0, 3))
+                local_actions = analytic_medium_jacobian_actions(
+                    xys=xys, depths=depths, radii=radii, conics=conics, colors=colors, opacities=opacities,
+                    num_tiles_hit=num_tiles_hit, height=height, width=width,
+                    block_width=self.underwater_rasterizer.block_width, raw_medium=raw_full_flat,
+                    raw_directions=mode_raw_directions, density_bias=float(self.medium_density_bias),
+                )
+            coefficients = modal_coefficients(delta_std.detach(), basis)
+            sensitivity = torch.linalg.norm(local_actions, dim=-1)
+            evidence = coefficients.abs() * sensitivity
+            q = self._camera_medium_raoc_local_scale.detach().to(device=evidence.device, dtype=evidence.dtype)
+            active = self._camera_medium_raoc_active.detach().to(device=evidence.device)
+            if override is not None:
+                local_gate = override.to(device=evidence.device, dtype=evidence.dtype)
+                if local_gate.shape != evidence.shape:
+                    raise ValueError(f"RAOC local gate override shape {tuple(local_gate.shape)} does not match {tuple(evidence.shape)}")
+            else:
+                local_gate = local_keep_gates(evidence, q, active)
+            keep_gate = ray_keep_gates(global_gate, local_gate)
+            global_projector = basis.float() @ torch.diag(global_gate.float()) @ basis.float().T
+            zero_local_rows = (local_gate == 0).all(dim=1)
+            all_keep_rows = (keep_gate == 1).all(dim=1)
+            ocmc_delta_raw = apply_standardized_projector(delta_raw_flat, global_projector, scale)
+            delta_raoc_std = apply_modal_keep_gate(delta_std, basis, keep_gate)
+            delta_raoc_std = torch.where(all_keep_rows[:, None], delta_std, delta_raoc_std)
+            delta_raoc_std = torch.where(zero_local_rows[:, None], ocmc_delta_raw / scale.reshape(1, 9), delta_raoc_std)
         zero_local_rows = (local_gate == 0).all(dim=1)
         all_keep_rows = (keep_gate == 1).all(dim=1)
-        ocmc_delta_raw = apply_standardized_projector(delta_raw_flat, global_projector, scale)
-        delta_raoc_std = apply_modal_keep_gate(delta_std, basis, keep_gate)
-        delta_raoc_std = torch.where(all_keep_rows[:, None], delta_std, delta_raoc_std)
         delta_raoc_raw = (delta_raoc_std * scale.reshape(1, 9)).to(dtype=raw_full_flat.dtype)
-        delta_raoc_raw = torch.where(zero_local_rows[:, None], ocmc_delta_raw, delta_raoc_raw)
+        if use_fused:
+            ocmc_delta_raw = None
+        else:
+            delta_raoc_raw = torch.where(zero_local_rows[:, None], ocmc_delta_raw, delta_raoc_raw)
         effective_raw = raw_base_flat + delta_raoc_raw
         effective_raw = torch.where(all_keep_rows[:, None], raw_full_flat, effective_raw)
         delta_raoc_raw = torch.where(all_keep_rows[:, None], delta_raw_flat, delta_raoc_raw)

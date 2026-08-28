@@ -42,6 +42,47 @@ std::tuple<
     torch::Tensor,
     torch::Tensor,
     torch::Tensor,
+    torch::Tensor
+> raoc_fused_forward_tensor(
+    const torch::Tensor &delta_std,
+    const torch::Tensor &basis,
+    const torch::Tensor &global_gate,
+    const torch::Tensor &local_scale,
+    const torch::Tensor &active,
+    const torch::Tensor &raw_medium,
+    const torch::Tensor &raw_directions,
+    const torch::Tensor &medium_rgb,
+    const torch::Tensor &medium_bs,
+    const torch::Tensor &medium_attn,
+    const torch::Tensor &d_rgb,
+    const torch::Tensor &d_bs,
+    const torch::Tensor &d_attn,
+    const torch::Tensor &xys,
+    const torch::Tensor &depths,
+    const torch::Tensor &radii,
+    const torch::Tensor &conics,
+    const torch::Tensor &colors,
+    const torch::Tensor &opacities,
+    const torch::Tensor &gaussian_ids_sorted,
+    const torch::Tensor &tile_bins,
+    const unsigned img_height,
+    const unsigned img_width,
+    const unsigned block_width,
+    const int num_intersects,
+    const float density_bias
+);
+
+torch::Tensor raoc_fused_backward_tensor(
+    const torch::Tensor &grad_delta_raoc_std,
+    const torch::Tensor &basis,
+    const torch::Tensor &keep_gate
+);
+
+std::tuple<
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
     torch::Tensor,
     torch::Tensor,
     torch::Tensor>
