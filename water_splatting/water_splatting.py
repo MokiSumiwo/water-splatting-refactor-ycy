@@ -41,6 +41,7 @@ from water_splatting.raoc import (
     apply_modal_keep_gate,
     apply_standardized_projector,
     calibrate_local_scales,
+    cuda_sensitivity_norm,
     local_keep_gates,
     modal_coefficients,
     observability_gates,
@@ -225,7 +226,7 @@ class WaterSplattingModelConfig(ModelConfig):
     """Enable default-off RAOC ray/context-adaptive medium capacity control."""
     camera_medium_raoc_local_scale_quantile: float = 0.50
     """Train-bank evidence quantile used for the detached RAOC local scale."""
-    camera_medium_raoc_backend: Literal["reference", "cuda_fused"] = "reference"
+    camera_medium_raoc_backend: Literal["reference", "cuda_hybrid", "cuda_fused"] = "reference"
     """Execution backend for the frozen RAOC equations."""
     infinite_water_enabled: bool = False
     """Kept for M1 config compatibility; clean branch does not implement infinite-water ownership."""
@@ -1704,11 +1705,12 @@ class WaterSplattingModel(Model):
         mode_raw_directions = basis.T * scale.reshape(1, 9)
         delta_std = delta_raw_flat / scale.reshape(1, 9)
         backend = str(getattr(self.config, "camera_medium_raoc_backend", "reference"))
-        if backend not in {"reference", "cuda_fused"}:
+        if backend not in {"reference", "cuda_hybrid", "cuda_fused"}:
             raise ValueError(f"Unknown RAOC backend {backend!r}")
         override = self._camera_medium_raoc_local_gate_override
         use_fused = backend == "cuda_fused" and override is None
-        if use_fused:
+        use_hybrid = backend == "cuda_hybrid" and override is None
+        if use_fused or use_hybrid:
             from water_splatting.utils import bin_and_sort_gaussians, compute_cumulative_intersects
 
             # Keep activation values and derivatives bitwise aligned with the
@@ -1754,29 +1756,47 @@ class WaterSplattingModel(Model):
                 # valid for the empty-visibility edge case.
                 control_colors = colors if colors is not None and colors.numel() else raw_full_flat.new_zeros((xys.shape[0], 3))
                 geometry = (xys, depths, radii, conics, control_colors, opacities, ids, tile_bins, num_intersects)
-            q = self._camera_medium_raoc_local_scale.detach().to(device=raw_full_flat.device, dtype=torch.float32)
-            active = self._camera_medium_raoc_active.detach().to(device=raw_full_flat.device)
-            delta_raoc_std, evidence, local_gate, keep_gate, sensitivity = fused_modal_control(
-                delta_std=delta_std,
-                basis=basis,
-                global_gate=global_gate,
-                local_scale=q,
-                active=active,
-                raw_medium=raw_full_flat,
-                raw_directions=mode_raw_directions,
-                medium_rgb=medium_rgb,
-                medium_bs=medium_bs,
-                medium_attn=medium_attn,
-                d_rgb=d_rgb,
-                d_bs=d_bs,
-                d_attn=d_attn,
-                xys=geometry[0], depths=geometry[1], radii=geometry[2], conics=geometry[3], colors=geometry[4],
-                opacities=geometry[5], gaussian_ids_sorted=geometry[6], tile_bins=geometry[7],
-                height=height, width=width, block_width=self.underwater_rasterizer.block_width,
-                num_intersects=geometry[8], density_bias=float(self.medium_density_bias),
-            )
-        else:
-            if xys is None or depths is None or radii is None or conics is None or opacities is None or num_tiles_hit is None:
+            if use_fused:
+                q = self._camera_medium_raoc_local_scale.detach().to(device=raw_full_flat.device, dtype=torch.float32)
+                active = self._camera_medium_raoc_active.detach().to(device=raw_full_flat.device)
+                delta_raoc_std, evidence, local_gate, keep_gate, sensitivity = fused_modal_control(
+                    delta_std=delta_std,
+                    basis=basis,
+                    global_gate=global_gate,
+                    local_scale=q,
+                    active=active,
+                    raw_medium=raw_full_flat,
+                    raw_directions=mode_raw_directions,
+                    medium_rgb=medium_rgb,
+                    medium_bs=medium_bs,
+                    medium_attn=medium_attn,
+                    d_rgb=d_rgb,
+                    d_bs=d_bs,
+                    d_attn=d_attn,
+                    xys=geometry[0], depths=geometry[1], radii=geometry[2], conics=geometry[3], colors=geometry[4],
+                    opacities=geometry[5], gaussian_ids_sorted=geometry[6], tile_bins=geometry[7],
+                    height=height, width=width, block_width=self.underwater_rasterizer.block_width,
+                    num_intersects=geometry[8], density_bias=float(self.medium_density_bias),
+                )
+            else:
+                sensitivity = cuda_sensitivity_norm(
+                    raw_medium=raw_full_flat,
+                    raw_directions=mode_raw_directions,
+                    medium_rgb=medium_rgb,
+                    medium_bs=medium_bs,
+                    medium_attn=medium_attn,
+                    d_rgb=d_rgb,
+                    d_bs=d_bs,
+                    d_attn=d_attn,
+                    xys=geometry[0], depths=geometry[1], radii=geometry[2], conics=geometry[3], colors=geometry[4],
+                    opacities=geometry[5], gaussian_ids_sorted=geometry[6], tile_bins=geometry[7],
+                    height=height, width=width, block_width=self.underwater_rasterizer.block_width,
+                    num_intersects=geometry[8],
+                )
+        if not use_fused:
+            if use_hybrid:
+                pass
+            elif xys is None or depths is None or radii is None or conics is None or opacities is None or num_tiles_hit is None:
                 local_actions = torch.sigmoid(raw_full_flat[:, None, :3]) * (1.0 - torch.sigmoid(raw_full_flat[:, None, :3])) * mode_raw_directions[None, :, :3]
             else:
                 if colors is None:
@@ -1787,8 +1807,9 @@ class WaterSplattingModel(Model):
                     block_width=self.underwater_rasterizer.block_width, raw_medium=raw_full_flat,
                     raw_directions=mode_raw_directions, density_bias=float(self.medium_density_bias),
                 )
+            if not use_hybrid:
+                sensitivity = torch.linalg.norm(local_actions, dim=-1)
             coefficients = modal_coefficients(delta_std.detach(), basis)
-            sensitivity = torch.linalg.norm(local_actions, dim=-1)
             evidence = coefficients.abs() * sensitivity
             q = self._camera_medium_raoc_local_scale.detach().to(device=evidence.device, dtype=evidence.dtype)
             active = self._camera_medium_raoc_active.detach().to(device=evidence.device)

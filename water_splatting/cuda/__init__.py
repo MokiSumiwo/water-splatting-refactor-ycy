@@ -14,6 +14,7 @@ def _make_lazy_cuda_func(name: str) -> Callable:
 nd_rasterize_forward = _make_lazy_cuda_func("nd_rasterize_forward")
 raoc_fused_forward = _make_lazy_cuda_func("raoc_fused_forward")
 raoc_fused_backward = _make_lazy_cuda_func("raoc_fused_backward")
+raoc_sensitivity_forward = _make_lazy_cuda_func("raoc_sensitivity_forward")
 nd_rasterize_backward = _make_lazy_cuda_func("nd_rasterize_backward")
 rasterize_forward = _make_lazy_cuda_func("rasterize_forward")
 rasterize_backward = _make_lazy_cuda_func("rasterize_backward")

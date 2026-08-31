@@ -13,6 +13,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("compute_sh_backward", &compute_sh_backward_tensor);
     m.def("raoc_fused_forward", &raoc_fused_forward_tensor);
     m.def("raoc_fused_backward", &raoc_fused_backward_tensor);
+    m.def("raoc_sensitivity_forward", &raoc_sensitivity_forward_tensor);
     // utils
     m.def("compute_cov2d_bounds", &compute_cov2d_bounds_tensor);
     m.def("map_gaussian_to_intersects", &map_gaussian_to_intersects_tensor);

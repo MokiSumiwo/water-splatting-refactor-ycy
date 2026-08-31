@@ -135,6 +135,65 @@ def apply_modal_keep_gate(delta_std: Tensor, basis: Tensor, g_keep: Tensor) -> T
     return ((coeff * gate_acc) @ basis_acc.T).to(dtype=delta_std.dtype)
 
 
+def cuda_sensitivity_norm(
+    *,
+    raw_medium: Tensor,
+    raw_directions: Tensor,
+    medium_rgb: Tensor,
+    medium_bs: Tensor,
+    medium_attn: Tensor,
+    d_rgb: Tensor,
+    d_bs: Tensor,
+    d_attn: Tensor,
+    xys: Tensor,
+    depths: Tensor,
+    radii: Tensor,
+    conics: Tensor,
+    colors: Tensor,
+    opacities: Tensor,
+    gaussian_ids_sorted: Tensor,
+    tile_bins: Tensor,
+    height: int,
+    width: int,
+    block_width: int,
+    num_intersects: int,
+) -> Tensor:
+    """Return only all-nine-mode ``||J_p v_i||_2`` from CUDA."""
+
+    if raw_medium.ndim != 2 or raw_medium.shape[1] != 9:
+        raise ValueError(f"raw_medium must have shape [N, 9], got {tuple(raw_medium.shape)}")
+    if raw_medium.shape[0] != int(height) * int(width):
+        raise ValueError("raw_medium pixel count does not match height and width")
+    if not raw_medium.is_cuda:
+        raise ValueError("cuda_hybrid RAOC requires CUDA tensors")
+    device = raw_medium.device
+    from water_splatting import cuda as _cuda
+
+    sensitivity = _cuda.raoc_sensitivity_forward(
+        raw_medium.detach().to(device=device, dtype=torch.float32).contiguous(),
+        raw_directions.detach().to(device=device, dtype=torch.float32).reshape(9, 9).contiguous(),
+        medium_rgb.detach().to(device=device, dtype=torch.float32).reshape(-1, 3).contiguous(),
+        medium_bs.detach().to(device=device, dtype=torch.float32).reshape(-1, 3).contiguous(),
+        medium_attn.detach().to(device=device, dtype=torch.float32).reshape(-1, 3).contiguous(),
+        d_rgb.detach().to(device=device, dtype=torch.float32).reshape(-1, 3).contiguous(),
+        d_bs.detach().to(device=device, dtype=torch.float32).reshape(-1, 3).contiguous(),
+        d_attn.detach().to(device=device, dtype=torch.float32).reshape(-1, 3).contiguous(),
+        xys.detach().to(device=device, dtype=torch.float32).contiguous(),
+        depths.detach().to(device=device, dtype=torch.float32).reshape(-1).contiguous(),
+        radii.detach().to(device=device).reshape(-1).contiguous(),
+        conics.detach().to(device=device, dtype=torch.float32).contiguous(),
+        colors.detach().to(device=device, dtype=torch.float32).contiguous(),
+        opacities.detach().to(device=device, dtype=torch.float32).reshape(-1).contiguous(),
+        gaussian_ids_sorted.detach().to(device=device, dtype=torch.int32).reshape(-1).contiguous(),
+        tile_bins.detach().to(device=device, dtype=torch.int32).contiguous(),
+        int(height),
+        int(width),
+        int(block_width),
+        int(num_intersects),
+    )
+    return sensitivity.detach()
+
+
 class _FusedRAOCFunction(Function):
     """CUDA RAOC operator with a detached gate and first-order residual VJP."""
 
