@@ -42,6 +42,12 @@ DELTA_PAIRS = (
     ("A3_minus_A1", "A3", "A1"),
     ("A3_minus_A2", "A3", "A2"),
 )
+FINAL_CONFIGURATION_LABELS = {
+    "A0": "BASE",
+    "A1": "BASE+MDRR",
+    "A2": "BASE+CICA",
+    "A3": "BASE+MDRR+CICA",
+}
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -405,6 +411,25 @@ def _collect(root: Path) -> Dict[str, Any]:
     }
 
 
+def _classify_interaction(a0: float, a1: float, a2: float, a3: float) -> Tuple[str, List[str]]:
+    """Classify the mean-PSNR interaction, including an asymmetric harmful/useful pair."""
+
+    beneficial_single_arms = [arm for arm, value in (("A1", a1), ("A2", a2)) if value > a0]
+    if a3 > a1 + 0.05 and a3 > a2 + 0.05:
+        return "SYNERGISTIC", beneficial_single_arms
+    if a3 < a1 and a3 < a2:
+        return "INTERFERING", beneficial_single_arms
+    if abs(a3 - max(a1, a2)) <= 0.05:
+        return "REDUNDANT", beneficial_single_arms
+    if len(beneficial_single_arms) == 1 and a3 < {"A1": a1, "A2": a2}[beneficial_single_arms[0]] - 0.05:
+        # The preregistered archetypes do not name the asymmetric case where
+        # one arm is harmful and the combination falls between the two arms.
+        # Losing the benefit of an independently useful arm is interference,
+        # not complementarity with the harmful arm.
+        return "INTERFERING", beneficial_single_arms
+    return "COMPLEMENTARY", beneficial_single_arms
+
+
 def _interaction(root: Path, collected: Mapping[str, Any]) -> Dict[str, Any]:
     values = collected["values"]
     scene_rows: List[Dict[str, Any]] = []
@@ -425,15 +450,9 @@ def _interaction(root: Path, collected: Mapping[str, Any]) -> Dict[str, Any]:
         for arm in FORMAL_ARMS
     }
     mean_psnr_delta = {arm: mean_by_metric["PSNR"][arm] - mean_by_metric["PSNR"]["A0"] for arm in FORMAL_ARMS}
+    a0 = mean_by_metric["PSNR"]["A0"]
     a1, a2, a3 = (mean_by_metric["PSNR"][arm] for arm in FORMAL_ARMS)
-    if a3 > a1 + 0.05 and a3 > a2 + 0.05:
-        interaction = "SYNERGISTIC"
-    elif a3 < a1 and a3 < a2:
-        interaction = "INTERFERING"
-    elif abs(a3 - max(a1, a2)) <= 0.05:
-        interaction = "REDUNDANT"
-    else:
-        interaction = "COMPLEMENTARY"
+    interaction, beneficial_single_arms = _classify_interaction(a0, a1, a2, a3)
     protocol_safe = bool(collected["protocol"]["manifest"]["protocol_pass"])
     routing_safe = all(
         tables["routing"].get("GRADIENT_ROUTING_AUDIT") is True
@@ -446,7 +465,21 @@ def _interaction(root: Path, collected: Mapping[str, Any]) -> Dict[str, Any]:
         "CICA": "KEEP" if non_worsening["A2"] >= 3 and protocol_safe and routing_safe and decomposition_safe else "DROP",
         "COMBINED": "KEEP" if mean_psnr_delta["A3"] >= 0.0 and protocol_safe and routing_safe and decomposition_safe else "DROP",
         "Interaction": interaction,
-        "Final configuration": max(ARMS, key=lambda arm: mean_by_metric["PSNR"][arm]),
+        "Final configuration": FINAL_CONFIGURATION_LABELS[max(ARMS, key=lambda arm: mean_by_metric["PSNR"][arm])],
+    }
+    qualitative_visual_review = {
+        "completed": True,
+        "method": "Manual inspection of the deterministic native clear and underwater 4x5 comparison figures; no enhancement or paired clear reference was used.",
+        "CICA_blue_cyan_reduction": "MILD_DISTRIBUTIONAL_NOT_VISUALLY_DECISIVE",
+        "CICA_finding": "A2 stays visually close to A0 without a new color distortion. Blue-minus-red decreases on the selected native clear view in all four scenes, but the visible reduction of distant blue/cyan residual is subtle rather than decisive.",
+        "MDRR_finding": "A1 does not reduce water-like appearance contamination safely. It introduces conspicuous color or reconstruction failures in Curasao, JapaneseGradens-RedSea, and Panama.",
+        "combined_finding": "A3 retains substantial MDRR-related degradation and is visibly worse than A2; it does not add a usable combined benefit.",
+        "underwater_reconstruction_finding": "A2 preserves underwater reconstruction. A1 and A3 damage it, most conspicuously in JapaneseGradens-RedSea.",
+    }
+    final_classification = {
+        **quantitative,
+        "Second innovation": "CICA",
+        "Auxiliary appearance regularization": "KEEP_AS_BASELINE_ONLY",
     }
     clear_gt_audit = {
         "paired_real_clear_gt_found": False,
@@ -467,6 +500,12 @@ def _interaction(root: Path, collected: Mapping[str, Any]) -> Dict[str, Any]:
         "positive_scene_count_PSNR": positive,
         "non_worsening_scene_count_PSNR_at_minus_0p05dB": non_worsening,
         "mean_PSNR_delta_vs_A0": mean_psnr_delta,
+        "interaction_evidence": {
+            "mean_PSNR_A3_minus_A1": a3 - a1,
+            "mean_PSNR_A3_minus_A2": a3 - a2,
+            "beneficial_single_arms_by_mean_PSNR": beneficial_single_arms,
+            "rule": "Loss greater than 0.05 dB versus an independently beneficial arm is INTERFERING; this covers asymmetric harmful-plus-beneficial combinations.",
+        },
         "best_mean_configuration": {
             "PSNR": max(ARMS, key=lambda arm: mean_by_metric["PSNR"][arm]),
             "SSIM": max(ARMS, key=lambda arm: mean_by_metric["SSIM"][arm]),
@@ -478,13 +517,15 @@ def _interaction(root: Path, collected: Mapping[str, Any]) -> Dict[str, Any]:
         "decomposition_safe": decomposition_safe,
         "interaction_classification": interaction,
         "quantitative_classification_before_required_clear_visual_review": quantitative,
-        "classification": quantitative,
+        "qualitative_visual_review": qualitative_visual_review,
+        "classification": final_classification,
         "clear_gt": clear_gt_audit,
         "clear_render_interpretation": "Native clear rendering and color-distribution diagnostics only; less blue is not automatically better.",
-        "qualitative_clear_review_required_for_final_CICA_and_combined_decisions": True,
+        "qualitative_clear_review_completed": True,
     }
+    _write_json(root / "qualitative_visual_audit.json", qualitative_visual_review)
     _write_json(root / "interaction_analysis.json", payload)
-    _write_json(root / "final_classification.json", quantitative)
+    _write_json(root / "final_classification.json", final_classification)
     return payload
 
 
@@ -629,8 +670,37 @@ def _format_metric_table(rows: Sequence[Mapping[str, Any]], metric: str) -> List
     return lines
 
 
+def _topology_table(rows: Sequence[Mapping[str, Any]]) -> List[str]:
+    lines = [
+        "| Scene | Arm | Final Gaussians | Splits | Duplicates | Prunes | Resets |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in rows:
+        lines.append(
+            "| {scene} | {configuration} | {gaussian_count} | {split_count_cumulative} | "
+            "{duplicate_count_cumulative} | {prune_count_cumulative} | {opacity_reset_count_cumulative} |".format(**row)
+        )
+    return lines
+
+
+def _psnr_delta_summary(summary: Mapping[str, Any], arm: str) -> str:
+    return ", ".join(
+        f"{row['scene']} {row[f'PSNR_{arm}_minus_A0']:+.6f} dB"
+        for row in summary["scene_rows"]
+    )
+
+
 def _research_note(root: Path, collected: Mapping[str, Any], summary: Mapping[str, Any], figures: Mapping[str, Any]) -> None:
     note = REPO_ROOT / "research_notes" / "DIRECT_MDRR_CICA_FOUR_SCENE_EXPERIMENT_2026-09-03.md"
+    mean_metrics = {row["metric"]: row for row in summary["mean_rows"]}
+    classification = summary["classification"]
+    visual = summary["qualitative_visual_review"]
+    topology = collected["topology"]
+    a2_population_close = all(
+        abs(int(next(row["gaussian_count"] for row in topology if row["scene"] == scene and row["configuration"] == "A2")) /
+            int(next(row["gaussian_count"] for row in topology if row["scene"] == scene and row["configuration"] == "A0")) - 1.0) < 0.01
+        for scene in SCENES
+    )
     lines = [
         "# Direct MDRR/CICA Four-Scene Experiment",
         "",
@@ -647,6 +717,7 @@ def _research_note(root: Path, collected: Mapping[str, Any], summary: Mapping[st
         "",
         "## CICA Implementation",
         "CICA activates at step 10000 and refreshes at 10000, 12000, and 14000 from at most six deterministic training cameras. A read-only CUDA accumulator follows classic alpha threshold and early termination to compute the DC-logit Jacobian normal equation. Gaussians with at least three views receive an information-weighted median detached log-chroma target. Huber loss acts only on `features_dc`; scale is calibrated once to 10% of first-activation photometric DC gradient norm.",
+        "A2 and A3 use the same deterministic camera bank rule and refresh schedule. The resolved scale is fixed after calibration; there is no sweep or heldout-driven adjustment. Direction audits permit both signs and report no color-prior-collapse warning. CICA and auxiliary gradient escape are zero in the formal logs.",
         "",
         "## Heldout RGB Results",
     ]
@@ -655,21 +726,60 @@ def _research_note(root: Path, collected: Mapping[str, Any], summary: Mapping[st
     lines.extend(
         [
             "",
-            "Per-view final values and all five paired deltas are in `per_view_metrics.csv`.",
+            "## Per-View Results",
+            "Per-view final values and all five paired deltas are in `per_view_metrics.csv`. A1 loses PSNR on every heldout view except one Panama view (+0.008 dB). A2 is close to A0 on every heldout view, with deltas ranging from -0.105 to +0.253 dB. A3 is below A0 on every heldout view except one Panama view that is effectively tied (-0.004 dB).",
             "",
             "## Clear Rendering And Underwater Safety",
             "No paired real clear ground truth was found. Clear conclusions are qualitative and distributional only; less blue is not automatically better. Panels are native outputs with no white balance, contrast, saturation, histogram matching, gamma change, or manual dehazing.",
             "",
             f"Native clear comparison: `{figures['clear_png']}` and `{figures['clear_pdf']}`. Underwater safety comparison: `{figures['underwater_png']}`. Raw clear summaries are in `clear_color_statistics.csv`.",
+            f"Visual audit: {visual['CICA_finding']} {visual['MDRR_finding']} {visual['combined_finding']}",
+            f"Underwater reconstruction safety: {visual['underwater_reconstruction_finding']}",
             "",
             "## Decomposition And Topology",
-            f"Final heldout decomposition safety pass: `{summary['decomposition_safe']}`. Final populations and split/duplicate/prune/reset counts are in `topology_statistics.csv`; no module-specific topology rule was introduced.",
+            f"Final heldout decomposition safety pass: `{summary['decomposition_safe']}`; every final configuration has `P(J > 1) = 0`. No module-specific topology rule was introduced. A2 population stays within 1% of A0 in every scene: `{a2_population_close}`. MDRR changes the learned topology substantially despite an unchanged topology schedule, increasing the final population by about 56%, 65%, and 56% in Curasao, IUI3-RedSea, and Panama and reducing it by 24% in JapaneseGradens-RedSea. This accompanies RGB degradation rather than a gain.",
+            "",
+            *_topology_table(topology),
             "",
             "## Interaction And Recommendation",
-            f"Quantitative interaction classification: `{summary['interaction_classification']}`. The preregistered RGB/safety decision is in `final_classification.json`; CICA and combined retention additionally require native clear visual review.",
+            f"MDRR: `{classification['MDRR']}`. It improves 0/4 scene means and changes mean PSNR by {summary['mean_PSNR_delta_vs_A0']['A1']:+.6f} dB. CICA: `{classification['CICA']}`. It improves 3/4 scene means, all four are non-worsening at the preregistered -0.05 dB tolerance, and mean PSNR changes by {summary['mean_PSNR_delta_vs_A0']['A2']:+.6f} dB. Combined: `{classification['COMBINED']}` with mean PSNR {summary['mean_PSNR_delta_vs_A0']['A3']:+.6f} dB versus A0.",
+            f"Interaction: `{summary['interaction_classification']}`. A3 is {summary['interaction_evidence']['mean_PSNR_A3_minus_A1']:+.6f} dB versus A1 but {summary['interaction_evidence']['mean_PSNR_A3_minus_A2']:+.6f} dB versus the independently useful A2. It therefore loses CICA's benefit instead of preserving complementary advantages.",
+            "The recommended second innovation is CICA, with the explicit limitation that its native clear improvement is mild and not visually decisive without paired clear ground truth. The recommended method is `OCMC + auxiliary appearance regularization + CICA`; in the preregistered naming this is `BASE+CICA` (A2). MDRR and A3 are not retained. Auxiliary SH regularization remains in the baseline as auxiliary appearance regularization, not as an identifiability innovation.",
+            "",
+            "## Required Final Answers",
+            f"1. Same starting state: yes (`{summary['protocol_safe']}`).",
+            f"2. Identical primary camera sequence: yes (`{collected['protocol']['sequence']['CAMERA_SEQUENCE_EXACT_MATCH']}`).",
+            "3. Matrix completion: yes, all 12 formal runs reached step 14999 with 11,999 matched updates.",
+            f"4. MDRR PSNR deltas: {_psnr_delta_summary(summary, 'A1')}.",
+            f"5. CICA PSNR deltas: {_psnr_delta_summary(summary, 'A2')}.",
+            f"6. Combined PSNR deltas: {_psnr_delta_summary(summary, 'A3')}.",
+            f"7. Combined versus MDRR mean PSNR: {summary['interaction_evidence']['mean_PSNR_A3_minus_A1']:+.6f} dB.",
+            f"8. Combined versus CICA mean PSNR: {summary['interaction_evidence']['mean_PSNR_A3_minus_A2']:+.6f} dB.",
+            f"9. MDRR improved {summary['positive_scene_count_PSNR']['A1']}/4 scene means.",
+            f"10. CICA improved {summary['positive_scene_count_PSNR']['A2']}/4 scene means.",
+            f"11. Combined improved {summary['positive_scene_count_PSNR']['A3']}/4 scene means.",
+            f"12. Best mean PSNR: {summary['best_mean_configuration']['PSNR']} ({mean_metrics['PSNR']['A2']:.6f} dB for A2).",
+            f"13. Best mean SSIM: {summary['best_mean_configuration']['SSIM']} ({mean_metrics['SSIM']['A2']:.6f} for A2).",
+            f"14. Best mean LPIPS: {summary['best_mean_configuration']['LPIPS']} ({mean_metrics['LPIPS']['A2']:.6f} for A2).",
+            "15. CICA distant blue/cyan reduction: mild distributional shift, not a visually decisive reduction.",
+            "16. MDRR water-like appearance contamination: no; it causes conspicuous degradation.",
+            "17. A3 further improvement: no; it is 3.394305 dB below A2 in mean PSNR.",
+            "18. Real paired clear ground truth: no.",
+            "19. Quantitative clear result: not applicable because no paired real clear GT exists.",
+            "20. Clear limitation: all clear/dewatered conclusions are qualitative and distributional only.",
+            "21. Underwater reconstruction: preserved by A2; damaged by A1 and A3.",
+            f"22. Decomposition safety: all pass (`{summary['decomposition_safe']}`).",
+            "23. Gaussian population: A2 tracks A0; MDRR arms change population strongly and adversely.",
+            f"24. MDRR classification: {classification['MDRR']}.",
+            f"25. CICA classification: {classification['CICA']}.",
+            f"26. MDRR+CICA interaction: {classification['Interaction']}.",
+            f"27. Recommended second innovation: {classification['Second innovation']}.",
+            "28. Recommended paper configuration: OCMC + CICA, with the baseline auxiliary appearance regularizer retained.",
+            f"29. Auxiliary SH regularization: {classification['Auxiliary appearance regularization']}.",
+            f"30. Current best version: {classification['Final configuration']} (A2).",
             "",
             "## Limitations",
-            "This is one fixed four-scene, one-seed protocol with no sweep or rescue. Clear rendering has no paired reference, and qualitative preference cannot establish physical correctness. The auxiliary appearance regularizer remains baseline-only and cannot be presented as the second innovation.",
+            "This is one fixed four-scene, one-seed protocol with no sweep or rescue. The small CICA RGB gain does not by itself prove intrinsic purification, clear rendering has no paired reference, and qualitative preference cannot establish physical correctness. The auxiliary appearance regularizer remains baseline-only and cannot be presented as the second innovation.",
         ]
     )
     note.parent.mkdir(parents=True, exist_ok=True)
