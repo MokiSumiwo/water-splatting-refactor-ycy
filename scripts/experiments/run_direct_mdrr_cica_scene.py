@@ -846,16 +846,38 @@ def _mdrr_control(
     primary_pred = primary_outputs["pred_image"].detach().float()
     primary_residual = primary_gt - primary_pred
     primary_add = primary_outputs["rgb_medium_finite"].detach().float() + primary_outputs["rgb_tail"].detach().float()
+    primary_renderer_state = {
+        name: getattr(model, name, None)
+        for name in ("xys", "radii", "depths", "xys_grad_abs", "last_size", "last_fx", "last_fy", "crop_box")
+    }
     with torch.no_grad():
         was_training = model.training
-        model.eval()
-        partner_outputs = model.get_outputs_for_camera(partner_camera.to(model.device))
-        if was_training:
-            model.train()
+        # Match the primary forward's resolution schedule.  At steps before
+        # the final resolution stage, training mode intentionally renders at
+        # half resolution; eval mode would make the partner residual shape
+        # incompatible with the primary residual.
+        try:
+            model.train(mode=True)
+            model.set_crop(None)
+            # get_outputs_for_camera is a no-grad evaluation helper, whereas
+            # the training-mode renderer retains screen-space gradients. Call
+            # the underlying forward with gradients enabled, then discard its
+            # graph. The primary renderer state is restored before returning
+            # so normal densification consumes the primary view's buffers.
+            with torch.enable_grad():
+                partner_outputs = model.get_outputs(partner_camera.to(model.device))
+            partner_outputs = {
+                key: value.detach() if isinstance(value, Tensor) else value
+                for key, value in partner_outputs.items()
+            }
+        finally:
+            for name, value in primary_renderer_state.items():
+                setattr(model, name, value)
+            model.train(mode=was_training)
         partner_gt = _gt(model, partner_batch, partner_outputs["background"]).detach().float()
-        partner_pred = partner_outputs["pred_image"].detach().float()
+        partner_pred = partner_outputs["pred_image"].float()
         partner_residual = partner_gt - partner_pred
-        partner_add = partner_outputs["rgb_medium_finite"].detach().float() + partner_outputs["rgb_tail"].detach().float()
+        partner_add = partner_outputs["rgb_medium_finite"].float() + partner_outputs["rgb_tail"].float()
     a = _responsibility_components(model, primary_camera, primary_outputs, primary_residual, primary_add)
     b = _responsibility_components(model, partner_camera, partner_outputs, partner_residual, partner_add)
     de = a["e"] - b["e"]
@@ -1234,7 +1256,9 @@ def _gradient_routing_audit(
     was_training = model.training
     model.train()
     try:
-        model.step = CICA_START_STEP
+        # Probe at the first MDRR activation so the audit covers the
+        # half-resolution training stage used by the formal continuation.
+        model.step = MDRR_START_STEP
         camera_index, _view_id, camera, batch = records[0]
         partner_index = int(partner["rows"][camera_index]["partner_index"])
         partner_record = records[partner_index]
@@ -1328,7 +1352,7 @@ def _gradient_routing_audit(
         audit = {
             "scene": scene,
             "arm": arm,
-            "absolute_step_probe": CICA_START_STEP,
+            "absolute_step_probe": MDRR_START_STEP,
             "optimizer_step_performed": False,
             "finite_direct_gradients": finite,
             "auxiliary_gradient_escape_l2": auxiliary_escape,
