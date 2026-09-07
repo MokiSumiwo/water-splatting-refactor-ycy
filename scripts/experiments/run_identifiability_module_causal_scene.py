@@ -43,6 +43,7 @@ from scripts.experiments import run_m1_raoc_causal_scene as FORMAL
 from water_splatting._torch_impl import eval_sh_bases
 
 
+SH_C0 = 0.28209479177387814
 EXPERIMENT = "IDENTIFIABILITY_MODULE_CAUSAL_EXPERIMENT"
 MECHANISM = "A_DETACHED_SH_OPACITY_TANGENT_ORTHOGONALIZATION"
 EXPECTED_BRANCH = "research/m1-bounded-intrinsic"
@@ -58,7 +59,12 @@ LOG_INTERVAL = 500
 DIAGNOSTIC_SAMPLE_COUNT = 256
 EPS = 1e-12
 SOURCE_ROOT = REPO_ROOT / "outputs" / "m1_raoc_causal_four_scene_20260827"
-ALLOWED_GPUS = frozenset(("6", "7", "8", "9"))
+ACTIVE_SOURCE_ROOT = SOURCE_ROOT
+SOURCE_CONFIG = REPO_ROOT / "outputs" / "m1_ocmc_causal_iui3_20260825" / "source_bnd_config.yml"
+ACTIVE_SOURCE_CONFIG = SOURCE_CONFIG
+ACTIVE_PARAMETERIZATION = "bounded_sh3"
+ALLOWED_GPUS = frozenset(str(index) for index in range(10))
+ENFORCE_SCENE_GPU_ASSIGNMENT = True
 SCENE_GPUS = dict(CAUSAL.SCENE_GPUS)
 SCENES = tuple(SCENE_GPUS)
 EXPECTED_SOURCE_CHECKPOINT_HASHES = {
@@ -167,7 +173,7 @@ def _protected_hashes() -> Dict[str, str]:
 
 
 def _runtime(scene: str, gpu: str) -> Dict[str, Any]:
-    if scene not in SCENES or SCENE_GPUS[scene] != gpu:
+    if scene not in SCENES or (ENFORCE_SCENE_GPU_ASSIGNMENT and SCENE_GPUS[scene] != gpu):
         raise RuntimeError(f"invalid formal scene/GPU assignment: {scene}/{gpu}")
     if gpu not in ALLOWED_GPUS or os.environ.get("CUDA_VISIBLE_DEVICES") != gpu:
         raise RuntimeError(f"worker must expose only physical GPU {gpu}")
@@ -234,11 +240,19 @@ def _rng_manifest(state: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _source_checkpoint(scene: str) -> Path:
-    return SOURCE_ROOT / scene / "checkpoints" / "C0" / f"step-{START_STEP:09d}.ckpt"
+    return ACTIVE_SOURCE_ROOT / scene / "checkpoints" / "C0" / f"step-{START_STEP:09d}.ckpt"
 
 
 def _source_sequence(scene: str) -> Path:
-    return SOURCE_ROOT / scene / "camera_sequence.json"
+    return ACTIVE_SOURCE_ROOT / scene / "camera_sequence.json"
+
+
+def _scene_config(scene: str) -> Dict[str, Any]:
+    """Resolve the common source config while overriding the scene dataset."""
+
+    config = dict(FORMAL.SCENES[scene])
+    config["source_config"] = str(ACTIVE_SOURCE_CONFIG)
+    return config
 
 
 def _locked_config(model: Any) -> Dict[str, Any]:
@@ -267,7 +281,7 @@ def _locked_config(model: Any) -> Dict[str, Any]:
 def _assert_locked_config(model: Any) -> Dict[str, Any]:
     snapshot = _locked_config(model)
     expected = {
-        "intrinsic_color_parameterization": "bounded_sh3",
+        "intrinsic_color_parameterization": ACTIVE_PARAMETERIZATION,
         "sh_degree": 3,
         "rasterize_mode": "classic",
         "medium_context_mode": "dir_xy_camera",
@@ -292,10 +306,14 @@ def _release(branch: Optional[Any]) -> None:
 
 
 def _load_branch(scene: str, arm: str, load_optimizer: bool = True) -> Tuple[Any, Mapping[str, Any]]:
-    if arm not in ARMS:
+    # The formal start-state audit always loads both labels, even when an
+    # adapter intentionally narrows the training matrix for checkpoint
+    # continuation (for example, C1-only auxiliary recovery).
+    if arm not in ARMS and arm not in ("C0", "C1"):
         raise ValueError(arm)
-    scene_cfg = FORMAL.SCENES[scene]
-    branch = FORMAL._setup_branch(REPO_ROOT, scene_cfg, "C0")
+    scene_cfg = _scene_config(scene)
+    FORMAL.ACTIVE_PARAMETERIZATION = ACTIVE_PARAMETERIZATION
+    branch = FORMAL._setup_branch(REPO_ROOT, scene_cfg, "C0", ACTIVE_PARAMETERIZATION)
     checkpoint = _source_checkpoint(scene)
     payload = torch.load(checkpoint, map_location="cpu")
     if (
@@ -526,6 +544,14 @@ def _sample_image(image: Tensor, xys: Tensor) -> Tensor:
     return image[y, x]
 
 
+def _dc_rgb(model: Any) -> Tensor:
+    """Return the degree-zero RGB under the active intrinsic parameterization."""
+
+    if ACTIVE_PARAMETERIZATION == "legacy":
+        return torch.clamp(SH_C0 * model.features_dc + 0.5, min=1e-6)
+    return torch.sigmoid(SH_C0 * model.features_dc)
+
+
 def _view_response_terms(
     model: Any,
     camera: Any,
@@ -540,7 +566,10 @@ def _view_response_terms(
     viewdirs = viewdirs / torch.linalg.vector_norm(viewdirs, dim=-1, keepdim=True).clamp_min(1e-6)
     bases = eval_sh_bases(16, viewdirs).float()[:, 1:]
     color = outputs["gaussian_view_rgb"].detach().float()[ids]
-    dc_color = outputs["gaussian_view_dc_rgb"].detach().float()[ids]
+    if ACTIVE_PARAMETERIZATION == "legacy":
+        dc_color = _dc_rgb(model).detach().float()[ids]
+    else:
+        dc_color = outputs["gaussian_view_dc_rgb"].detach().float()[ids]
     depth = outputs["projected_gaussian_depths"].detach().reshape(-1)[ids].float()
     xys = model.xys.detach()[ids].float()
     beta_d = _sample_image(outputs["medium_attn"].detach().float(), xys)
@@ -775,6 +804,7 @@ def _train_arm(
     snapshot_steps: Sequence[int],
     training_rng: Mapping[str, Any],
     output_dir: Path,
+    resume_checkpoint: Optional[Path] = None,
 ) -> Dict[str, Any]:
     branch = None
     started = time.perf_counter()
@@ -789,7 +819,28 @@ def _train_arm(
     completed = 0
     try:
         branch, source_payload = _load_branch(scene, arm)
-        _set_rng_state(training_rng)
+        resume_step = START_STEP
+        if resume_checkpoint is not None:
+            resume_payload = torch.load(resume_checkpoint, map_location="cpu", weights_only=False)
+            if resume_payload.get("branch") != arm:
+                raise RuntimeError(f"resume checkpoint arm mismatch: {resume_checkpoint}")
+            resume_step = int(resume_payload.get("absolute_step", -1))
+            if resume_step <= START_STEP or resume_step >= FINAL_STEP:
+                raise RuntimeError(f"resume checkpoint step is not resumable: {resume_checkpoint}")
+            branch.pipeline.model.load_state_dict(resume_payload["model"], strict=True)
+            branch.pipeline.model.step = resume_step
+            branch.scalers = dict(resume_payload.get("scalers", {}))
+            for group, optimizer in branch.optimizers.optimizers.items():
+                optimizer.load_state_dict(resume_payload["optimizers"][group])
+            for group, scheduler in branch.optimizers.schedulers.items():
+                scheduler.load_state_dict(resume_payload["schedulers"][group])
+            source_payload = dict(source_payload)
+            if "rng_state" in resume_payload:
+                _set_rng_state(resume_payload["rng_state"])
+            else:
+                _set_rng_state(training_rng)
+        else:
+            _set_rng_state(training_rng)
         model = branch.pipeline.model
         dm = branch.pipeline.datamanager
         cameras = getattr(dm, "train_cameras", dm.train_dataset.cameras).to(model.device)
@@ -812,6 +863,9 @@ def _train_arm(
         topology_rows.append(_topology_row(arm, START_STEP, model, cumulative))
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
+        rows = [row for row in rows if int(row["absolute_step"]) > resume_step]
+        if not rows:
+            raise RuntimeError(f"resume checkpoint already covers requested sequence: {resume_checkpoint}")
         for sequence_row in rows:
             absolute_step = int(sequence_row["absolute_step"])
             camera_index = int(sequence_row["camera_index"])
@@ -1177,13 +1231,28 @@ def run(
     output_dir: Path,
     final_step: int = FINAL_STEP,
     diagnostic_sample_count: int = DIAGNOSTIC_SAMPLE_COUNT,
+    source_root: Optional[Path] = None,
+    source_config: Optional[Path] = None,
+    parameterization: str = "bounded_sh3",
+    resume_checkpoint: Optional[Path] = None,
 ) -> Dict[str, Any]:
     if final_step <= START_STEP or final_step > FINAL_STEP:
         raise ValueError(f"final_step must be in [{START_STEP + 1}, {FINAL_STEP}]")
+    global ACTIVE_SOURCE_ROOT, ACTIVE_SOURCE_CONFIG, ACTIVE_PARAMETERIZATION
+    if parameterization not in ("legacy", "bounded_sh3", "bounded_headroom_sh3"):
+        raise ValueError(f"unsupported intrinsic color parameterization: {parameterization}")
+    ACTIVE_PARAMETERIZATION = parameterization
+    ACTIVE_SOURCE_ROOT = (source_root or SOURCE_ROOT).resolve()
+    ACTIVE_SOURCE_CONFIG = (source_config or SOURCE_CONFIG).resolve()
+    if not ACTIVE_SOURCE_CONFIG.is_file():
+        raise FileNotFoundError(ACTIVE_SOURCE_CONFIG)
+    if not ACTIVE_SOURCE_ROOT.is_dir():
+        raise FileNotFoundError(f"source root does not exist: {ACTIVE_SOURCE_ROOT}")
+    FORMAL.ACTIVE_PARAMETERIZATION = ACTIVE_PARAMETERIZATION
     formal = final_step == FINAL_STEP
     snapshot_steps = FORMAL_SNAPSHOT_STEPS if formal else (final_step,)
     diagnostic_steps = DIAGNOSTIC_STEPS if formal else (START_STEP, final_step)
-    if output_dir.exists() and any(output_dir.iterdir()):
+    if output_dir.exists() and any(output_dir.iterdir()) and resume_checkpoint is None:
         raise RuntimeError(f"non-empty output directory: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     runtime = _runtime(scene, gpu)
@@ -1230,6 +1299,8 @@ def run(
         },
         "source_checkpoint": str(_source_checkpoint(scene)),
         "source_checkpoint_sha256": _sha256(_source_checkpoint(scene)),
+        "source_root": str(ACTIVE_SOURCE_ROOT),
+        "intrinsic_color_parameterization": ACTIVE_PARAMETERIZATION,
         "source_camera_sequence": str(_source_sequence(scene)),
         "source_camera_sequence_sha256": _sha256(_source_sequence(scene)),
         "continuation_seed": continuation_seed,
@@ -1237,11 +1308,11 @@ def run(
         "protected_hashes": protected_hashes,
         "disk_before": subprocess.check_output(["df", "-B1", str(REPO_ROOT)], text=True).splitlines()[-1],
     }
-    expected_checkpoint = EXPECTED_SOURCE_CHECKPOINT_HASHES[scene]
-    expected_sequence = AUDIT.VC.EXPECTED_CAMERA_SEQUENCE_HASHES[scene]
-    if manifest["source_checkpoint_sha256"] != expected_checkpoint:
+    expected_checkpoint = EXPECTED_SOURCE_CHECKPOINT_HASHES.get(scene) if ACTIVE_SOURCE_ROOT == SOURCE_ROOT else None
+    expected_sequence = AUDIT.VC.EXPECTED_CAMERA_SEQUENCE_HASHES.get(scene) if ACTIVE_SOURCE_ROOT == SOURCE_ROOT else None
+    if expected_checkpoint is not None and manifest["source_checkpoint_sha256"] != expected_checkpoint:
         raise RuntimeError("registered step-3000 checkpoint hash drift")
-    if manifest["source_camera_sequence_sha256"] != expected_sequence:
+    if expected_sequence is not None and manifest["source_camera_sequence_sha256"] != expected_sequence:
         raise RuntimeError("registered camera sequence hash drift")
     _write_json(output_dir / "run_manifest.json", manifest)
     sequence = _camera_sequence(scene, final_step, output_dir)
@@ -1250,7 +1321,13 @@ def run(
     for arm in ARMS:
         print(f"[{scene}] {arm}: {len(sequence)} matched continuation updates", flush=True)
         arm_results[arm] = _train_arm(
-            scene, arm, sequence, snapshot_steps, training_rng, output_dir
+            scene,
+            arm,
+            sequence,
+            snapshot_steps,
+            training_rng,
+            output_dir,
+            resume_checkpoint=resume_checkpoint if arm == "C1" else None,
         )
     training_rows = [row for arm in ARMS for row in arm_results[arm]["training_rows"]]
     gradient_rows = [row for arm in ARMS for row in arm_results[arm]["gradient_rows"]]
@@ -1329,6 +1406,10 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--final-step", type=int, default=FINAL_STEP)
     parser.add_argument("--diagnostic-sample-count", type=int, default=DIAGNOSTIC_SAMPLE_COUNT)
+    parser.add_argument("--source-root", type=Path, default=SOURCE_ROOT)
+    parser.add_argument("--source-config", type=Path, default=SOURCE_CONFIG)
+    parser.add_argument("--parameterization", choices=("legacy", "bounded_sh3", "bounded_headroom_sh3"), default="bounded_sh3")
+    parser.add_argument("--resume-checkpoint", type=Path, default=None)
     args = parser.parse_args()
     run(
         args.scene,
@@ -1336,6 +1417,10 @@ def main() -> None:
         args.output_dir.resolve(),
         final_step=args.final_step,
         diagnostic_sample_count=args.diagnostic_sample_count,
+        source_root=args.source_root.resolve(),
+        source_config=args.source_config.resolve(),
+        parameterization=args.parameterization,
+        resume_checkpoint=args.resume_checkpoint.resolve() if args.resume_checkpoint is not None else None,
     )
 
 

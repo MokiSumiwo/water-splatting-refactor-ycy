@@ -53,6 +53,7 @@ from water_splatting.rendering.medium_jacobian import analytic_medium_jacobian_a
 
 EXPERIMENT = "M1-RAOC-CAUSAL-FOUR-SCENE"
 BRANCHES = ("C0", "C1")
+ACTIVE_PARAMETERIZATION = "bounded_sh3"
 SNAPSHOT_STEPS = (3000, 5000, 8000, 10000, 13000, 14999)
 IDENT_STEPS = (5000, 10000, 14999)
 REFRESH_STEPS = (0, 5000, 10000)
@@ -254,11 +255,14 @@ def _runtime(gpu: str) -> Dict[str, Any]:
     }
 
 
-def _configure_model_config(config: Any, branch: str) -> None:
+def _configure_model_config(config: Any, branch: str, parameterization: Optional[str] = None) -> None:
     """Apply the registered formal model settings before ``setup()``."""
 
     model_config = config.pipeline.model
-    model_config.intrinsic_color_parameterization = "bounded_sh3"
+    resolved_parameterization = parameterization or ACTIVE_PARAMETERIZATION
+    if resolved_parameterization not in ("legacy", "bounded_sh3", "bounded_headroom_sh3"):
+        raise ValueError(f"unsupported intrinsic color parameterization: {resolved_parameterization}")
+    model_config.intrinsic_color_parameterization = resolved_parameterization
     model_config.rasterize_mode = "classic"
     model_config.medium_context_mode = "dir_xy_camera"
     model_config.medium_camera_context_scale = 1.0
@@ -274,10 +278,13 @@ def _configure_model_config(config: Any, branch: str) -> None:
     model_config.medium_identifiability_weight = 0.0
 
 
-def _configure_model(model: Any, branch: str) -> None:
+def _configure_model(model: Any, branch: str, parameterization: Optional[str] = None) -> None:
     """Re-assert branch flags after construction and before each forward."""
 
-    model.config.intrinsic_color_parameterization = "bounded_sh3"
+    resolved_parameterization = parameterization or ACTIVE_PARAMETERIZATION
+    if resolved_parameterization not in ("legacy", "bounded_sh3", "bounded_headroom_sh3"):
+        raise ValueError(f"unsupported intrinsic color parameterization: {resolved_parameterization}")
+    model.config.intrinsic_color_parameterization = resolved_parameterization
     model.config.rasterize_mode = "classic"
     model.config.medium_context_mode = "dir_xy_camera"
     model.config.medium_camera_context_scale = 1.0
@@ -293,7 +300,7 @@ def _configure_model(model: Any, branch: str) -> None:
     model.config.medium_identifiability_weight = 0.0
 
 
-def _setup_branch(repo: Path, scene_cfg: Mapping[str, Any], branch: str) -> BranchState:
+def _setup_branch(repo: Path, scene_cfg: Mapping[str, Any], branch: str, parameterization: Optional[str] = None) -> BranchState:
     config_path = repo / str(scene_cfg["source_config"])
     config = yaml.load(config_path.read_text(encoding="utf8"), Loader=yaml.Loader)
     config.pipeline.datamanager._target = all_methods[config.method_name].pipeline.datamanager._target
@@ -302,7 +309,7 @@ def _setup_branch(repo: Path, scene_cfg: Mapping[str, Any], branch: str) -> Bran
     config.load_checkpoint = None
     config.pipeline.datamanager.load_depths = False
     config.pipeline.datamanager.dataparser.data = repo / str(scene_cfg["data_path"])
-    _configure_model_config(config, branch)
+    _configure_model_config(config, branch, parameterization)
     _set_random_seed(int(config.machine.seed))
     pipeline = config.pipeline.setup(device=torch.device("cuda:0"), test_mode="test")
     if not isinstance(pipeline, Pipeline):
@@ -786,7 +793,7 @@ def _save_checkpoint(branch: BranchState, step: int, out_dir: Path, bundle: Opti
     path.parent.mkdir(parents=True, exist_ok=True)
     bundle_cpu = None if bundle is None else {key: value.detach().cpu().clone() if isinstance(value, Tensor) else value for key, value in bundle.items()}
     state_cpu = None if state is None else {key: value.detach().cpu().clone() if isinstance(value, Tensor) else value for key, value in state.items()}
-    torch.save({"experiment": EXPERIMENT, "branch": branch.branch, "absolute_step": int(step), "model": branch.pipeline.model.state_dict(), "optimizers": {k: v.state_dict() for k, v in branch.optimizers.optimizers.items()}, "schedulers": {k: v.state_dict() for k, v in branch.optimizers.schedulers.items()}, "scalers": dict(branch.scalers), "ocmc_bundle": bundle_cpu, "raoc_state": state_cpu, "rng_manifest": _rng_manifest(rng), "metadata": {"scene": out_dir.parent.name, "matched_camera_sequence": True, "normal_topology_enabled": True}}, path)
+    torch.save({"experiment": EXPERIMENT, "branch": branch.branch, "absolute_step": int(step), "model": branch.pipeline.model.state_dict(), "optimizers": {k: v.state_dict() for k, v in branch.optimizers.optimizers.items()}, "schedulers": {k: v.state_dict() for k, v in branch.optimizers.schedulers.items()}, "scalers": dict(branch.scalers), "ocmc_bundle": bundle_cpu, "raoc_state": state_cpu, "rng_manifest": _rng_manifest(rng), "metadata": {"scene": out_dir.parent.name, "matched_camera_sequence": True, "normal_topology_enabled": True, "intrinsic_color_parameterization": ACTIVE_PARAMETERIZATION}}, path)
     return path
 
 
@@ -1461,16 +1468,20 @@ def postprocess_only(repo: Path, scene: str, gpu: str, output_dir: Path) -> Dict
     return _summary(scene, scene_cfg, output_dir, runtime, start_audit, bank)
 
 
-def run(repo: Path, scene: str, gpu: str, output_dir: Path, allow_existing: bool = False, max_steps: int = 15000) -> Dict[str, Any]:
+def run(repo: Path, scene: str, gpu: str, output_dir: Path, allow_existing: bool = False, max_steps: int = 15000, parameterization: str = "bounded_sh3") -> Dict[str, Any]:
     if scene not in SCENES:
         raise ValueError(f"unknown canonical scene {scene}; choose {sorted(SCENES)}")
+    global ACTIVE_PARAMETERIZATION
+    if parameterization not in ("legacy", "bounded_sh3", "bounded_headroom_sh3"):
+        raise ValueError(f"unsupported intrinsic color parameterization: {parameterization}")
+    ACTIVE_PARAMETERIZATION = parameterization
     _configure_schedule(int(max_steps))
     runtime = _runtime(gpu)
     if output_dir.exists() and any(output_dir.iterdir()) and not allow_existing:
         raise RuntimeError(f"non-empty output directory: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     scene_cfg = SCENES[scene]
-    _write_json(output_dir / "runtime_manifest.json", runtime)
+    _write_json(output_dir / "runtime_manifest.json", {**runtime, "intrinsic_color_parameterization": ACTIVE_PARAMETERIZATION})
     _write_json(output_dir / "repo_manifest.json", {"branch": os.popen(f"git -C {repo} branch --show-current").read().strip(), "head": os.popen(f"git -C {repo} rev-parse HEAD").read().strip(), "historical_untracked_files_preserved": list(HISTORICAL_GMVC)})
     _seed_all(TRAINING_SEED)
     probe = _setup_branch(repo, scene_cfg, "C0")
@@ -1541,7 +1552,10 @@ def run(repo: Path, scene: str, gpu: str, output_dir: Path, allow_existing: bool
     _evaluate_checkpoints(repo, scene, scene_cfg, output_dir)
     print(f"[{scene}] mechanism diagnostics", flush=True)
     _mechanism_diagnostics(repo, scene, scene_cfg, samples, output_dir)
-    return _summary(scene, scene_cfg, output_dir, combined_runtime, start_audit, bank)
+    summary = _summary(scene, scene_cfg, output_dir, combined_runtime, start_audit, bank)
+    summary["intrinsic_color_parameterization"] = ACTIVE_PARAMETERIZATION
+    _write_json(output_dir / "scene_summary.json", summary)
+    return summary
 
 
 def main() -> None:
@@ -1553,11 +1567,12 @@ def main() -> None:
     parser.add_argument("--allow-existing-output", action="store_true")
     parser.add_argument("--postprocess-only", action="store_true", help="recover diagnostics from completed checkpoints without training")
     parser.add_argument("--max-steps", type=int, default=15000, help="validation-only shortened run; default is the registered 15K protocol")
+    parser.add_argument("--parameterization", choices=("legacy", "bounded_sh3", "bounded_headroom_sh3"), default="bounded_sh3")
     args = parser.parse_args()
     if args.postprocess_only:
         summary = postprocess_only(args.repo.resolve(), args.scene, str(args.gpu), args.output_dir.resolve())
     else:
-        summary = run(args.repo.resolve(), args.scene, str(args.gpu), args.output_dir.resolve(), bool(args.allow_existing_output), int(args.max_steps))
+        summary = run(args.repo.resolve(), args.scene, str(args.gpu), args.output_dir.resolve(), bool(args.allow_existing_output), int(args.max_steps), args.parameterization)
     print(json.dumps(summary, indent=2, sort_keys=True, default=_json_default), flush=True)
 
 

@@ -54,7 +54,10 @@ ARMS = ("A1", "A2", "A3")
 START_STEP = 3000
 FINAL_STEP = 14999
 SNAPSHOT_STEPS = (5000, 8000, 10000, 13000, 14999)
+ACTIVE_SNAPSHOT_STEPS = SNAPSHOT_STEPS
 TRAINING_SEED = 42
+ACTIVE_TRAINING_SEED = TRAINING_SEED
+ACTIVE_COMPACT_OUTPUT = False
 MDRR_START_STEP = 5000
 CICA_START_STEP = 10000
 CICA_REFRESH_STEPS = (10000, 12000, 14000)
@@ -72,9 +75,14 @@ EPS = 1e-12
 SH_C0 = 0.28209479177387814
 SOURCE_ROOT = REPO_ROOT / "outputs" / "m1_raoc_causal_four_scene_20260827"
 SOURCE_CONFIG = REPO_ROOT / "outputs" / "m1_ocmc_causal_iui3_20260825" / "source_bnd_config.yml"
+ACTIVE_SOURCE_ROOT = SOURCE_ROOT
+ACTIVE_SOURCE_CONFIG = SOURCE_CONFIG
+ACTIVE_PARAMETERIZATION = "bounded_sh3"
 OUTPUT_ROOT = REPO_ROOT / "outputs" / "direct_mdrr_cica_four_scene_20260903"
 RENDER_ROOT = REPO_ROOT / "renders" / "direct_mdrr_cica_four_scene_20260903"
-ALLOWED_GPUS = frozenset(("6", "7", "8", "9"))
+ACTIVE_RENDER_ROOT = RENDER_ROOT
+ALLOWED_GPUS = frozenset(str(index) for index in range(10))
+ENFORCE_SCENE_GPU_ASSIGNMENT = True
 SCENE_GPUS = {
     "Curasao": "6",
     "IUI3-RedSea": "7",
@@ -238,7 +246,9 @@ def _rng_manifest(state: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _runtime(scene: str, gpu: str) -> Dict[str, Any]:
-    if scene not in SCENE_GPUS or SCENE_GPUS[scene] != str(gpu):
+    if scene not in SCENE_GPUS:
+        raise RuntimeError(f"unknown scene: {scene}")
+    if ENFORCE_SCENE_GPU_ASSIGNMENT and SCENE_GPUS[scene] != str(gpu):
         raise RuntimeError(f"invalid scene/GPU assignment: {scene}/{gpu}")
     if os.environ.get("CUDA_VISIBLE_DEVICES") != str(gpu):
         raise RuntimeError("CUDA_VISIBLE_DEVICES must expose only the assigned physical GPU")
@@ -261,11 +271,17 @@ def _runtime(scene: str, gpu: str) -> Dict[str, Any]:
 
 
 def _source_checkpoint(scene: str) -> Path:
-    return SOURCE_ROOT / scene / "checkpoints" / "C0" / f"step-{START_STEP:09d}.ckpt"
+    return ACTIVE_SOURCE_ROOT / scene / "checkpoints" / "C0" / f"step-{START_STEP:09d}.ckpt"
 
 
 def _source_sequence(scene: str) -> Path:
-    return SOURCE_ROOT / scene / "camera_sequence.json"
+    return ACTIVE_SOURCE_ROOT / scene / "camera_sequence.json"
+
+
+def _active_snapshots(max_step: int) -> Tuple[int, ...]:
+    if ACTIVE_COMPACT_OUTPUT:
+        return (int(max_step),)
+    return tuple(dict.fromkeys([step for step in ACTIVE_SNAPSHOT_STEPS if step <= int(max_step)] + [int(max_step)]))
 
 
 def _scene_config(scene: str) -> Dict[str, Any]:
@@ -277,7 +293,7 @@ def _scene_config(scene: str) -> Dict[str, Any]:
 
 def _configure_model_config(config: Any) -> None:
     model = config.pipeline.model
-    model.intrinsic_color_parameterization = "bounded_sh3"
+    model.intrinsic_color_parameterization = ACTIVE_PARAMETERIZATION
     model.sh_degree = 3
     model.rasterize_mode = "classic"
     model.medium_context_mode = "dir_xy_camera"
@@ -293,7 +309,7 @@ def _configure_model_config(config: Any) -> None:
 
 
 def _configure_model(model: Any) -> None:
-    model.config.intrinsic_color_parameterization = "bounded_sh3"
+    model.config.intrinsic_color_parameterization = ACTIVE_PARAMETERIZATION
     model.config.sh_degree = 3
     model.config.rasterize_mode = "classic"
     model.config.medium_context_mode = "dir_xy_camera"
@@ -309,7 +325,7 @@ def _configure_model(model: Any) -> None:
 
 
 def _new_branch(scene: str) -> Any:
-    config = yaml.load(SOURCE_CONFIG.read_text(encoding="utf8"), Loader=yaml.Loader)
+    config = yaml.load(ACTIVE_SOURCE_CONFIG.read_text(encoding="utf8"), Loader=yaml.Loader)
     config.pipeline.datamanager._target = all_methods[config.method_name].pipeline.datamanager._target
     config.load_dir = None
     config.load_step = None
@@ -351,13 +367,20 @@ def _load_source(branch: Any, scene: str) -> Mapping[str, Any]:
         "JapaneseGradens-RedSea": "5f52b47704b075a72de3ed14ef0147fdad194cd2311756325fc5e9338df266a4",
         "Panama": "f1b9a515c6cc4ffd30698d50f42f7b01291a3238dd9d38b33e05294b22cd4a23",
     }[scene]
-    if _sha256(checkpoint) != expected:
+    if ACTIVE_SOURCE_ROOT == SOURCE_ROOT and _sha256(checkpoint) != expected:
         raise RuntimeError(f"registered source checkpoint hash drift: {checkpoint}")
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     if payload.get("branch") != "C0" or int(payload.get("absolute_step", -1)) != START_STEP:
         raise RuntimeError("source checkpoint is not OCMC C0@3000")
     if payload.get("raoc_state") is not None or payload.get("ocmc_bundle") is None:
         raise RuntimeError("source checkpoint must contain OCMC and no RAOC state")
+    metadata = payload.get("metadata", {})
+    source_parameterization = metadata.get("intrinsic_color_parameterization")
+    if source_parameterization is not None and source_parameterization != ACTIVE_PARAMETERIZATION:
+        raise RuntimeError(
+            f"source parameterization mismatch: checkpoint={source_parameterization!r}, "
+            f"requested={ACTIVE_PARAMETERIZATION!r}"
+        )
     branch.pipeline.model.load_state_dict(payload["model"], strict=True)
     branch.pipeline.model.step = START_STEP
     _configure_model(branch.pipeline.model)
@@ -476,7 +499,7 @@ def _start_audit(
         "raoc_enabled": False,
         "ocmc_enabled": True,
         "scaler_state_present": bool(payload.get("scalers", {})),
-        "rng_provenance": "seed-42 continuation RNG is restored before every arm; source checkpoint stores only RNG hashes",
+        "rng_provenance": f"seed-{ACTIVE_TRAINING_SEED} continuation RNG is restored after branch setup; source checkpoint stores only RNG hashes",
         "forward_probe": forward_probe,
     }
     _write_json(output_dir / "start_state_equivalence.json", audit)
@@ -635,7 +658,7 @@ std::vector<torch::Tensor> cica_forward(
     torch::Tensor gaussian_ids_sorted, torch::Tensor tile_bins,
     torch::Tensor xys, torch::Tensor conics, torch::Tensor colors,
     torch::Tensor opacities, torch::Tensor medium_attn, torch::Tensor depths,
-    torch::Tensor residual, int block_width);
+    torch::Tensor residual, int block_width, int legacy_mode);
 '''
     cuda = r'''
 #include <torch/extension.h>
@@ -649,7 +672,7 @@ __global__ void cica_kernel(
     int tile_x, int width, int height, const int* ids, const int2* bins,
     const float2* xys, const float3* conics, const float* colors,
     const float* opacities, const float* medium_attn, const float* depths,
-    const float* residual, float* numerator, float* information) {
+    const float* residual, float* numerator, float* information, int legacy_mode) {
     const int tx = blockIdx.x, ty = blockIdx.y;
     const int px = tx * blockDim.x + threadIdx.x;
     const int py = ty * blockDim.y + threadIdx.y;
@@ -702,7 +725,7 @@ __global__ void cica_kernel(
             for (int channel = 0; channel < 3; ++channel) {
                 const float color = colors[3 * gaussian + channel];
                 const float attenuation = __expf(-medium_attn[3 * pixel + channel] * depth);
-                const float jacobian = visibility * attenuation * color * (1.0f - color) * SH_C0;
+                const float jacobian = visibility * attenuation * (legacy_mode ? SH_C0 : color * (1.0f - color) * SH_C0);
                 atomicAdd(&numerator[3 * gaussian + channel], jacobian * residual[3 * pixel + channel]);
                 atomicAdd(&information[3 * gaussian + channel], jacobian * jacobian);
             }
@@ -717,7 +740,7 @@ std::vector<torch::Tensor> cica_forward(
     torch::Tensor gaussian_ids_sorted, torch::Tensor tile_bins,
     torch::Tensor xys, torch::Tensor conics, torch::Tensor colors,
     torch::Tensor opacities, torch::Tensor medium_attn, torch::Tensor depths,
-    torch::Tensor residual, int block_width) {
+    torch::Tensor residual, int block_width, int legacy_mode) {
     auto numerator = torch::zeros_like(colors);
     auto information = torch::zeros_like(colors);
     const dim3 grid(tile_bounds[0].item<int>(), tile_bounds[1].item<int>(), 1);
@@ -729,7 +752,7 @@ std::vector<torch::Tensor> cica_forward(
         gaussian_ids_sorted.data_ptr<int>(), reinterpret_cast<const int2*>(tile_bins.data_ptr<int>()),
         reinterpret_cast<const float2*>(xys.data_ptr<float>()), reinterpret_cast<const float3*>(conics.data_ptr<float>()),
         colors.data_ptr<float>(), opacities.data_ptr<float>(), medium_attn.data_ptr<float>(), depths.data_ptr<float>(),
-        residual.data_ptr<float>(), numerator.data_ptr<float>(), information.data_ptr<float>());
+        residual.data_ptr<float>(), numerator.data_ptr<float>(), information.data_ptr<float>(), legacy_mode);
     const auto error = cudaGetLastError();
     TORCH_CHECK(error == cudaSuccess, cudaGetErrorString(error));
     return {numerator, information};
@@ -817,16 +840,18 @@ def _cica_local_evidence(
         geometry["depths"].reshape(-1).float().contiguous(),
         residual.detach().reshape(-1, 3).float().contiguous(),
         16,
+        int(ACTIVE_PARAMETERIZATION == "legacy"),
     )
     finite = torch.isfinite(numerator).all(dim=-1) & torch.isfinite(information).all(dim=-1)
     information_sum = information.sum(dim=-1)
     valid = finite & (information_sum > CICA_INFORMATION_FLOOR)
-    # The CUDA accumulator differentiates with respect to features_dc. Convert
-    # the least-squares feature update back to the degree-zero SH logit domain.
-    delta_dc_logits = SH_C0 * numerator / information.clamp_min(CICA_INFORMATION_FLOOR)
-    delta_dc_logits = torch.where(valid[:, None], delta_dc_logits, torch.zeros_like(delta_dc_logits))
+    # The accumulator solves for a feature-space update.  Bounded SH uses the
+    # resulting SH-logit displacement for its sigmoid DC; Legacy uses the
+    # linear SH displacement and therefore converts it to RGB with SH_C0.
+    delta_parameter = numerator / information.clamp_min(CICA_INFORMATION_FLOOR)
+    delta_parameter = torch.where(valid[:, None], delta_parameter, torch.zeros_like(delta_parameter))
     return {
-        "delta_dc_logits": delta_dc_logits.detach(),
+        "delta_parameter": delta_parameter.detach(),
         "information": information.detach(),
         "information_sum": information_sum.detach(),
         "valid": valid.detach(),
@@ -951,10 +976,13 @@ def _build_cica_controller(model: Any, bank_records: Sequence[Tuple[int, str, Ca
         if not bool(visible.any()):
             del outputs, evidence
             continue
-        dc = outputs["gaussian_view_dc_rgb"].detach().float()
-        dc_logits = outputs["gaussian_view_dc_logits"].detach().float()
-        delta_logits = evidence["delta_dc_logits"]
-        corrected_dc = torch.sigmoid(dc_logits + delta_logits).clamp(1e-6, 1.0 - 1e-6)
+        if ACTIVE_PARAMETERIZATION == "legacy":
+            dc = torch.clamp(SH_C0 * model.features_dc.detach().float() + 0.5, min=1e-6)
+            corrected_dc = torch.clamp(dc + SH_C0 * evidence["delta_parameter"], min=1e-6)
+        else:
+            dc = outputs["gaussian_view_dc_rgb"].detach().float()
+            dc_logits = outputs["gaussian_view_dc_logits"].detach().float()
+            corrected_dc = torch.sigmoid(dc_logits + SH_C0 * evidence["delta_parameter"]).clamp(1e-6, 1.0 - 1e-6)
         information = torch.where(visible, evidence["information_sum"], torch.zeros_like(evidence["information_sum"]))
         chroma = torch.stack(
             [torch.log((corrected_dc[:, 0] + 1e-6) / (corrected_dc[:, 1] + 1e-6)), torch.log((corrected_dc[:, 2] + 1e-6) / (corrected_dc[:, 1] + 1e-6))], dim=-1
@@ -963,7 +991,7 @@ def _build_cica_controller(model: Any, bank_records: Sequence[Tuple[int, str, Ca
         chroma_views.append(chroma)
         jacobian_views.append(information.double())
         support += visible.to(torch.int16)
-        del outputs, gt, residual, evidence, dc, dc_logits, delta_logits, corrected_dc, information, chroma
+        del outputs, gt, residual, evidence, dc, corrected_dc, information, chroma
     valid = support >= 3
     if chroma_views:
         values = torch.stack(chroma_views, dim=0)
@@ -998,7 +1026,10 @@ def _cica_loss(model: Any, controller: Optional[Mapping[str, Tensor]]) -> Tuple[
         return zero, {"enabled": False, "valid_gaussians": 0, "valid_fraction": 0.0, "raw_loss": 0.0}
     if int(controller["population"].item()) != int(model.num_points):
         raise RuntimeError("CICA target population is stale")
-    dc = torch.sigmoid(model.features_dc * SH_C0)
+    if ACTIVE_PARAMETERIZATION == "legacy":
+        dc = torch.clamp(model.features_dc * SH_C0 + 0.5, min=1e-6)
+    else:
+        dc = torch.sigmoid(model.features_dc * SH_C0)
     current = torch.stack(
         [torch.log((dc[:, 0] + 1e-6) / (dc[:, 1] + 1e-6)), torch.log((dc[:, 2] + 1e-6) / (dc[:, 1] + 1e-6))], dim=-1
     )
@@ -1471,7 +1502,8 @@ def _save_checkpoint(branch: Any, scene: str, arm: str, step: int, output_dir: P
                 "auxiliary_appearance_enabled": AUXILIARY_APPEARANCE_ENABLED,
                 "auxiliary_appearance_strength": AUXILIARY_APPEARANCE_STRENGTH,
                 "resolved_lambda_CICA": lambda_cica,
-                "ocmc_frozen": True,
+        "ocmc_frozen": True,
+        "intrinsic_color_parameterization": ACTIVE_PARAMETERIZATION,
                 "raoc_enabled": False,
                 "normal_topology_enabled": True,
             },
@@ -1481,13 +1513,46 @@ def _save_checkpoint(branch: Any, scene: str, arm: str, step: int, output_dir: P
     return path
 
 
-def _train_arm(scene: str, arm: str, output_dir: Path, sequence: Sequence[Mapping[str, Any]], partner: Mapping[str, Any], bank: Mapping[str, Any], training_rng: Mapping[str, Any], max_step: int = FINAL_STEP) -> Dict[str, Any]:
+def _train_arm(
+    scene: str,
+    arm: str,
+    output_dir: Path,
+    sequence: Sequence[Mapping[str, Any]],
+    partner: Mapping[str, Any],
+    bank: Mapping[str, Any],
+    training_rng: Mapping[str, Any],
+    max_step: int = FINAL_STEP,
+    resume_checkpoint: Optional[Path] = None,
+) -> Dict[str, Any]:
     branch = None
     started = time.perf_counter()
     try:
         branch = _new_branch(scene)
         source_payload = _load_source(branch, scene)
-        _set_rng_state(training_rng)
+        resume_step = START_STEP
+        resume_metadata: Mapping[str, Any] = {}
+        if resume_checkpoint is not None:
+            resume_payload = torch.load(resume_checkpoint, map_location="cpu", weights_only=False)
+            if resume_payload.get("arm") != arm:
+                raise RuntimeError(f"resume checkpoint arm mismatch: {resume_checkpoint}")
+            resume_step = int(resume_payload.get("absolute_step", -1))
+            if resume_step <= START_STEP or resume_step >= int(max_step):
+                raise RuntimeError(f"resume checkpoint step is not resumable: {resume_checkpoint}")
+            model = branch.pipeline.model
+            model.load_state_dict(resume_payload["model"], strict=True)
+            model.step = resume_step
+            branch.scalers = dict(resume_payload.get("scalers", {}))
+            for group, optimizer in branch.optimizers.optimizers.items():
+                optimizer.load_state_dict(resume_payload["optimizers"][group])
+            for group, scheduler in branch.optimizers.schedulers.items():
+                scheduler.load_state_dict(resume_payload["schedulers"][group])
+            resume_metadata = dict(resume_payload.get("metadata", {}))
+            if "rng_state" in resume_payload:
+                _set_rng_state(resume_payload["rng_state"])
+            else:
+                _set_rng_state(training_rng)
+        else:
+            _set_rng_state(training_rng)
         model = branch.pipeline.model
         dm = branch.pipeline.datamanager
         cameras = getattr(dm, "train_cameras", dm.train_dataset.cameras).to(model.device)
@@ -1502,7 +1567,11 @@ def _train_arm(scene: str, arm: str, output_dir: Path, sequence: Sequence[Mappin
         controller: Optional[Dict[str, Tensor]] = None
         auxiliary_controller: Optional[Dict[str, Any]] = None
         cica_controller: Optional[Dict[str, Tensor]] = None
-        lambda_cica: Optional[float] = None
+        lambda_cica: Optional[float] = (
+            float(resume_metadata["resolved_lambda_CICA"])
+            if resume_metadata.get("resolved_lambda_CICA") is not None
+            else None
+        )
         mdrr_control_hash = ""
         mdrr_info: Dict[str, Any] = {"enabled": False}
         rows: List[Dict[str, Any]] = []
@@ -1512,8 +1581,12 @@ def _train_arm(scene: str, arm: str, output_dir: Path, sequence: Sequence[Mappin
         checkpoints: List[Dict[str, Any]] = []
         cumulative = {"split": 0, "duplicate": 0, "prune": 0, "reset": 0}
         projector_hash_start = _hash_tensor(model._camera_medium_observability_projector)
-        snapshot_steps = tuple(dict.fromkeys([step for step in SNAPSHOT_STEPS if step <= int(max_step)] + [int(max_step)]))
-        sequence = [row for row in sequence if int(row["absolute_step"]) <= int(max_step)]
+        snapshot_steps = _active_snapshots(max_step)
+        sequence = [
+            row
+            for row in sequence
+            if resume_step < int(row["absolute_step"]) <= int(max_step)
+        ]
         if not sequence:
             raise RuntimeError("empty continuation sequence")
         if AUXILIARY_APPEARANCE_ENABLED:
@@ -1806,10 +1879,16 @@ def _evaluate_arm(scene: str, arm: str, output_dir: Path, render_dir: Path) -> D
         per_view_rows: List[Dict[str, Any]] = []
         decomposition_rows: List[Dict[str, Any]] = []
         render_rows: List[Dict[str, Any]] = []
-        for step in SNAPSHOT_STEPS:
+        for step in _active_snapshots(FINAL_STEP):
             checkpoint = output_dir / "checkpoints" / f"step-{step:09d}.ckpt"
             payload = _load_snapshot(branch, scene, checkpoint)
-            row, views, decomp, saved_renders = _evaluate_checkpoint(branch, arm, step, records_eval, render_dir if step == FINAL_STEP else None)
+            row, views, decomp, saved_renders = _evaluate_checkpoint(
+                branch,
+                arm,
+                step,
+                records_eval,
+                render_dir if step == FINAL_STEP and not ACTIVE_COMPACT_OUTPUT else None,
+            )
             global_rows.append(row)
             per_view_rows.extend(views)
             decomposition_rows.append(decomp)
@@ -1860,17 +1939,40 @@ def _smoke_reload_audit(scene: str, arm: str, output_dir: Path, checkpoint: Path
         _release(branch)
 
 
-def run(scene: str, arm: str, gpu: str, output_dir: Path, max_step: int = FINAL_STEP) -> Dict[str, Any]:
+def run(
+    scene: str,
+    arm: str,
+    gpu: str,
+    output_dir: Path,
+    max_step: int = FINAL_STEP,
+    source_root: Optional[Path] = None,
+    source_config: Optional[Path] = None,
+    parameterization: str = "bounded_sh3",
+    resume_checkpoint: Optional[Path] = None,
+    training_seed: int = TRAINING_SEED,
+    compact_output: bool = False,
+) -> Dict[str, Any]:
     if arm not in ARMS:
         raise ValueError(arm)
+    global ACTIVE_SOURCE_ROOT, ACTIVE_SOURCE_CONFIG, ACTIVE_PARAMETERIZATION
+    global ACTIVE_TRAINING_SEED, ACTIVE_COMPACT_OUTPUT
+    if parameterization not in ("legacy", "bounded_sh3", "bounded_headroom_sh3"):
+        raise ValueError(f"unsupported intrinsic color parameterization: {parameterization}")
+    ACTIVE_SOURCE_ROOT = (source_root or SOURCE_ROOT).resolve()
+    ACTIVE_SOURCE_CONFIG = (source_config or SOURCE_CONFIG).resolve()
+    ACTIVE_PARAMETERIZATION = parameterization
+    ACTIVE_TRAINING_SEED = int(training_seed)
+    ACTIVE_COMPACT_OUTPUT = bool(compact_output)
+    FORMAL.ACTIVE_PARAMETERIZATION = ACTIVE_PARAMETERIZATION
+    AUX.ACTIVE_PARAMETERIZATION = ACTIVE_PARAMETERIZATION
     runtime = _runtime(scene, gpu)
-    if not SOURCE_CONFIG.is_file():
-        raise FileNotFoundError(SOURCE_CONFIG)
-    if output_dir.exists() and any(output_dir.iterdir()):
+    if not ACTIVE_SOURCE_CONFIG.is_file():
+        raise FileNotFoundError(ACTIVE_SOURCE_CONFIG)
+    if output_dir.exists() and any(output_dir.iterdir()) and resume_checkpoint is None:
         raise RuntimeError(f"non-empty output directory: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(SOURCE_CONFIG, output_dir / "source_bnd_config.yml")
-    _seed_all(TRAINING_SEED)
+    shutil.copy2(ACTIVE_SOURCE_CONFIG, output_dir / "source_config.yml")
+    _seed_all(ACTIVE_TRAINING_SEED)
     # Historical A0 records the continuation RNG immediately after seeding,
     # before any pipeline setup consumes random values. Every new arm restores
     # this exact state immediately before its first continuation update.
@@ -1899,11 +2001,14 @@ def run(scene: str, arm: str, gpu: str, output_dir: Path, max_step: int = FINAL_
             "runtime": runtime,
             "source_checkpoint": str(_source_checkpoint(scene)),
             "source_checkpoint_sha256": _sha256(_source_checkpoint(scene)),
-            "source_config_sha256": _sha256(SOURCE_CONFIG),
+            "source_config_sha256": _sha256(ACTIVE_SOURCE_CONFIG),
+            "source_root": str(ACTIVE_SOURCE_ROOT),
+            "intrinsic_color_parameterization": ACTIVE_PARAMETERIZATION,
             "start_step": START_STEP,
             "final_step": max_step,
             "matched_updates": max_step - START_STEP,
-            "training_seed": TRAINING_SEED,
+            "training_seed": ACTIVE_TRAINING_SEED,
+            "compact_output": ACTIVE_COMPACT_OUTPUT,
             "training_rng_manifest": _rng_manifest(training_rng),
             "module_schedule": {
                 "AUXILIARY_APPEARANCE": {"enabled": AUXILIARY_APPEARANCE_ENABLED, "name": "A_DETACHED_SH_OPACITY_TANGENT_ORTHOGONALIZATION", "strength": AUXILIARY_APPEARANCE_STRENGTH, "role": "CURRENT_BASE auxiliary appearance regularization; not claimed as identifiability innovation"},
@@ -1918,13 +2023,32 @@ def run(scene: str, arm: str, gpu: str, output_dir: Path, max_step: int = FINAL_
         })
     finally:
         _release(probe)
-    result = _train_arm(scene, arm, output_dir, sequence, partner, bank, training_rng, max_step=max_step)
+    result = _train_arm(
+        scene,
+        arm,
+        output_dir,
+        sequence,
+        partner,
+        bank,
+        training_rng,
+        max_step=max_step,
+        resume_checkpoint=resume_checkpoint,
+    )
     if max_step == FINAL_STEP:
-        render_dir = RENDER_ROOT / scene
+        render_dir = ACTIVE_RENDER_ROOT / scene
         evaluation = _evaluate_arm(scene, arm, output_dir, render_dir)
         result["evaluation_rows"] = len(evaluation["global_rows"])
         result["per_view_rows"] = len(evaluation["per_view_rows"])
         _write_json(output_dir / "decomposition_safety.json", {"rows": evaluation["decomposition_rows"], "all_P_J_gt_1_zero": all(float(row.get("P_J_gt_1", 0.0)) == 0.0 for row in evaluation["decomposition_rows"])})
+        if ACTIVE_COMPACT_OUTPUT:
+            removed_checkpoints = []
+            for checkpoint in sorted((output_dir / "checkpoints").glob("*.ckpt")):
+                removed_checkpoints.append({"path": str(checkpoint), "size_bytes": checkpoint.stat().st_size})
+                checkpoint.unlink()
+            result["checkpoint_retained"] = False
+            result["removed_checkpoints"] = removed_checkpoints
+        else:
+            result["checkpoint_retained"] = True
         _write_json(output_dir / "final_summary.json", result)
     else:
         smoke_checkpoint = output_dir / "checkpoints" / f"step-{max_step:09d}.ckpt"
@@ -1941,8 +2065,26 @@ def main() -> None:
     parser.add_argument("--gpu", choices=tuple(sorted(ALLOWED_GPUS)), required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--max-step", type=int, default=FINAL_STEP)
+    parser.add_argument("--source-root", type=Path, default=SOURCE_ROOT)
+    parser.add_argument("--source-config", type=Path, default=SOURCE_CONFIG)
+    parser.add_argument("--parameterization", choices=("legacy", "bounded_sh3", "bounded_headroom_sh3"), default="bounded_sh3")
+    parser.add_argument("--resume-checkpoint", type=Path, default=None)
+    parser.add_argument("--seed", type=int, default=TRAINING_SEED)
+    parser.add_argument("--compact-output", action="store_true")
     args = parser.parse_args()
-    result = run(args.scene, args.arm, args.gpu, args.output_dir.resolve(), int(args.max_step))
+    result = run(
+        args.scene,
+        args.arm,
+        args.gpu,
+        args.output_dir.resolve(),
+        int(args.max_step),
+        source_root=args.source_root.resolve(),
+        source_config=args.source_config.resolve(),
+        parameterization=args.parameterization,
+        resume_checkpoint=args.resume_checkpoint.resolve() if args.resume_checkpoint is not None else None,
+        training_seed=int(args.seed),
+        compact_output=bool(args.compact_output),
+    )
     print(json.dumps(_sanitize(result), indent=2, sort_keys=True), flush=True)
 
 
