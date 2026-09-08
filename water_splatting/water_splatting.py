@@ -222,6 +222,12 @@ class WaterSplattingModelConfig(ModelConfig):
     """Enable default-off OCMC projection of camera-conditioned medium residuals."""
     camera_medium_observability_strength: float = 1.0
     """Blend strength for the detached camera-medium observability projector."""
+    camera_medium_observability_strength_start: float = 1.0
+    """Initial OCMC blend strength when a positive ramp is configured."""
+    camera_medium_observability_strength_ramp_start_step: int = 0
+    """Absolute model step at which an OCMC strength ramp begins."""
+    camera_medium_observability_strength_ramp_steps: int = 0
+    """Number of model steps used to ramp OCMC to its target strength."""
     camera_medium_ray_adaptive_observability_enabled: bool = False
     """Enable default-off RAOC ray/context-adaptive medium capacity control."""
     camera_medium_raoc_local_scale_quantile: float = 0.50
@@ -1638,6 +1644,17 @@ class WaterSplattingModel(Model):
             dtype=rotation_world_from_camera.dtype,
             device=rotation_world_from_camera.device,
         )
+        target_strength = float(getattr(self.config, "camera_medium_observability_strength", 1.0))
+        start_strength = float(getattr(self.config, "camera_medium_observability_strength_start", target_strength))
+        ramp_start_step = int(getattr(self.config, "camera_medium_observability_strength_ramp_start_step", 0))
+        ramp_steps = max(0, int(getattr(self.config, "camera_medium_observability_strength_ramp_steps", 0)))
+        if ramp_steps > 0:
+            progress = min(max((float(self.step) - float(ramp_start_step)) / float(ramp_steps), 0.0), 1.0)
+            observability_strength = start_strength + progress * (target_strength - start_strength)
+        else:
+            observability_strength = target_strength
+        if not math.isfinite(observability_strength):
+            raise ValueError("camera medium observability strength schedule must be finite")
         return self.medium_field(
             camera=camera,
             rotation_world_from_camera=rotation_world_from_camera,
@@ -1658,7 +1675,7 @@ class WaterSplattingModel(Model):
             camera_observability_enabled=ocmc_enabled or raoc_enabled,
             camera_observability_projector=self._camera_medium_observability_projector if ocmc_enabled else None,
             camera_observability_scale=self._camera_medium_observability_scale,
-            camera_observability_strength=getattr(self.config, "camera_medium_observability_strength", 1.0),
+            camera_observability_strength=observability_strength,
             training=self.training,
             b_inf_mode=self._effective_b_inf_mode(),
         )

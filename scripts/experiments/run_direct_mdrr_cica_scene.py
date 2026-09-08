@@ -69,8 +69,15 @@ CICA_HUBER_DELTA = 0.05
 CICA_GRADIENT_FRACTION = 0.10
 CICA_DIRECTION_COLLAPSE_FRACTION = 0.95
 CICA_DIRECTION_EPS = 1e-6
+CICA_MIN_SUPPORT = 3
+CICA_RAMP_STEPS = 0
 AUXILIARY_APPEARANCE_ENABLED = True
 AUXILIARY_APPEARANCE_STRENGTH = 1.0
+OCMC_STRENGTH = 1.0
+OCMC_STRENGTH_START = 1.0
+OCMC_STRENGTH_RAMP_STEPS = 0
+OCMC_ENABLED = True
+CICA_ENABLED = True
 EPS = 1e-12
 SH_C0 = 0.28209479177387814
 SOURCE_ROOT = REPO_ROOT / "outputs" / "m1_raoc_causal_four_scene_20260827"
@@ -206,6 +213,10 @@ def _hash_tensor(value: Tensor) -> str:
     return _hash_bytes(value.detach().contiguous().cpu().numpy().tobytes())
 
 
+def _hash_optional_tensor(value: Optional[Tensor]) -> Optional[str]:
+    return None if value is None else _hash_tensor(value)
+
+
 def _seed_all(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed % (2**32))
@@ -299,7 +310,11 @@ def _configure_model_config(config: Any) -> None:
     model.medium_context_mode = "dir_xy_camera"
     model.b_inf_mode = "tied"
     model.infinite_water_enabled = False
-    model.camera_medium_observability_enabled = True
+    model.camera_medium_observability_enabled = OCMC_ENABLED
+    model.camera_medium_observability_strength = OCMC_STRENGTH
+    model.camera_medium_observability_strength_start = OCMC_STRENGTH_START
+    model.camera_medium_observability_strength_ramp_start_step = START_STEP
+    model.camera_medium_observability_strength_ramp_steps = OCMC_STRENGTH_RAMP_STEPS
     model.camera_medium_ray_adaptive_observability_enabled = False
     model.medium_identifiability_enabled = False
     model.medium_identifiability_weight = 0.0
@@ -315,7 +330,11 @@ def _configure_model(model: Any) -> None:
     model.config.medium_context_mode = "dir_xy_camera"
     model.config.b_inf_mode = "tied"
     model.config.infinite_water_enabled = False
-    model.config.camera_medium_observability_enabled = True
+    model.config.camera_medium_observability_enabled = OCMC_ENABLED
+    model.config.camera_medium_observability_strength = OCMC_STRENGTH
+    model.config.camera_medium_observability_strength_start = OCMC_STRENGTH_START
+    model.config.camera_medium_observability_strength_ramp_start_step = START_STEP
+    model.config.camera_medium_observability_strength_ramp_steps = OCMC_STRENGTH_RAMP_STEPS
     model.config.camera_medium_ray_adaptive_observability_enabled = False
     model.config.medium_identifiability_enabled = False
     model.config.medium_identifiability_weight = 0.0
@@ -385,6 +404,10 @@ def _load_source(branch: Any, scene: str) -> Mapping[str, Any]:
     branch.pipeline.model.step = START_STEP
     _configure_model(branch.pipeline.model)
     FORMAL._install_condition(branch.pipeline.model, "C0", payload["ocmc_bundle"], None)
+    # The formal loader installs the historical C0 condition with OCMC on.
+    # Re-apply this worker's explicit switch so E1 can disable OCMC without
+    # changing the source checkpoint or the frozen projector bundle.
+    _configure_model(branch.pipeline.model)
     branch.optimizers = Optimizers(MIC._optimizer_groups(branch.config, branch.pipeline.model), branch.pipeline.model.get_param_groups())
     if set(branch.optimizers.optimizers) != set(payload["optimizers"]):
         raise RuntimeError("optimizer group mismatch at source checkpoint")
@@ -445,6 +468,10 @@ def _locked_config(model: Any) -> Dict[str, Any]:
         "b_inf_mode": cfg.b_inf_mode,
         "infinite_water_enabled": bool(cfg.infinite_water_enabled),
         "camera_medium_observability_enabled": bool(cfg.camera_medium_observability_enabled),
+        "camera_medium_observability_strength": float(cfg.camera_medium_observability_strength),
+        "camera_medium_observability_strength_start": float(cfg.camera_medium_observability_strength_start),
+        "camera_medium_observability_strength_ramp_start_step": int(cfg.camera_medium_observability_strength_ramp_start_step),
+        "camera_medium_observability_strength_ramp_steps": int(cfg.camera_medium_observability_strength_ramp_steps),
         "camera_medium_ray_adaptive_observability_enabled": bool(cfg.camera_medium_ray_adaptive_observability_enabled),
         "stop_split_at": int(cfg.stop_split_at),
         "appearance_lr_scale": float(getattr(cfg, "appearance_lr_scale", 1.0)),
@@ -471,7 +498,7 @@ def _start_audit(
     scaler_hash = _hash_object(branch.scalers)
     source_scaler_hash = _hash_object(payload.get("scalers", {}))
     rng_hash = _rng_manifest(training_rng)
-    projector_hash = _hash_tensor(model._camera_medium_observability_projector)
+    projector_hash = _hash_optional_tensor(model._camera_medium_observability_projector)
     forward_probe = _forward_probe(model, branch.pipeline.datamanager)
     audit = {
         "scene": scene,
@@ -497,7 +524,7 @@ def _start_audit(
         "ocmc_projector_sha256": projector_hash,
         "locked_config": _locked_config(model),
         "raoc_enabled": False,
-        "ocmc_enabled": True,
+        "ocmc_enabled": OCMC_ENABLED,
         "scaler_state_present": bool(payload.get("scalers", {})),
         "rng_provenance": f"seed-{ACTIVE_TRAINING_SEED} continuation RNG is restored after branch setup; source checkpoint stores only RNG hashes",
         "forward_probe": forward_probe,
@@ -992,7 +1019,7 @@ def _build_cica_controller(model: Any, bank_records: Sequence[Tuple[int, str, Ca
         jacobian_views.append(information.double())
         support += visible.to(torch.int16)
         del outputs, gt, residual, evidence, dc, corrected_dc, information, chroma
-    valid = support >= 3
+    valid = support >= int(CICA_MIN_SUPPORT)
     if chroma_views:
         values = torch.stack(chroma_views, dim=0)
         weights = torch.stack(jacobian_views, dim=0)
@@ -1297,11 +1324,19 @@ def _gradient_routing_audit(
         losses = model.get_loss_dict(outputs, _batch_to_device(batch.copy(), model.device), {})
         base_loss = sum(losses.values())
         model.eval()
-        auxiliary_controller = AUX._refresh_controller_rng_preserved(model, records)
+        auxiliary_controller = (
+            AUX._refresh_controller_rng_preserved(model, records)
+            if AUXILIARY_APPEARANCE_ENABLED
+            else None
+        )
         auxiliary_raw, _auxiliary_info = AUX._module_loss(model, auxiliary_controller)
-        cica_controller = _build_cica_controller(
-            model,
-            [records[int(index)] for index in bank["camera_indices"]],
+        cica_controller = (
+            _build_cica_controller(
+                model,
+                [records[int(index)] for index in bank["camera_indices"]],
+            )
+            if CICA_ENABLED and arm in ("A2", "A3")
+            else None
         )
         model.train()
         cica_raw, cica_info = _cica_loss(model, cica_controller)
@@ -1422,8 +1457,16 @@ def _gradient_routing_audit(
                 "AUXILIARY_ONLY_FEATURES_REST": auxiliary_escape == 0.0,
                 "CICA_ONLY_FEATURES_DC": cica_escape == 0.0,
                 "MODULES_DO_NOT_DIRECTLY_CHANGE_GEOMETRY": geometry_diff <= 1e-12,
-                "CICA_HAS_NONZERO_FEATURES_DC_GRADIENT": direct["CICA"].get("features_dc", 0.0) > EPS,
-                "AUXILIARY_HAS_NONZERO_FEATURES_REST_GRADIENT": direct["auxiliary_appearance"].get("features_rest", 0.0) > EPS,
+                "CICA_ROUTE_MATCHES_SWITCH": (
+                    direct["CICA"].get("features_dc", 0.0) > EPS
+                    if CICA_ENABLED and arm in ("A2", "A3")
+                    else _norm(cica_grads) <= EPS
+                ),
+                "AUXILIARY_ROUTE_MATCHES_SWITCH": (
+                    direct["auxiliary_appearance"].get("features_rest", 0.0) > EPS
+                    if AUXILIARY_APPEARANCE_ENABLED
+                    else _norm(auxiliary_grads) <= EPS
+                ),
                 "MDRR_SURFACE_ROUTE_ONLY_APPEARANCE": effective_surface_escape == 0.0 and _norm(effective_surface) > EPS,
                 "MDRR_MEDIUM_ROUTE_ONLY_MEDIUM": effective_medium_escape == 0.0 and _norm(effective_medium) > EPS,
                 "MDRR_PRESERVES_PHOTOMETRIC_LOSS_SCALE": route_loss_difference <= 1e-6,
@@ -1495,7 +1538,13 @@ def _save_checkpoint(branch: Any, scene: str, arm: str, step: int, output_dir: P
             "metadata": {
                 "matched_updates": int(step - START_STEP),
                 "mdrr_enabled": arm in ("A1", "A3") and step >= MDRR_START_STEP,
-                "cica_enabled": arm in ("A2", "A3") and step >= CICA_START_STEP,
+                "cica_enabled": CICA_ENABLED and arm in ("A2", "A3") and step >= CICA_START_STEP,
+                "cica_ramp_steps": CICA_RAMP_STEPS,
+                "cica_minimum_support": CICA_MIN_SUPPORT,
+                "ocmc_enabled": OCMC_ENABLED,
+                "ocmc_strength": OCMC_STRENGTH,
+                "ocmc_strength_start": OCMC_STRENGTH_START,
+                "ocmc_strength_ramp_steps": OCMC_STRENGTH_RAMP_STEPS,
                 "mdrr_control_hash": mdrr_hash,
                 "cica_target_hash": cica_hash,
                 "auxiliary_appearance_target_hash": auxiliary_hash,
@@ -1563,7 +1612,7 @@ def _train_arm(
         bank_indices = [int(x) for x in bank["camera_indices"]]
         bank_records = [records[index] for index in bank_indices]
         use_mdrr = arm in ("A1", "A3")
-        use_cica = arm in ("A2", "A3")
+        use_cica = CICA_ENABLED and arm in ("A2", "A3")
         controller: Optional[Dict[str, Tensor]] = None
         auxiliary_controller: Optional[Dict[str, Any]] = None
         cica_controller: Optional[Dict[str, Tensor]] = None
@@ -1580,7 +1629,7 @@ def _train_arm(
         event_rows: List[Dict[str, Any]] = []
         checkpoints: List[Dict[str, Any]] = []
         cumulative = {"split": 0, "duplicate": 0, "prune": 0, "reset": 0}
-        projector_hash_start = _hash_tensor(model._camera_medium_observability_projector)
+        projector_hash_start = _hash_optional_tensor(model._camera_medium_observability_projector)
         snapshot_steps = _active_snapshots(max_step)
         sequence = [
             row
@@ -1624,8 +1673,12 @@ def _train_arm(
 
             auxiliary_raw, auxiliary_info = AUX._module_loss(model, auxiliary_controller if AUXILIARY_APPEARANCE_ENABLED else None)
             auxiliary_weighted = float(AUXILIARY_APPEARANCE_STRENGTH) * auxiliary_raw
-            cica_raw, cica_info = _cica_loss(model, cica_controller if use_cica and step >= CICA_START_STEP else None)
-            cica_weighted = cica_raw if lambda_cica is None else float(lambda_cica) * cica_raw
+            cica_active = use_cica and step >= CICA_START_STEP
+            cica_progress = 1.0
+            if cica_active and CICA_RAMP_STEPS > 0:
+                cica_progress = min(max((float(step) - float(CICA_START_STEP)) / float(CICA_RAMP_STEPS), 0.0), 1.0)
+            cica_raw, cica_info = _cica_loss(model, cica_controller if cica_active else None)
+            cica_weighted = cica_raw if lambda_cica is None else float(lambda_cica) * cica_progress * cica_raw
             active_mdrr = False
             gmap = None
             if use_mdrr and step >= MDRR_START_STEP:
@@ -1645,7 +1698,7 @@ def _train_arm(
                 if cica_norm <= EPS or not math.isfinite(cica_norm):
                     raise RuntimeError("CICA calibration has zero/non-finite features_dc gradient")
                 lambda_cica = CICA_GRADIENT_FRACTION * max(base_norm, EPS) / cica_norm
-                cica_weighted = float(lambda_cica) * cica_raw
+                cica_weighted = float(lambda_cica) * cica_progress * cica_raw
                 module_rows.append({"arm": arm, "absolute_step": step, "module": "CICA", "event": "calibration", "resolved_lambda_CICA": lambda_cica, "photometric_features_dc_grad_l2": base_norm, "raw_CICA_features_dc_grad_l2": cica_norm, "target_gradient_fraction": CICA_GRADIENT_FRACTION})
 
             if active_mdrr:
@@ -1658,13 +1711,13 @@ def _train_arm(
                 surface_grads = torch.autograd.grad(surface_loss, params, retain_graph=True, allow_unused=True)
                 medium_grads = torch.autograd.grad(medium_loss, params, retain_graph=True, allow_unused=True)
                 auxiliary_grads = torch.autograd.grad(auxiliary_weighted, params, retain_graph=True, allow_unused=True)
-                cica_grads = torch.autograd.grad(cica_weighted, params, retain_graph=True, allow_unused=True) if use_cica and step >= CICA_START_STEP else [None] * len(params)
+                cica_grads = torch.autograd.grad(cica_weighted, params, retain_graph=True, allow_unused=True) if cica_active else [None] * len(params)
                 grad_info = _combine_gradients(params, group_indices, base_grads, surface_grads, medium_grads, auxiliary_grads, cica_grads, True)
             else:
                 params, group_indices = _parameter_entries(model)
                 base_grads = torch.autograd.grad(base_loss, params, retain_graph=True, allow_unused=True)
                 auxiliary_grads = torch.autograd.grad(auxiliary_weighted, params, retain_graph=True, allow_unused=True)
-                cica_grads = torch.autograd.grad(cica_weighted, params, retain_graph=True, allow_unused=True) if use_cica and step >= CICA_START_STEP else [None] * len(params)
+                cica_grads = torch.autograd.grad(cica_weighted, params, retain_graph=True, allow_unused=True) if cica_active else [None] * len(params)
                 grad_info = _combine_gradients(params, group_indices, base_grads, base_grads, base_grads, auxiliary_grads, cica_grads, False)
 
             total_loss_value = float((base_loss + auxiliary_weighted + cica_weighted).detach().item())
@@ -1716,7 +1769,8 @@ def _train_arm(
                     "L_CICA_weighted": float(cica_weighted.detach().item()),
                     "resolved_lambda_CICA": lambda_cica if lambda_cica is not None else 0.0,
                     "MDRR_enabled": active_mdrr,
-                    "CICA_enabled": bool(use_cica and step >= CICA_START_STEP),
+                    "CICA_enabled": bool(cica_active),
+                    "CICA_progress": float(cica_progress if cica_active else 0.0),
                     "MDRR_g_mean": mdrr_info.get("g_mean", 0.0) if active_mdrr else 0.0,
                     "MDRR_g_p50": mdrr_info.get("g_p50", 0.0) if active_mdrr else 0.0,
                     "MDRR_q_mean": mdrr_info.get("q_mean", 0.0) if active_mdrr else 0.0,
@@ -1753,7 +1807,8 @@ def _train_arm(
                     "module": "combined",
                     "event": "training_log",
                     "MDRR_enabled": active_mdrr,
-                    "CICA_enabled": bool(use_cica and step >= CICA_START_STEP),
+                    "CICA_enabled": bool(cica_active),
+                    "CICA_progress": float(cica_progress if cica_active else 0.0),
                     "resolved_lambda_CICA": lambda_cica if lambda_cica is not None else 0.0,
                     "population": int(model.num_points),
                     "g_mean": mdrr_info.get("g_mean", 0.0) if active_mdrr else 0.0,
@@ -1781,7 +1836,7 @@ def _train_arm(
             if step % 100 == 0:
                 gc.collect()
                 torch.cuda.empty_cache()
-        projector_hash_end = _hash_tensor(model._camera_medium_observability_projector)
+        projector_hash_end = _hash_optional_tensor(model._camera_medium_observability_projector)
         result = {
             "scene": scene,
             "arm": arm,
@@ -1792,6 +1847,7 @@ def _train_arm(
             "ocmc_projector_hash_start": projector_hash_start,
             "ocmc_projector_hash_end": projector_hash_end,
             "ocmc_projector_unchanged": projector_hash_start == projector_hash_end,
+            "ocmc_enabled": OCMC_ENABLED,
             "raoc_enabled": False,
             "mdrr_enabled": use_mdrr,
             "cica_enabled": use_cica,
@@ -1822,6 +1878,7 @@ def _load_snapshot(branch: Any, scene: str, path: Path) -> Mapping[str, Any]:
     branch.pipeline.model.step = int(payload["absolute_step"])
     _configure_model(branch.pipeline.model)
     FORMAL._install_condition(branch.pipeline.model, "C0", payload["ocmc_bundle"], None)
+    _configure_model(branch.pipeline.model)
     branch.pipeline.eval()
     return payload
 
@@ -2013,10 +2070,11 @@ def run(
             "module_schedule": {
                 "AUXILIARY_APPEARANCE": {"enabled": AUXILIARY_APPEARANCE_ENABLED, "name": "A_DETACHED_SH_OPACITY_TANGENT_ORTHOGONALIZATION", "strength": AUXILIARY_APPEARANCE_STRENGTH, "role": "CURRENT_BASE auxiliary appearance regularization; not claimed as identifiability innovation"},
                 "MDRR": {"enabled": arm in ("A1", "A3"), "start_step": MDRR_START_STEP, "refresh_rule": "every active primary update from the current model state", "full_medium_response": True},
-                "CICA": {"enabled": arm in ("A2", "A3"), "start_step": CICA_START_STEP, "refresh_steps": list(CICA_REFRESH_STEPS), "camera_bank_max": CICA_BANK_MAX, "huber_delta": CICA_HUBER_DELTA, "target_gradient_fraction": CICA_GRADIENT_FRACTION},
+                "CICA": {"enabled": CICA_ENABLED and arm in ("A2", "A3"), "start_step": CICA_START_STEP, "ramp_steps": CICA_RAMP_STEPS, "refresh_steps": list(CICA_REFRESH_STEPS), "camera_bank_max": CICA_BANK_MAX, "minimum_support": CICA_MIN_SUPPORT, "huber_delta": CICA_HUBER_DELTA, "target_gradient_fraction": CICA_GRADIENT_FRACTION},
             },
+            "ocmc_schedule": {"target_strength": OCMC_STRENGTH, "start_strength": OCMC_STRENGTH_START, "ramp_steps": OCMC_STRENGTH_RAMP_STEPS},
             "locked_config": _locked_config(probe.pipeline.model),
-            "ocmc_on": True,
+            "ocmc_on": OCMC_ENABLED,
             "raoc_off": True,
             "topology_unchanged_logic": "normal existing refinement callbacks; no module topology intervention",
             "gradient_routing_audit": routing_audit,
