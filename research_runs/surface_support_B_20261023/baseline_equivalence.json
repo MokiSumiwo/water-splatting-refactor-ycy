@@ -1,0 +1,22 @@
+[
+  {
+    "scene": "Curasao",
+    "raw_initialization_exact": true,
+    "camera_sequence_exact": true
+  },
+  {
+    "scene": "IUI3-RedSea",
+    "raw_initialization_exact": true,
+    "camera_sequence_exact": true
+  },
+  {
+    "scene": "JapaneseGradens-RedSea",
+    "raw_initialization_exact": true,
+    "camera_sequence_exact": true
+  },
+  {
+    "scene": "Panama",
+    "raw_initialization_exact": true,
+    "camera_sequence_exact": true
+  }
+]

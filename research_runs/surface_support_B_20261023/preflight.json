@@ -1,0 +1,103 @@
+{
+  "optimizer_updates": 0,
+  "gradient_check": true,
+  "schedule_check": true,
+  "coverage": [
+    {
+      "scene": "Curasao",
+      "step": 0,
+      "population": 25837,
+      "eligible_footprints": 0,
+      "fraction": 0.0,
+      "scope": "upper bound before current-camera visibility and common-track gating"
+    },
+    {
+      "scene": "Curasao",
+      "step": 10000,
+      "population": 1023437,
+      "eligible_footprints": 6911,
+      "fraction": 0.006752736123474137,
+      "scope": "upper bound before current-camera visibility and common-track gating"
+    },
+    {
+      "scene": "Curasao",
+      "step": 15000,
+      "population": 980995,
+      "eligible_footprints": 5684,
+      "fraction": 0.005794117197335359,
+      "scope": "upper bound before current-camera visibility and common-track gating"
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "step": 0,
+      "population": 21907,
+      "eligible_footprints": 0,
+      "fraction": 0.0,
+      "scope": "upper bound before current-camera visibility and common-track gating"
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "step": 10000,
+      "population": 753907,
+      "eligible_footprints": 979,
+      "fraction": 0.0012985686563462071,
+      "scope": "upper bound before current-camera visibility and common-track gating"
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "step": 15000,
+      "population": 709292,
+      "eligible_footprints": 854,
+      "fraction": 0.0012040175273371192,
+      "scope": "upper bound before current-camera visibility and common-track gating"
+    },
+    {
+      "scene": "JapaneseGradens-RedSea",
+      "step": 0,
+      "population": 21140,
+      "eligible_footprints": 1,
+      "fraction": 4.730368968779565e-05,
+      "scope": "upper bound before current-camera visibility and common-track gating"
+    },
+    {
+      "scene": "JapaneseGradens-RedSea",
+      "step": 10000,
+      "population": 826046,
+      "eligible_footprints": 4911,
+      "fraction": 0.005945189493079078,
+      "scope": "upper bound before current-camera visibility and common-track gating"
+    },
+    {
+      "scene": "JapaneseGradens-RedSea",
+      "step": 15000,
+      "population": 772996,
+      "eligible_footprints": 4057,
+      "fraction": 0.005248410082329016,
+      "scope": "upper bound before current-camera visibility and common-track gating"
+    },
+    {
+      "scene": "Panama",
+      "step": 0,
+      "population": 22501,
+      "eligible_footprints": 3,
+      "fraction": 0.0001333274076707702,
+      "scope": "upper bound before current-camera visibility and common-track gating"
+    },
+    {
+      "scene": "Panama",
+      "step": 10000,
+      "population": 1097301,
+      "eligible_footprints": 15533,
+      "fraction": 0.014155641888597569,
+      "scope": "upper bound before current-camera visibility and common-track gating"
+    },
+    {
+      "scene": "Panama",
+      "step": 15000,
+      "population": 1049646,
+      "eligible_footprints": 13409,
+      "fraction": 0.012774783117355757,
+      "scope": "upper bound before current-camera visibility and common-track gating"
+    }
+  ]
+}

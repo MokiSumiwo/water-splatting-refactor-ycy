@@ -1,0 +1,29 @@
+{
+  "scene": "IUI3-RedSea",
+  "policy": {
+    "neighbors": 16,
+    "minimum_common_train_views": 3,
+    "max_reprojection_error_px": 1.0,
+    "max_normal_to_middle_eigenvalue": 0.05,
+    "min_middle_to_large_eigenvalue": 0.15,
+    "uncertainty_spacing_floor": 0.05,
+    "normal_distance_sigmas": 3.0,
+    "footprint_sigmas": 3.0,
+    "note": "Sparse local plane prior, not dense surface truth; no absent-support water labels."
+  },
+  "input_points": 21907,
+  "eligible_track_points": 13905,
+  "patches": 7,
+  "rejections": {
+    "nonplanar": 47,
+    "common_views": 13851,
+    "hull": 0
+  },
+  "excluded_review_cameras": [
+    "MTN_5906",
+    "MTN_5910",
+    "MTN_5933"
+  ],
+  "points_sha256": "b142782291bd47372cdfa2802ff7a918c964bd7b0b34dbbb83b4706316315d32",
+  "limitation": "COLMAP source reconstruction is inherited; only eligible real training tracks build patches. Plane interpolation is an explicit prior; no dense footprint observation is claimed."
+}
