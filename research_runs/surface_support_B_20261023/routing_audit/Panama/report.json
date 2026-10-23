@@ -1,0 +1,14 @@
+[
+  {
+    "camera": "MTN_1541",
+    "supported": 1864,
+    "disabled_exact": true,
+    "nonmeans_exact": true,
+    "local_cap": true,
+    "rng_exact": true,
+    "densification_abs_exact": true,
+    "delta_norm": 0.0011099530383944511,
+    "optimizer_updates": 0,
+    "passed": true
+  }
+]
