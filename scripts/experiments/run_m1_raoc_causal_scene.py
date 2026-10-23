@@ -260,7 +260,7 @@ def _configure_model_config(config: Any, branch: str, parameterization: Optional
 
     model_config = config.pipeline.model
     resolved_parameterization = parameterization or ACTIVE_PARAMETERIZATION
-    if resolved_parameterization not in ("legacy", "bounded_sh3", "bounded_headroom_sh3"):
+    if resolved_parameterization not in ("legacy", "bounded_sh3", "bounded_headroom_sh3", "bounded_selective_sh3"):
         raise ValueError(f"unsupported intrinsic color parameterization: {resolved_parameterization}")
     model_config.intrinsic_color_parameterization = resolved_parameterization
     model_config.rasterize_mode = "classic"
@@ -282,7 +282,7 @@ def _configure_model(model: Any, branch: str, parameterization: Optional[str] = 
     """Re-assert branch flags after construction and before each forward."""
 
     resolved_parameterization = parameterization or ACTIVE_PARAMETERIZATION
-    if resolved_parameterization not in ("legacy", "bounded_sh3", "bounded_headroom_sh3"):
+    if resolved_parameterization not in ("legacy", "bounded_sh3", "bounded_headroom_sh3", "bounded_selective_sh3"):
         raise ValueError(f"unsupported intrinsic color parameterization: {resolved_parameterization}")
     model.config.intrinsic_color_parameterization = resolved_parameterization
     model.config.rasterize_mode = "classic"
@@ -302,6 +302,14 @@ def _configure_model(model: Any, branch: str, parameterization: Optional[str] = 
 
 def _setup_branch(repo: Path, scene_cfg: Mapping[str, Any], branch: str, parameterization: Optional[str] = None) -> BranchState:
     config_path = repo / str(scene_cfg["source_config"])
+    # Historical per-scene configs were archived with the old experiment
+    # outputs.  The retained canonical config has identical model/data
+    # settings and is the registered fallback used by the paired diagnostics.
+    if not config_path.is_file():
+        fallback = repo / "outputs" / "m1_ocmc_causal_iui3_20260825" / "source_bnd_config.yml"
+        if not fallback.is_file():
+            raise FileNotFoundError(config_path)
+        config_path = fallback
     config = yaml.load(config_path.read_text(encoding="utf8"), Loader=yaml.Loader)
     config.pipeline.datamanager._target = all_methods[config.method_name].pipeline.datamanager._target
     config.load_dir = None
@@ -1472,7 +1480,7 @@ def run(repo: Path, scene: str, gpu: str, output_dir: Path, allow_existing: bool
     if scene not in SCENES:
         raise ValueError(f"unknown canonical scene {scene}; choose {sorted(SCENES)}")
     global ACTIVE_PARAMETERIZATION
-    if parameterization not in ("legacy", "bounded_sh3", "bounded_headroom_sh3"):
+    if parameterization not in ("legacy", "bounded_sh3", "bounded_headroom_sh3", "bounded_selective_sh3"):
         raise ValueError(f"unsupported intrinsic color parameterization: {parameterization}")
     ACTIVE_PARAMETERIZATION = parameterization
     _configure_schedule(int(max_steps))
@@ -1567,7 +1575,7 @@ def main() -> None:
     parser.add_argument("--allow-existing-output", action="store_true")
     parser.add_argument("--postprocess-only", action="store_true", help="recover diagnostics from completed checkpoints without training")
     parser.add_argument("--max-steps", type=int, default=15000, help="validation-only shortened run; default is the registered 15K protocol")
-    parser.add_argument("--parameterization", choices=("legacy", "bounded_sh3", "bounded_headroom_sh3"), default="bounded_sh3")
+    parser.add_argument("--parameterization", choices=("legacy", "bounded_sh3", "bounded_headroom_sh3", "bounded_selective_sh3"), default="bounded_sh3")
     args = parser.parse_args()
     if args.postprocess_only:
         summary = postprocess_only(args.repo.resolve(), args.scene, str(args.gpu), args.output_dir.resolve())

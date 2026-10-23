@@ -1,0 +1,248 @@
+{
+  "directional_fd": [
+    {
+      "parameter": "xys",
+      "autograd": -0.0032397822942584753,
+      "disconnected": false,
+      "finite_differences": [
+        {
+          "h": 0.002,
+          "fd": -0.0032410023268312216,
+          "absolute_error": 1.2200325727462769e-06,
+          "passed": true
+        },
+        {
+          "h": 0.001,
+          "fd": -0.003239512210711837,
+          "absolute_error": 2.7008354663848877e-07,
+          "passed": true
+        },
+        {
+          "h": 0.0005,
+          "fd": -0.0032454724423587322,
+          "absolute_error": 5.69014810025692e-06,
+          "passed": true
+        }
+      ],
+      "outside_pixel_max": null,
+      "passed": true
+    },
+    {
+      "parameter": "depths",
+      "autograd": -0.008154726587235928,
+      "disconnected": false,
+      "finite_differences": [
+        {
+          "h": 0.002,
+          "fd": -0.008155404590070248,
+          "absolute_error": 6.780028343200684e-07,
+          "passed": true
+        },
+        {
+          "h": 0.001,
+          "fd": -0.008144973777234554,
+          "absolute_error": 9.752810001373291e-06,
+          "passed": true
+        },
+        {
+          "h": 0.0005,
+          "fd": -0.008124112151563168,
+          "absolute_error": 3.061443567276001e-05,
+          "passed": true
+        }
+      ],
+      "outside_pixel_max": null,
+      "passed": true
+    },
+    {
+      "parameter": "conics",
+      "autograd": -0.0014726268127560616,
+      "disconnected": false,
+      "finite_differences": [
+        {
+          "h": 0.002,
+          "fd": -0.001469254493713379,
+          "absolute_error": 3.3723190426826477e-06,
+          "passed": true
+        },
+        {
+          "h": 0.001,
+          "fd": -0.001451372867450118,
+          "absolute_error": 2.125394530594349e-05,
+          "passed": true
+        },
+        {
+          "h": 0.0005,
+          "fd": -0.0014722347259521484,
+          "absolute_error": 3.9208680391311646e-07,
+          "passed": true
+        }
+      ],
+      "outside_pixel_max": null,
+      "passed": true
+    },
+    {
+      "parameter": "colors",
+      "autograd": 0.0973869040608406,
+      "disconnected": false,
+      "finite_differences": [
+        {
+          "h": 0.002,
+          "fd": 0.09738802164793015,
+          "absolute_error": 1.1175870895385742e-06,
+          "passed": true
+        },
+        {
+          "h": 0.001,
+          "fd": 0.0973820686340332,
+          "absolute_error": 4.8354268074035645e-06,
+          "passed": true
+        },
+        {
+          "h": 0.0005,
+          "fd": 0.0973820686340332,
+          "absolute_error": 4.8354268074035645e-06,
+          "passed": true
+        }
+      ],
+      "outside_pixel_max": null,
+      "passed": true
+    },
+    {
+      "parameter": "opacities",
+      "autograd": 0.12271913141012192,
+      "disconnected": false,
+      "finite_differences": [
+        {
+          "h": 0.002,
+          "fd": 0.12272371351718903,
+          "absolute_error": 4.582107067108154e-06,
+          "passed": true
+        },
+        {
+          "h": 0.001,
+          "fd": 0.12271402031183243,
+          "absolute_error": 5.111098289489746e-06,
+          "passed": true
+        },
+        {
+          "h": 0.0005,
+          "fd": 0.12273786216974258,
+          "absolute_error": 1.8730759620666504e-05,
+          "passed": true
+        }
+      ],
+      "outside_pixel_max": null,
+      "passed": true
+    },
+    {
+      "parameter": "medium_rgb",
+      "autograd": 0.09154635667800903,
+      "disconnected": false,
+      "finite_differences": [
+        {
+          "h": 0.002,
+          "fd": 0.09154527634382248,
+          "absolute_error": 1.080334186553955e-06,
+          "passed": true
+        },
+        {
+          "h": 0.001,
+          "fd": 0.09154676645994186,
+          "absolute_error": 4.0978193283081055e-07,
+          "passed": true
+        },
+        {
+          "h": 0.0005,
+          "fd": 0.09154081344604492,
+          "absolute_error": 5.543231964111328e-06,
+          "passed": true
+        }
+      ],
+      "outside_pixel_max": 0.0,
+      "passed": true
+    },
+    {
+      "parameter": "medium_bs",
+      "autograd": 0.04557117447257042,
+      "disconnected": false,
+      "finite_differences": [
+        {
+          "h": 0.002,
+          "fd": 0.045570727437734604,
+          "absolute_error": 4.470348358154297e-07,
+          "passed": true
+        },
+        {
+          "h": 0.001,
+          "fd": 0.04557371139526367,
+          "absolute_error": 2.5369226932525635e-06,
+          "passed": true
+        },
+        {
+          "h": 0.0005,
+          "fd": 0.045567747205495834,
+          "absolute_error": 3.427267074584961e-06,
+          "passed": true
+        }
+      ],
+      "outside_pixel_max": 0.0,
+      "passed": true
+    },
+    {
+      "parameter": "medium_attn",
+      "autograd": -0.07993754744529724,
+      "disconnected": false,
+      "finite_differences": [
+        {
+          "h": 0.002,
+          "fd": -0.07993876934051514,
+          "absolute_error": 1.2218952178955078e-06,
+          "passed": true
+        },
+        {
+          "h": 0.001,
+          "fd": -0.07993876934051514,
+          "absolute_error": 1.2218952178955078e-06,
+          "passed": true
+        },
+        {
+          "h": 0.0005,
+          "fd": -0.0799417495727539,
+          "absolute_error": 4.202127456665039e-06,
+          "passed": true
+        }
+      ],
+      "outside_pixel_max": 0.0,
+      "passed": true
+    }
+  ],
+  "alpha_cap_color": [
+    {
+      "opacity": 0.5,
+      "forward_derivative": 0.5,
+      "backward_derivative": 0.5,
+      "passed": true
+    },
+    {
+      "opacity": 0.99,
+      "forward_derivative": 0.9900000095367432,
+      "backward_derivative": 0.9900000095367432,
+      "passed": true
+    },
+    {
+      "opacity": 0.995,
+      "forward_derivative": 0.9950000047683716,
+      "backward_derivative": 0.9950000047683716,
+      "passed": true
+    },
+    {
+      "opacity": 0.999,
+      "forward_derivative": 0.9990000128746033,
+      "backward_derivative": 0.9990000128746033,
+      "passed": true
+    }
+  ],
+  "passed": true,
+  "scope": "native synthetic rasterizer; sparse physical-medium gradients must have zero cross-pixel leakage; no geometry visibility/sorting boundaries crossed"
+}

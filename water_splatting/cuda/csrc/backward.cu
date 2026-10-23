@@ -90,7 +90,10 @@ __global__ void nd_rasterize_backward_kernel(
         valid &= (sigma >= 0.f);
         const float opac = opacities[g];
         const float vis = __expf(-sigma);
-        const float alpha = min(0.99f, opac * vis);
+        // Keep the reverse pass numerically identical to forward.cu.  The
+        // forward kernels cap alpha at 0.999; using 0.99 here makes the VJP
+        // wrong for opacities in (0.99, 0.999], even when forward is finite.
+        const float alpha = min(0.999f, opac * vis);
         valid &= (alpha >= 1.f / 255.f);
         if(!warp.any(valid)){
             continue;
@@ -277,7 +280,8 @@ __global__ void rasterize_backward_kernel(
                                             conic.z * delta.y * delta.y) +
                                     conic.y * delta.x * delta.y;
                 vis = __expf(-sigma);
-                alpha = min(0.99f, opac * vis);
+                // Match the 0.999 cap used by both forward kernels.
+                alpha = min(0.999f, opac * vis);
                 if (sigma < 0.f || alpha * __expf(-min_medium_attn_pix * depth) < 1.f / 255.f) {
                     valid = 0;
                 }

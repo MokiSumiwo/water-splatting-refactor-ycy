@@ -1,0 +1,65 @@
+{
+  "scene": "IUI3-RedSea",
+  "optimizer_updates": 0,
+  "results": [
+    {
+      "view": "MTN_5906",
+      "relative_branch_sum_error": 3.674977779155597e-05,
+      "direct_norm": 0.027650415897369385,
+      "medium_norm": 0.10371225327253342,
+      "native_norm": 0.09480924904346466,
+      "directional_ad": 0.09480924904346466,
+      "finite_difference": [
+        {
+          "h": 0.0002,
+          "fd": 0.0486522912979126,
+          "error": 0.04615695774555206,
+          "passed": false
+        },
+        {
+          "h": 0.0001,
+          "fd": 0.04857778549194336,
+          "error": 0.0462314635515213,
+          "passed": false
+        },
+        {
+          "h": 5e-05,
+          "fd": 0.04857778549194336,
+          "error": 0.0462314635515213,
+          "passed": false
+        }
+      ],
+      "passed": false
+    },
+    {
+      "view": "MTN_5910",
+      "relative_branch_sum_error": 3.340804323670454e-05,
+      "direct_norm": 0.019917313009500504,
+      "medium_norm": 0.04394896700978279,
+      "native_norm": 0.048653800040483475,
+      "directional_ad": 0.048653796315193176,
+      "finite_difference": [
+        {
+          "h": 0.0002,
+          "fd": 0.048801302909851074,
+          "error": 0.00014750659465789795,
+          "passed": true
+        },
+        {
+          "h": 0.0001,
+          "fd": 0.04887580871582031,
+          "error": 0.00022201240062713623,
+          "passed": true
+        },
+        {
+          "h": 5e-05,
+          "fd": 0.049173831939697266,
+          "error": 0.0005200356245040894,
+          "passed": true
+        }
+      ],
+      "passed": true
+    }
+  ],
+  "passed": false
+}

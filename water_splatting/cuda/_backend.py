@@ -99,3 +99,13 @@ except ImportError:
 
 
 __all__ = ["_C"]
+
+# Explicit version selection; keep historical runs on their original backend.
+_gradient_backend = os.environ.get("WATER_SPLATTING_GRADIENT_BACKEND", "legacy")
+if _gradient_backend == "corrected_v1":
+    if _C is None:
+        raise RuntimeError("corrected_v1 requires the native forward extension")
+    from .gradient_backend import build_corrected_backend
+    _C = build_corrected_backend(_C)
+elif _gradient_backend != "legacy":
+    raise ValueError(f"Unknown WATER_SPLATTING_GRADIENT_BACKEND: {_gradient_backend}")

@@ -1,0 +1,486 @@
+{
+  "scene": "IUI3-RedSea",
+  "source": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/bnd_on_baseline_scratch15k_20261021_v2/IUI3-RedSea",
+  "test_views_used": false,
+  "assets": [
+    {
+      "camera": "MTN_5906",
+      "camera_index": 0,
+      "role": "training_review",
+      "shape": [
+        917,
+        1383
+      ],
+      "regions": [
+        {
+          "id": "00",
+          "box": [
+            0,
+            0,
+            461,
+            305
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "01",
+          "box": [
+            461,
+            0,
+            922,
+            305
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "02",
+          "box": [
+            922,
+            0,
+            1383,
+            305
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "10",
+          "box": [
+            0,
+            305,
+            461,
+            611
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "11",
+          "box": [
+            461,
+            305,
+            922,
+            611
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "12",
+          "box": [
+            922,
+            305,
+            1383,
+            611
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "20",
+          "box": [
+            0,
+            611,
+            461,
+            917
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "21",
+          "box": [
+            461,
+            611,
+            922,
+            917
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "22",
+          "box": [
+            922,
+            611,
+            1383,
+            917
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        }
+      ],
+      "structure_protection": [
+        {
+          "box": [
+            230,
+            611,
+            691,
+            764
+          ],
+          "evidence": "visible textured coral/sea-floor in observed RGB; protects appearance, not inferred clear truth"
+        },
+        {
+          "box": [
+            691,
+            611,
+            1152,
+            764
+          ],
+          "evidence": "visible foreground surface in observed RGB"
+        }
+      ],
+      "residual_review": [
+        {
+          "box": [
+            0,
+            0,
+            461,
+            305
+          ],
+          "label": "U"
+        },
+        {
+          "box": [
+            461,
+            0,
+            922,
+            305
+          ],
+          "label": "U"
+        },
+        {
+          "box": [
+            922,
+            0,
+            1383,
+            305
+          ],
+          "label": "U"
+        }
+      ]
+    },
+    {
+      "camera": "MTN_5910",
+      "camera_index": 12,
+      "role": "training_review",
+      "shape": [
+        917,
+        1383
+      ],
+      "regions": [
+        {
+          "id": "00",
+          "box": [
+            0,
+            0,
+            461,
+            305
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "01",
+          "box": [
+            461,
+            0,
+            922,
+            305
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "02",
+          "box": [
+            922,
+            0,
+            1383,
+            305
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "10",
+          "box": [
+            0,
+            305,
+            461,
+            611
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "11",
+          "box": [
+            461,
+            305,
+            922,
+            611
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "12",
+          "box": [
+            922,
+            305,
+            1383,
+            611
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "20",
+          "box": [
+            0,
+            611,
+            461,
+            917
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "21",
+          "box": [
+            461,
+            611,
+            922,
+            917
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "22",
+          "box": [
+            922,
+            611,
+            1383,
+            917
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        }
+      ],
+      "structure_protection": [
+        {
+          "box": [
+            230,
+            611,
+            691,
+            764
+          ],
+          "evidence": "visible textured coral/sea-floor in observed RGB; protects appearance, not inferred clear truth"
+        },
+        {
+          "box": [
+            691,
+            611,
+            1152,
+            764
+          ],
+          "evidence": "visible foreground surface in observed RGB"
+        }
+      ],
+      "residual_review": [
+        {
+          "box": [
+            0,
+            0,
+            461,
+            305
+          ],
+          "label": "U"
+        },
+        {
+          "box": [
+            461,
+            0,
+            922,
+            305
+          ],
+          "label": "U"
+        },
+        {
+          "box": [
+            922,
+            0,
+            1383,
+            305
+          ],
+          "label": "U"
+        }
+      ]
+    },
+    {
+      "camera": "MTN_5933",
+      "camera_index": 24,
+      "role": "training_review",
+      "shape": [
+        917,
+        1383
+      ],
+      "regions": [
+        {
+          "id": "00",
+          "box": [
+            0,
+            0,
+            461,
+            305
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "01",
+          "box": [
+            461,
+            0,
+            922,
+            305
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "02",
+          "box": [
+            922,
+            0,
+            1383,
+            305
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "10",
+          "box": [
+            0,
+            305,
+            461,
+            611
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "11",
+          "box": [
+            461,
+            305,
+            922,
+            611
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "12",
+          "box": [
+            922,
+            305,
+            1383,
+            611
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "20",
+          "box": [
+            0,
+            611,
+            461,
+            917
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "21",
+          "box": [
+            461,
+            611,
+            922,
+            917
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        },
+        {
+          "id": "22",
+          "box": [
+            922,
+            611,
+            1383,
+            917
+          ],
+          "label": "U",
+          "evidence": "uniform pre-treatment review grid; no water label inferred"
+        }
+      ],
+      "structure_protection": [
+        {
+          "box": [
+            230,
+            611,
+            691,
+            764
+          ],
+          "evidence": "visible textured coral/sea-floor in observed RGB; protects appearance, not inferred clear truth"
+        },
+        {
+          "box": [
+            691,
+            611,
+            1152,
+            764
+          ],
+          "evidence": "visible foreground surface in observed RGB"
+        }
+      ],
+      "residual_review": [
+        {
+          "box": [
+            0,
+            0,
+            461,
+            305
+          ],
+          "label": "U"
+        },
+        {
+          "box": [
+            461,
+            0,
+            922,
+            305
+          ],
+          "label": "U"
+        },
+        {
+          "box": [
+            922,
+            0,
+            1383,
+            305
+          ],
+          "label": "U"
+        }
+      ]
+    }
+  ],
+  "labels": "All U pending cross-view evidence; blue appearance is not a water label.",
+  "review_findings": "Visible upper open-water appearance and boundary blue patches; retain U until cross-view geometric water/float-layer evidence is verified."
+}

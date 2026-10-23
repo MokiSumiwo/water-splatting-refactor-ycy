@@ -1,0 +1,88 @@
+{
+  "status": "TRAINED",
+  "scenes": {
+    "Curasao": "6",
+    "IUI3-RedSea": "7",
+    "JapaneseGradens-RedSea": "8",
+    "Panama": "9"
+  },
+  "arms": [
+    "B0",
+    "A"
+  ],
+  "seed": 42,
+  "updates_per_job": 15000,
+  "total_formal_updates": 120000,
+  "smoke_updates": 80,
+  "appearance": "bounded_sh3",
+  "M1": true,
+  "OCMC": true,
+  "CICA": true,
+  "FSB": false,
+  "auxiliary": false,
+  "RAOC": false,
+  "renderer": "corrected_v1 plus separately verified projection clamp VJP; native forward unchanged",
+  "schedule": "eta .25; 500-2000 ramp; 2000-8000 hold; 8000-10000 decay; zero thereafter",
+  "structure_support": "train-only COLMAP tracks >=3 views, error <=1px; center distance and 3sigma radius <= local 4-NN spacing",
+  "ROI_limitation": "Review and protection regions frozen before treatment outputs. Residual regions remain U where independent F/O evidence is unavailable; cannot claim 20% water-removal gate passed from chroma alone.",
+  "checkpoint_steps": [
+    0,
+    10000,
+    15000
+  ],
+  "metrics": "metrics.py on native float tensors; exact same protocol for B0 and A",
+  "code_sha256": {
+    "scripts/experiments/run_geometry_gradient_A_worker.py": "6e6e22b403282fc7f43bfe71bafc51eec4ca3c6a7eb0e780e230ef984f09b97f",
+    "scripts/experiments/run_direct_mdrr_cica_scene.py": "57dad78d0d1c2169ec89d6e7a502366ade7eed1d14ea47290528644138e398be",
+    "scripts/experiments/geometry_projection_backend.py": "815b49845f44cc369249363d8a7b8ad9516b60b66dd25a038d0e077a5dd6ef2e",
+    "water_splatting/geometry_gradient.py": "9f981f256210706744605730b5090c02da4fcce62e243c5ff32819e69b816f44"
+  },
+  "checks": {
+    "Curasao": true,
+    "IUI3-RedSea": true,
+    "JapaneseGradens-RedSea": true,
+    "Panama": true
+  },
+  "jobs": [
+    {
+      "scene": "Curasao",
+      "arm": "B0",
+      "exit_code": 0
+    },
+    {
+      "scene": "Curasao",
+      "arm": "A",
+      "exit_code": 0
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "arm": "B0",
+      "exit_code": 0
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "arm": "A",
+      "exit_code": 0
+    },
+    {
+      "scene": "JapaneseGradens-RedSea",
+      "arm": "B0",
+      "exit_code": 0
+    },
+    {
+      "scene": "JapaneseGradens-RedSea",
+      "arm": "A",
+      "exit_code": 0
+    },
+    {
+      "scene": "Panama",
+      "arm": "B0",
+      "exit_code": 0
+    },
+    {
+      "scene": "Panama",
+      "arm": "A",
+      "exit_code": 0
+    }
+  ]
+}

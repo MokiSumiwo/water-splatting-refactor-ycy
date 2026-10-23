@@ -1,0 +1,65 @@
+{
+  "scene": "Curasao",
+  "optimizer_updates": 0,
+  "results": [
+    {
+      "view": "MTN_1289",
+      "relative_branch_sum_error": 0.00011039794480893761,
+      "direct_norm": 0.06069767475128174,
+      "medium_norm": 0.044536132365465164,
+      "native_norm": 0.042434100061655045,
+      "directional_ad": 0.033133119344711304,
+      "finite_difference": [
+        {
+          "h": 2e-05,
+          "fd": 0.03308679863422981,
+          "error": 4.632071048149555e-05,
+          "passed": true
+        },
+        {
+          "h": 1e-05,
+          "fd": 0.03294913366036489,
+          "error": 0.0001839856843464105,
+          "passed": true
+        },
+        {
+          "h": 5e-06,
+          "fd": 0.033391922837910926,
+          "error": 0.0002588034931996219,
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "view": "MTN_1295",
+      "relative_branch_sum_error": 0.00016308204794768244,
+      "direct_norm": 0.06344427168369293,
+      "medium_norm": 0.046976398676633835,
+      "native_norm": 0.047100309282541275,
+      "directional_ad": 0.0372188538312912,
+      "finite_difference": [
+        {
+          "h": 2e-05,
+          "fd": 0.03723363447560857,
+          "error": 1.4780644317369251e-05,
+          "passed": true
+        },
+        {
+          "h": 1e-05,
+          "fd": 0.03736130508302793,
+          "error": 0.00014245125173673046,
+          "passed": true
+        },
+        {
+          "h": 5e-06,
+          "fd": 0.037444289602284186,
+          "error": 0.00022543577099298773,
+          "passed": true
+        }
+      ],
+      "passed": true
+    }
+  ],
+  "passed": true
+}

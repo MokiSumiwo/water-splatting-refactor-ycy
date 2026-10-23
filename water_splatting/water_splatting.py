@@ -34,9 +34,19 @@ from water_splatting.fields import (
     DirectionConditionedMediumField,
     compute_bounded_gaussian_colors,
     compute_bounded_headroom_gaussian_colors,
+    compute_bounded_degreewise_headroom_gaussian_colors,
+    compute_bounded_selective_gaussian_colors,
+    compute_brash_gaussian_colors,
     compute_gaussian_colors,
     get_medium_context_extra_dim,
 )
+from water_splatting.bvam import compute_bvam_gaussian_colors
+from water_splatting.fields.gaussian_appearance import resolve_headroom_alpha, blend_bounded_headroom_colors
+from water_splatting.taba import compute_taba_dcu, sample_taba_transmission, taba_statistics
+from water_splatting.grac import GaussianReliabilityState, apply_grac, compute_grac_reliability, grac_statistics, validate_config as validate_grac_config
+from water_splatting.gcrc import GaussianContaminationState, apply_gcrc, compute_gcrc_contamination, gcrc_statistics, validate_config as validate_gcrc_config
+from water_splatting.crcc import ClearRadianceHistory, clear_consistency, crcc_statistics, loss_coefficient, validate_config as validate_crcc_config
+from water_splatting.fields.gaussian_appearance import safe_sigmoid
 from water_splatting.raoc import (
     apply_modal_keep_gate,
     apply_standardized_projector,
@@ -238,10 +248,127 @@ class WaterSplattingModelConfig(ModelConfig):
     """Kept for M1 config compatibility; clean branch does not implement infinite-water ownership."""
     b_inf_mode: Literal["implicit", "tied"] = "implicit"
     """Backscatter tail mode. M1+BND uses tied, where B_inf equals medium_rgb."""
-    intrinsic_color_parameterization: Literal["legacy", "bounded_sh3", "bounded_headroom_sh3"] = "legacy"
+    intrinsic_color_parameterization: Literal["legacy", "bounded_sh3", "bounded_headroom_sh3", "bounded_selective_sh3", "brash_bounded_sh3", "bvam_bounded_sh3"] = "legacy"
     """Gaussian intrinsic color mapping."""
+    bounded_headroom_alpha: float = 1.0
+    """FSB-alpha blend from bounded SH (0) to headroom mapping (1)."""
+    degreewise_headroom_alphas: Tuple[float, float, float] = (1.0, 1.0, 1.0)
+    headroom_schedule: Literal["constant", "smoothstep"] = "constant"
+    headroom_start_step: int = 3000
+    headroom_end_step: int = 8000
     bounded_sh_logit_eps: float = 1e-7
     """Epsilon used only for RGB-equivalent bounded-SH seed color logit initialization."""
+    taba_enabled: bool = False
+    taba_mode: str = "disabled"
+    """Allocate bounded SH chromatic residual using detached transmission."""
+    taba_diagnostic_only: bool = False
+    """Measure candidate gates without changing BND colors."""
+    taba_gate_mode: str = "detached_transmission"
+    taba_transmission_mid: float = 0.5
+    taba_transmission_temperature: float = 0.15
+    taba_chroma_floor: float = 0.20
+    taba_uncertainty_lambda: float = 0.50
+    taba_water_axis_eps: float = 1e-4
+    taba_log_path: Optional[str] = None
+    grac_enabled: bool = False
+    grac_mode: str = "disabled"
+    grac_diagnostic_only: bool = False
+    grac_beta_direction: float = 0.95
+    grac_beta_magnitude: float = 0.95
+    grac_residual_eps: float = 1e-5
+    grac_visibility_scale: float = 8.0
+    grac_min_visibility_count: int = 4
+    grac_reliability_start_step: int = 3000
+    grac_weight_direction: float = 0.50
+    grac_weight_magnitude: float = 0.30
+    grac_weight_visibility: float = 0.20
+    grac_chroma_floor: float = 0.35
+    grac_log_path: Optional[str] = None
+    gcrc_enabled: bool = False
+    gcrc_mode: str = "disabled"
+    gcrc_diagnostic_only: bool = False
+    gcrc_beta_water_direction: float = 0.95
+    gcrc_beta_residual_direction: float = 0.95
+    gcrc_residual_eps: float = 1e-5
+    gcrc_water_axis_eps: float = 1e-4
+    gcrc_water_strength_scale: float = 0.10
+    gcrc_visibility_scale: float = 8.0
+    gcrc_min_visibility_count: int = 4
+    gcrc_reliability_start_step: int = 3000
+    gcrc_max_correction: float = 0.50
+    gcrc_log_path: Optional[str] = None
+    crcc_enabled: bool = False
+    crcc_mode: str = "disabled"
+    crcc_diagnostic_only: bool = False
+    crcc_beta_ema: float = 0.95
+    crcc_charbonnier_eps: float = 1e-3
+    crcc_support_scale: float = 4.0
+    crcc_min_observations: int = 2
+    crcc_medium_weight_floor: float = 0.25
+    crcc_start_step: int = 3000
+    crcc_ramp_steps: int = 2000
+    crcc_lambda_max: float = 0.02
+    crcc_log_path: Optional[str] = None
+    brash_enabled: bool = False
+    """Enable BRASH bounded split-head appearance; disabled preserves BND exactly."""
+    brash_residual_scale: float = 1.0
+    """Scale applied to the bounded view-dependent residual branch."""
+    brash_gate_init_logit: float = 5.0
+    """Initial logit for the learned BRASH gate, near one."""
+    brash_gate_mode: Literal["learned", "fixed_one"] = "learned"
+    """Whether BRASH learns a gate or uses the exact full-SH mixture gate."""
+    brash_gate_prior_enabled: bool = False
+    """Enable the detached renderer-derived BRASH gate prior."""
+    brash_gate_prior_weight: float = 0.0
+    """Weight of the weak BRASH gate prior regularizer."""
+    brash_min_support: int = 3
+    """Minimum training-view support for BRASH reliability."""
+    brash_transmission_floor: float = 0.0
+    """Transmission floor used by BRASH reliability."""
+    brash_depth_stability_temperature: float = 1.0
+    """Depth variance temperature used by BRASH reliability."""
+    brash_view_spread_scale: float = 1.0
+    """View-direction spread scale used by BRASH reliability."""
+    brash_gate_regularizer_start_step: int = 10000
+    """First step at which the BRASH gate prior can be active."""
+    brash_gate_regularizer_ramp_steps: int = 5000
+    """Ramp length for the BRASH gate prior."""
+    brash_log_path: Optional[str] = None
+    """Optional JSONL path for BRASH diagnostics."""
+    bvam_enabled: bool = False
+    """Enable BVAM; disabled preserves the existing BND/BRASH path."""
+    bvam_num_experts: int = 2
+    """Number of bounded BVAM experts."""
+    bvam_delta_scale: float = 1.0
+    """Maximum tanh-bounded expert residual scale."""
+    bvam_gate_degree: int = 1
+    """Low-order SH degree used by the view-adaptive mixture gate."""
+    bvam_gate_temperature: float = 1.0
+    """Softmax temperature for BVAM expert weights."""
+    bvam_min_support: int = 3
+    """Minimum detached training-view support for BVAM pseudo targets."""
+    bvam_min_view_spread: float = 0.01
+    """Minimum detached view-direction spread for pseudo targets."""
+    bvam_pseudogt_enabled: bool = False
+    """Enable detached two-state gate pseudo-target consistency."""
+    bvam_pseudogt_temperature: float = 0.1
+    """Temperature used by detached two-state pseudo assignments."""
+    bvam_pseudogt_min_confidence: float = 0.1
+    """Minimum detached assignment confidence."""
+    bvam_gate_loss_weight: float = 0.0
+    """Weight of the gate pseudo-target consistency loss."""
+    bvam_diversity_loss_weight: float = 0.0
+    """Weight of the high-support expert diversity regularizer."""
+    bvam_gate_entropy_weight: float = 0.0
+    """Optional entropy regularizer; zero does not force uniform gates."""
+    bvam_delta_regularizer_weight: float = 0.0
+    """Optional bounded expert residual regularizer."""
+    bvam_start_step: int = 0
+    """First step at which BVAM auxiliary losses can be active."""
+    bvam_ramp_steps: int = 0
+    """Ramp length for BVAM auxiliary losses."""
+    bvam_log_path: Optional[str] = None
+    """Optional JSONL path for BVAM diagnostics."""
     appearance_lr_scale: float = 1.0
     """Scale applied only to features_dc and features_rest optimizer LR trajectories."""
     appearance_audit_log_dir: Optional[str] = None
@@ -355,7 +482,7 @@ class WaterSplattingModel(Model):
             shs = torch.zeros((self.seed_points[1].shape[0], dim_sh, 3)).float().cuda()
             if self.config.sh_degree > 0:
                 seed_rgb = self.seed_points[1] / 255
-                if self.config.intrinsic_color_parameterization in ("bounded_sh3", "bounded_headroom_sh3"):
+                if self.config.intrinsic_color_parameterization in ("bounded_sh3", "bounded_headroom_sh3", "bounded_selective_sh3", "brash_bounded_sh3", "bvam_bounded_sh3"):
                     CONSOLE.log("use bounded SH3 intrinsic color parameterization")
                     shs[:, 0, :3] = RGB2SHLogits(seed_rgb, eps=self.config.bounded_sh_logit_eps)
                 else:
@@ -381,6 +508,22 @@ class WaterSplattingModel(Model):
                 "opacities": opacities,
             }
         )
+        if bool(getattr(self.config, "brash_enabled", False)):
+            if str(getattr(self.config, "brash_gate_mode", "learned")) not in ("learned", "fixed_one"):
+                raise ValueError("brash_gate_mode must be 'learned' or 'fixed_one'")
+            self.gauss_params["brash_gate_logit"] = torch.nn.Parameter(
+                torch.full((num_points, 1), float(getattr(self.config, "brash_gate_init_logit", 5.0)))
+            )
+        if bool(getattr(self.config, "bvam_enabled", False)):
+            if bool(getattr(self.config, "brash_enabled", False)):
+                raise ValueError("BRASH and BVAM are mutually exclusive appearance parameterizations")
+            experts = int(getattr(self.config, "bvam_num_experts", 2))
+            if experts < 2:
+                raise ValueError("BVAM requires at least two experts")
+            self.gauss_params["bvam_delta"] = torch.nn.Parameter(
+                torch.zeros((num_points, experts, 4, 3))
+            )
+            self.gauss_params["bvam_gate"] = torch.nn.Parameter(torch.zeros((num_points, experts, 4)))
 
         # metrics
         from torchmetrics.image import PeakSignalNoiseRatio
@@ -401,6 +544,13 @@ class WaterSplattingModel(Model):
         self._camera_medium_observability_projector: Optional[torch.Tensor] = None
         self._camera_medium_observability_spectrum: Optional[torch.Tensor] = None
         self._camera_medium_observability_scale: Optional[torch.Tensor] = None
+        self._bvam_valid_mask: Optional[torch.Tensor] = None
+        self._grac_state = None
+        self._grac_pending = None
+        self._gcrc_state = None
+        self._gcrc_pending = None
+        self._crcc_state = None
+        self._crcc_pending = None
         self.register_buffer("_camera_medium_raoc_basis", torch.eye(9, dtype=torch.float32), persistent=True)
         self.register_buffer("_camera_medium_raoc_spectrum", torch.zeros(9, dtype=torch.float32), persistent=True)
         self.register_buffer("_camera_medium_raoc_global_gate", torch.zeros(9, dtype=torch.float32), persistent=True)
@@ -421,11 +571,17 @@ class WaterSplattingModel(Model):
     @property
     def colors(self):
         if self.config.sh_degree > 0:
-            if self.config.intrinsic_color_parameterization in ("bounded_sh3", "bounded_headroom_sh3"):
+            if self.config.intrinsic_color_parameterization in ("bounded_sh3", "bounded_headroom_sh3", "bounded_selective_sh3", "brash_bounded_sh3", "bvam_bounded_sh3"):
                 return SHLogits2RGB(self.features_dc)
             return SH2RGB(self.features_dc)
         else:
             return torch.sigmoid(self.features_dc)
+
+    @property
+    def brash_gate_logit(self):
+        if "brash_gate_logit" not in self.gauss_params:
+            raise AttributeError("BRASH gate is disabled")
+        return self.gauss_params["brash_gate_logit"]
 
     @property
     def shs_0(self):
@@ -476,6 +632,43 @@ class WaterSplattingModel(Model):
         self.step = self.config.num_steps
         dict = dict.copy()
         dict.pop("gaussian_lineage_ids", None)
+        brash_key = "gauss_params.brash_gate_logit"
+        if bool(getattr(self.config, "brash_enabled", False)):
+            if brash_key not in dict:
+                legacy_brash_key = "brash_gate_logit"
+                if legacy_brash_key in dict:
+                    dict[brash_key] = dict.pop(legacy_brash_key)
+                else:
+                    if "gauss_params.means" in dict:
+                        point_count = int(dict["gauss_params.means"].shape[0])
+                    elif "means" in dict:
+                        point_count = int(dict["means"].shape[0])
+                    else:
+                        raise RuntimeError("BRASH checkpoint initialization needs Gaussian means")
+                    dict[brash_key] = torch.full(
+                        (point_count, 1),
+                        float(getattr(self.config, "brash_gate_init_logit", 5.0)),
+                    )
+        else:
+            dict.pop(brash_key, None)
+            dict.pop("brash_gate_logit", None)
+        bvam_enabled = bool(getattr(self.config, "bvam_enabled", False))
+        bvam_delta_key = "gauss_params.bvam_delta"
+        bvam_gate_key = "gauss_params.bvam_gate"
+        if bvam_enabled:
+            if bvam_delta_key not in dict and "bvam_delta" in dict:
+                dict[bvam_delta_key] = dict.pop("bvam_delta")
+            if bvam_gate_key not in dict and "bvam_gate" in dict:
+                dict[bvam_gate_key] = dict.pop("bvam_gate")
+            point_count = int(dict["gauss_params.means"].shape[0]) if "gauss_params.means" in dict else int(dict["means"].shape[0])
+            experts = int(getattr(self.config, "bvam_num_experts", 2))
+            if bvam_delta_key not in dict:
+                dict[bvam_delta_key] = torch.zeros((point_count, experts, 4, 3))
+            if bvam_gate_key not in dict:
+                dict[bvam_gate_key] = torch.zeros((point_count, experts, 4))
+        else:
+            dict.pop(bvam_delta_key, None)
+            dict.pop(bvam_gate_key, None)
         # Archived checkpoints predate RAOC.  Supplying the initialized buffers
         # keeps strict model loading backward compatible while leaving RAOC off.
         for key in (
@@ -499,7 +692,120 @@ class WaterSplattingModel(Model):
             old_shape = param.shape
             new_shape = (newp,) + old_shape[1:]
             self.gauss_params[name] = torch.nn.Parameter(torch.zeros(new_shape, device=self.device))
+        grac_keys = [key for key in dict if key.startswith("_grac_state.")]
+        self._grac_state = None
+        self._grac_pending = None
+        if self._grac_tracks_history():
+            self._ensure_grac_state()
+            expected = self._grac_state.state_dict()
+            if grac_keys:
+                if set(grac_keys) != {"_grac_state." + key for key in expected}:
+                    raise RuntimeError("incomplete GRAC checkpoint state")
+                for key, value in expected.items():
+                    loaded = dict["_grac_state." + key]
+                    if loaded.shape != value.shape or not bool(torch.isfinite(loaded).all()):
+                        raise RuntimeError("corrupt or misaligned GRAC checkpoint state: " + key)
+                    if not value.is_floating_point() and loaded.dtype != value.dtype:
+                        raise RuntimeError("invalid GRAC checkpoint dtype: " + key)
+            else:
+                dict.update({"_grac_state." + key: value for key, value in expected.items()})
+        else:
+            for key in grac_keys:
+                dict.pop(key)
+        gcrc_keys = [key for key in dict if key.startswith("_gcrc_state.")]
+        self._gcrc_state = None
+        self._gcrc_pending = None
+        if self._gcrc_tracks_history():
+            self._ensure_gcrc_state()
+            expected = self._gcrc_state.state_dict()
+            if gcrc_keys:
+                if set(gcrc_keys) != {"_gcrc_state." + key for key in expected}:
+                    raise RuntimeError("incomplete GCRC checkpoint state")
+                for key, value in expected.items():
+                    loaded = dict["_gcrc_state." + key]
+                    if loaded.shape != value.shape or not bool(torch.isfinite(loaded).all()):
+                        raise RuntimeError("corrupt or misaligned GCRC checkpoint state: " + key)
+                    if not value.is_floating_point() and loaded.dtype != value.dtype:
+                        raise RuntimeError("invalid GCRC checkpoint dtype: " + key)
+                if bool((dict["_gcrc_state.visibility_count"] < 0).any()):
+                    raise RuntimeError("negative GCRC visibility count")
+            else:
+                dict.update({"_gcrc_state." + key: value for key, value in expected.items()})
+        else:
+            for key in gcrc_keys:
+                dict.pop(key)
+        crcc_keys = [key for key in dict if key.startswith("_crcc_state.")]
+        self._crcc_state = None
+        self._crcc_pending = None
+        if self._crcc_tracks_history():
+            self._ensure_crcc_state()
+            expected = self._crcc_state.state_dict()
+            if crcc_keys:
+                if set(crcc_keys) != {"_crcc_state." + key for key in expected}:
+                    raise RuntimeError("incomplete CRCC checkpoint state")
+                for key, value in expected.items():
+                    loaded = dict["_crcc_state." + key]
+                    if loaded.shape != value.shape or not bool(torch.isfinite(loaded).all()):
+                        raise RuntimeError("corrupt or misaligned CRCC checkpoint state: " + key)
+                    if not value.is_floating_point() and loaded.dtype != value.dtype:
+                        raise RuntimeError("invalid CRCC checkpoint dtype: " + key)
+                count = dict["_crcc_state.crcc_observation_count"]
+                if bool((count < 0).any()) or not torch.equal(count > 0, dict["_crcc_state.crcc_initialized"]):
+                    raise RuntimeError("invalid CRCC observation state")
+                if bool((dict["_crcc_state.crcc_chroma_ema"].abs() > 1).any()):
+                    raise RuntimeError("invalid CRCC chroma history")
+            else:
+                dict.update({"_crcc_state." + key: value for key, value in expected.items()})
+        else:
+            for key in crcc_keys:
+                dict.pop(key)
         super().load_state_dict(dict, **kwargs)
+
+    def _crcc_controls_mode(self):
+        return (getattr(self.config, "crcc_enabled", False) or getattr(self.config, "crcc_diagnostic_only", False)
+                or getattr(self.config, "crcc_mode", "disabled") != "disabled")
+
+    def _crcc_tracks_history(self):
+        return ((getattr(self.config, "crcc_enabled", False) or getattr(self.config, "crcc_diagnostic_only", False))
+                and getattr(self.config, "crcc_mode", "disabled") in ("crcc", "crcc_taba"))
+
+    def _ensure_crcc_state(self):
+        validate_crcc_config(self.config)
+        if getattr(self, "_crcc_state", None) is None:
+            self._crcc_state = ClearRadianceHistory(self.features_dc)
+        self._crcc_state.check_shape(self.num_points)
+
+    def _grac_tracks_history(self):
+        if self._crcc_controls_mode():
+            return False
+        if self._gcrc_controls_mode():
+            return getattr(self.config, "gcrc_mode", "disabled") == "grac"
+        return ((getattr(self.config, "grac_enabled", False) or getattr(self.config, "grac_diagnostic_only", False))
+                and getattr(self.config, "grac_mode", "disabled") in ("grac", "grac_taba"))
+
+    def _gcrc_controls_mode(self):
+        if self._crcc_controls_mode():
+            return False
+        return (getattr(self.config, "gcrc_enabled", False) or getattr(self.config, "gcrc_diagnostic_only", False)
+                or getattr(self.config, "gcrc_mode", "disabled") != "disabled")
+
+    def _gcrc_tracks_history(self):
+        if self._crcc_controls_mode():
+            return False
+        return ((getattr(self.config, "gcrc_enabled", False) or getattr(self.config, "gcrc_diagnostic_only", False))
+                and getattr(self.config, "gcrc_mode", "disabled") in ("gcrc", "gcrc_taba"))
+
+    def _ensure_gcrc_state(self):
+        validate_gcrc_config(self.config)
+        if self._gcrc_state is None:
+            self._gcrc_state = GaussianContaminationState(self.features_dc)
+        self._gcrc_state.check_shape(self.num_points)
+
+    def _ensure_grac_state(self):
+        validate_grac_config(self.config)
+        if self._grac_state is None:
+            self._grac_state = GaussianReliabilityState(self.features_dc)
+        self._grac_state.check_shape(self.num_points)
 
     def k_nearest_sklearn(self, x: torch.Tensor, k: int):
         """
@@ -579,6 +885,32 @@ class WaterSplattingModel(Model):
 
     def after_train(self, step: int):
         assert step == self.step
+        if getattr(self, "_crcc_pending", None) is not None:
+            pending_step, chroma, visible, valid = self._crcc_pending
+            self._crcc_pending = None
+            if pending_step != step:
+                raise RuntimeError("CRCC observation belongs to another training step")
+            self._ensure_crcc_state()
+            self._crcc_state.update(chroma, visible, valid, step=step, beta_ema=self.config.crcc_beta_ema)
+        if self._gcrc_pending is not None:
+            pending_step, chroma, water_raw, visible, valid = self._gcrc_pending
+            self._gcrc_pending = None
+            if pending_step != step:
+                raise RuntimeError("GCRC observation belongs to another training step")
+            self._ensure_gcrc_state()
+            self._gcrc_state.update(chroma, water_raw, visible, valid, step=step,
+                beta_water_direction=self.config.gcrc_beta_water_direction,
+                beta_residual_direction=self.config.gcrc_beta_residual_direction,
+                residual_eps=self.config.gcrc_residual_eps, water_axis_eps=self.config.gcrc_water_axis_eps)
+        if self._grac_pending is not None:
+            pending_step, chroma, visible = self._grac_pending
+            self._grac_pending = None
+            if pending_step != step:
+                raise RuntimeError("GRAC observation belongs to another training step")
+            self._ensure_grac_state()
+            self._grac_state.update(chroma, visible, step=step,
+                beta_direction=self.config.grac_beta_direction,
+                beta_magnitude=self.config.grac_beta_magnitude, residual_eps=self.config.grac_residual_eps)
         # to save some training time, we no longer need to update those stats post refinement
         # if self.step >= self.config.stop_split_at:
         #     return
@@ -733,6 +1065,26 @@ class WaterSplattingModel(Model):
                     self.gauss_params[name] = torch.nn.Parameter(
                         torch.cat([param.detach(), split_params[name], dup_params[name]], dim=0)
                     )
+                if self._grac_state is not None:
+                    self._grac_state.densify(splits, nsamps, dups)
+                    self._grac_state.check_shape(self.num_points)
+                if getattr(self, "_gcrc_state", None) is not None:
+                    self._gcrc_state.densify(splits, nsamps, dups)
+                    self._gcrc_state.check_shape(self.num_points)
+                if getattr(self, "_crcc_state", None) is not None:
+                    self._crcc_state.densify(splits, nsamps, dups)
+                    self._crcc_state.check_shape(self.num_points)
+                if self._bvam_valid_mask is not None:
+                    # BVAM support is attached to a Gaussian, so refinement
+                    # children inherit their parent's detached support status.
+                    self._bvam_valid_mask = torch.cat(
+                        [
+                            self._bvam_valid_mask,
+                            self._bvam_valid_mask[splits].repeat(nsamps),
+                            self._bvam_valid_mask[dups],
+                        ],
+                        dim=0,
+                    )
                 if priority_mode != "baseline":
                     assert new_guidance_h is not None and new_guidance_b is not None
                     self._refinement_guidance_hardness = new_guidance_h
@@ -775,6 +1127,8 @@ class WaterSplattingModel(Model):
     
             if deleted_mask is not None:
                 self._refinement_last_event["N_pruned"] = int(deleted_mask.sum().item())
+                if self._bvam_valid_mask is not None:
+                    self._bvam_valid_mask = self._bvam_valid_mask[~deleted_mask]
                 if priority_mode != "baseline":
                     if new_guidance_h is not None and new_guidance_b is not None:
                         self._refinement_guidance_hardness = new_guidance_h[~deleted_mask]
@@ -842,6 +1196,15 @@ class WaterSplattingModel(Model):
             toobigs_count = torch.sum(toobigs).item()
         for name, param in self.gauss_params.items():
             self.gauss_params[name] = torch.nn.Parameter(param[~culls])
+        if self._grac_state is not None:
+            self._grac_state.prune(culls)
+            self._grac_state.check_shape(self.num_points)
+        if getattr(self, "_gcrc_state", None) is not None:
+            self._gcrc_state.prune(culls)
+            self._gcrc_state.check_shape(self.num_points)
+        if getattr(self, "_crcc_state", None) is not None:
+            self._crcc_state.prune(culls)
+            self._crcc_state.check_shape(self.num_points)
 
         CONSOLE.log(
             f"Culled {n_bef - self.num_points} gaussians "
@@ -885,7 +1248,8 @@ class WaterSplattingModel(Model):
         }
         for name, param in self.gauss_params.items():
             if name not in out:
-                out[name] = param[split_mask].repeat(samps, 1)
+                repeat_dims = (samps,) + (1,) * (param.ndim - 1)
+                out[name] = param[split_mask].repeat(*repeat_dims)
         return out
 
     def dup_gaussians(self, dup_mask):
@@ -950,6 +1314,9 @@ class WaterSplattingModel(Model):
 
     def step_cb(self, step):
         self.step = step
+        self._grac_pending = None
+        self._gcrc_pending = None
+        self._crcc_pending = None
 
     def _parse_aopt_steps(self, value: str) -> set[int]:
         steps: set[int] = set()
@@ -1350,10 +1717,69 @@ class WaterSplattingModel(Model):
     def get_gaussian_param_groups(self) -> Dict[str, List[Parameter]]:
         # Here we explicitly use the means, scales as parameters so that the user can override this function and
         # specify more if they want to add more optimizable params to gaussians.
-        return {
+        groups = {
             name: [self.gauss_params[name]]
             for name in ["means", "scales", "quats", "features_dc", "features_rest", "opacities"]
         }
+        if bool(getattr(self.config, "brash_enabled", False)) and str(getattr(self.config, "brash_gate_mode", "learned")) == "learned":
+            groups["brash_gate"] = [self.gauss_params["brash_gate_logit"]]
+        if bool(getattr(self.config, "bvam_enabled", False)):
+            groups["bvam_delta"] = [self.gauss_params["bvam_delta"]]
+            groups["bvam_gate"] = [self.gauss_params["bvam_gate"]]
+        return groups
+
+    def brash_gate_regularizer(
+        self, prior: Optional[Mapping[str, torch.Tensor]], step: Optional[int] = None
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """Return a weak detached gate-prior penalty and scalar diagnostics."""
+
+        zero = self.features_dc.sum() * 0.0
+        if not bool(getattr(self.config, "brash_enabled", False)) or prior is None:
+            return zero, {"enabled": False, "value": 0.0, "progress": 0.0}
+        if str(getattr(self.config, "brash_gate_mode", "learned")) != "learned":
+            return zero, {"enabled": False, "value": 0.0, "progress": 0.0}
+        if not bool(getattr(self.config, "brash_gate_prior_enabled", False)):
+            return zero, {"enabled": False, "value": 0.0, "progress": 0.0}
+        target = prior["target"].to(device=self.device, dtype=self.brash_gate_logit.dtype).reshape(-1)
+        confidence = prior["confidence"].to(device=self.device, dtype=self.brash_gate_logit.dtype).reshape(-1)
+        if target.shape[0] != self.num_points:
+            raise RuntimeError("BRASH reliability prior population is stale")
+        current = torch.sigmoid(self.brash_gate_logit.reshape(-1))
+        start = int(getattr(self.config, "brash_gate_regularizer_start_step", 0))
+        ramp = int(getattr(self.config, "brash_gate_regularizer_ramp_steps", 0))
+        current_step = int(self.step if step is None else step)
+        if current_step < start:
+            progress = 0.0
+        elif ramp <= 0:
+            progress = 1.0
+        else:
+            progress = min(max((current_step - start) / float(ramp), 0.0), 1.0)
+        low_confidence_weight = (1.0 - confidence).detach()
+        raw = (low_confidence_weight * (current - target.detach()).square()).sum() / low_confidence_weight.sum().clamp_min(1e-6)
+        weighted = float(getattr(self.config, "brash_gate_prior_weight", 0.0)) * progress * raw
+        return weighted, {
+            "enabled": bool(progress > 0.0),
+            "value": float(weighted.detach().item()),
+            "raw_value": float(raw.detach().item()),
+            "progress": float(progress),
+            "gate_mean": float(current.detach().mean().item()),
+            "gate_p10": float(torch.quantile(current.detach().float(), 0.10).item()),
+            "gate_p50": float(torch.quantile(current.detach().float(), 0.50).item()),
+            "gate_p90": float(torch.quantile(current.detach().float(), 0.90).item()),
+            "gate_near_zero_fraction": float((current.detach() < 0.05).float().mean().item()),
+            "gate_near_one_fraction": float((current.detach() > 0.95).float().mean().item()),
+        }
+
+    def set_bvam_valid_mask(self, valid_mask: Optional[torch.Tensor]) -> None:
+        """Install a detached support mask; invalid Gaussians use uniform BVAM."""
+
+        if valid_mask is None:
+            self._bvam_valid_mask = None
+            return
+        mask = torch.as_tensor(valid_mask, device=self.device).reshape(-1).bool().detach()
+        if mask.shape[0] != self.num_points:
+            raise ValueError("BVAM support mask population is stale")
+        self._bvam_valid_mask = mask
 
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
         """Obtain the parameter groups for the optimizers
@@ -2003,6 +2429,9 @@ class WaterSplattingModel(Model):
             means_crop = self.means[crop_ids]
             features_dc_crop = self.features_dc[crop_ids]
             features_rest_crop = self.features_rest[crop_ids]
+            brash_gate_crop = self.brash_gate_logit[crop_ids] if bool(getattr(self.config, "brash_enabled", False)) else None
+            bvam_delta_crop = self.gauss_params["bvam_delta"][crop_ids] if bool(getattr(self.config, "bvam_enabled", False)) else None
+            bvam_gate_crop = self.gauss_params["bvam_gate"][crop_ids] if bool(getattr(self.config, "bvam_enabled", False)) else None
             scales_crop = self.scales[crop_ids]
             quats_crop = self.quats[crop_ids]
         else:
@@ -2010,6 +2439,9 @@ class WaterSplattingModel(Model):
             means_crop = self.means
             features_dc_crop = self.features_dc
             features_rest_crop = self.features_rest
+            brash_gate_crop = self.brash_gate_logit if bool(getattr(self.config, "brash_enabled", False)) else None
+            bvam_delta_crop = self.gauss_params["bvam_delta"] if bool(getattr(self.config, "bvam_enabled", False)) else None
+            bvam_gate_crop = self.gauss_params["bvam_gate"] if bool(getattr(self.config, "bvam_enabled", False)) else None
             scales_crop = self.scales
             quats_crop = self.quats
 
@@ -2061,7 +2493,10 @@ class WaterSplattingModel(Model):
                     "medium_bs": medium_bs, "medium_attn": medium_attn, "b_inf": medium.b_inf,
                     "direct_object_signal": clear, "transmission": transmission, "tau_D": tau_d}, medium, H, W)
 
-        if self.training:
+        # Pseudo-target and diagnostic forwards can keep the module in training
+        # mode while running under torch.no_grad().  retain_grad is only valid
+        # for tensors that participate in an autograd graph.
+        if self.training and self.xys.requires_grad:
             self.xys.retain_grad()
 
         n = min(self.step // self.config.sh_degree_interval, self.config.sh_degree)
@@ -2086,15 +2521,88 @@ class WaterSplattingModel(Model):
             )
             rgbs = bounded_color.rgb
         elif self.config.intrinsic_color_parameterization == "bounded_headroom_sh3":
-            bounded_color = compute_bounded_headroom_gaussian_colors(
+            degreewise = tuple(getattr(self.config, "degreewise_headroom_alphas", (1.0, 1.0, 1.0)))
+            if degreewise != (1.0, 1.0, 1.0):
+                bounded_color = compute_bounded_degreewise_headroom_gaussian_colors(
+                    means=means_crop, features_dc=features_dc_crop,
+                    features_rest=features_rest_crop,
+                    camera_position=camera.camera_to_worlds[..., :3, 3],
+                    sh_degree=self.config.sh_degree, active_sh_degree=n,
+                    degree_alphas=degreewise,
+                )
+            else:
+                bounded_color = compute_bounded_headroom_gaussian_colors(
                 means=means_crop,
                 features_dc=features_dc_crop,
                 features_rest=features_rest_crop,
                 camera_position=camera.camera_to_worlds[..., :3, 3],
                 sh_degree=self.config.sh_degree,
                 active_sh_degree=n,
+                )
+            alpha = resolve_headroom_alpha(
+                self.step, target=float(getattr(self.config, "bounded_headroom_alpha", 1.0)),
+                schedule=getattr(self.config, "headroom_schedule", "constant"),
+                start_step=int(getattr(self.config, "headroom_start_step", 3000)),
+                end_step=int(getattr(self.config, "headroom_end_step", 8000)),
+            )
+            if alpha < 1.0:
+                base_color = compute_bounded_gaussian_colors(
+                    means=means_crop, features_dc=features_dc_crop,
+                    features_rest=features_rest_crop,
+                    camera_position=camera.camera_to_worlds[..., :3, 3],
+                    sh_degree=self.config.sh_degree, active_sh_degree=n,
+                )
+                bounded_color = blend_bounded_headroom_colors(base_color, bounded_color, alpha)
+            rgbs = bounded_color.rgb
+        elif self.config.intrinsic_color_parameterization == "bounded_selective_sh3":
+            bounded_color = compute_bounded_selective_gaussian_colors(
+                means=means_crop, features_dc=features_dc_crop,
+                features_rest=features_rest_crop,
+                camera_position=camera.camera_to_worlds[..., :3, 3],
+                sh_degree=self.config.sh_degree, active_sh_degree=n,
+                saturation_threshold=float(getattr(self.config, "sbr_saturation_threshold", 0.055)),
+                temperature=float(getattr(self.config, "sbr_temperature", 0.015)),
             )
             rgbs = bounded_color.rgb
+        elif self.config.intrinsic_color_parameterization == "brash_bounded_sh3":
+            if not bool(getattr(self.config, "brash_enabled", False)):
+                raise RuntimeError("brash_bounded_sh3 requires brash_enabled")
+            if brash_gate_crop is None:
+                raise RuntimeError("BRASH gate parameters are missing")
+            bounded_color = compute_brash_gaussian_colors(
+                means=means_crop,
+                features_dc=features_dc_crop,
+                features_rest=features_rest_crop,
+                brash_gate_logit=brash_gate_crop,
+                camera_position=camera.camera_to_worlds[..., :3, 3],
+                sh_degree=self.config.sh_degree,
+                active_sh_degree=n,
+                residual_scale=float(getattr(self.config, "brash_residual_scale", 1.0)),
+                gate_mode=str(getattr(self.config, "brash_gate_mode", "learned")),
+            )
+            rgbs = bounded_color.rgb
+        elif self.config.intrinsic_color_parameterization == "bvam_bounded_sh3":
+            if not bool(getattr(self.config, "bvam_enabled", False)):
+                raise RuntimeError("bvam_bounded_sh3 requires bvam_enabled")
+            if bvam_delta_crop is None or bvam_gate_crop is None:
+                raise RuntimeError("BVAM parameters are missing")
+            bvam_color = compute_bvam_gaussian_colors(
+                means=means_crop,
+                features_dc=features_dc_crop,
+                features_rest=features_rest_crop,
+                bvam_delta=bvam_delta_crop,
+                bvam_gate=bvam_gate_crop,
+                camera_position=camera.camera_to_worlds[..., :3, 3],
+                sh_degree=self.config.sh_degree,
+                active_sh_degree=n,
+                num_experts=int(getattr(self.config, "bvam_num_experts", 2)),
+                delta_scale=float(getattr(self.config, "bvam_delta_scale", 1.0)),
+                gate_degree=int(getattr(self.config, "bvam_gate_degree", 1)),
+                gate_temperature=float(getattr(self.config, "bvam_gate_temperature", 1.0)),
+                valid_mask=(self._bvam_valid_mask[crop_ids] if self._bvam_valid_mask is not None and crop_ids is not None else self._bvam_valid_mask),
+            )
+            rgbs = bvam_color.rgb
+            bounded_color = None
         else:
             raise ValueError(f"Unknown intrinsic_color_parameterization: {self.config.intrinsic_color_parameterization}")
 
@@ -2126,6 +2634,169 @@ class WaterSplattingModel(Model):
         medium_attn = medium.attn
 
         self.xys_grad_abs = torch.zeros_like(self.xys)
+
+        taba_outputs = {}
+        grac_outputs = {}
+        gcrc_outputs = {}
+        crcc_control = self._crcc_controls_mode()
+        crcc_mode = getattr(self.config, "crcc_mode", "disabled")
+        crcc_diagnostic = bool(getattr(self.config, "crcc_diagnostic_only", False))
+        if crcc_control:
+            validate_crcc_config(self.config)
+        gcrc_control = self._gcrc_controls_mode()
+        gcrc_mode = getattr(self.config, "gcrc_mode", "disabled")
+        gcrc_diagnostic = bool(getattr(self.config, "gcrc_diagnostic_only", False))
+        if gcrc_control:
+            validate_gcrc_config(self.config)
+        grac_enabled = bool(getattr(self.config, "grac_enabled", False))
+        grac_diagnostic = bool(getattr(self.config, "grac_diagnostic_only", False))
+        grac_mode = getattr(self.config, "grac_mode", "disabled")
+        if crcc_control:
+            grac_enabled = grac_diagnostic = False
+            grac_mode = "disabled"
+        if gcrc_control:
+            grac_enabled = gcrc_mode == "grac"
+            grac_diagnostic = gcrc_diagnostic and grac_enabled
+            grac_mode = "grac" if grac_enabled else "disabled"
+        if grac_enabled or grac_diagnostic:
+            validate_grac_config(self.config)
+        grac_original = None
+        if self._grac_tracks_history():
+            if self.config.intrinsic_color_parameterization != "bounded_sh3" or bounded_color is None:
+                raise ValueError("GRAC requires bounded_sh3 appearance")
+            self._ensure_grac_state()
+            grac_original = (bounded_color.logits, bounded_color.dc_logits)
+            raw_delta = grac_original[0] - grac_original[1]
+            raw_chroma = raw_delta - raw_delta.mean(-1, keepdim=True)
+            reliability = compute_grac_reliability(raw_chroma, self._grac_state.values(crop_ids), step=self.step,
+                residual_eps=self.config.grac_residual_eps, visibility_scale=self.config.grac_visibility_scale,
+                min_visibility_count=self.config.grac_min_visibility_count,
+                reliability_start_step=self.config.grac_reliability_start_step,
+                weight_direction=self.config.grac_weight_direction, weight_magnitude=self.config.grac_weight_magnitude,
+                weight_visibility=self.config.grac_weight_visibility, chroma_floor=self.config.grac_chroma_floor)
+            grac_outputs = {"grac_" + key: value for key, value in reliability.items()}
+            if self.training and torch.is_grad_enabled() and crop_ids is None and self._grac_pending is None:
+                self._grac_pending = (int(self.step), raw_chroma.detach(), (self.radii > 0).detach().reshape(-1))
+        taba_mode = getattr(self.config, "taba_mode", "chromatic")
+        taba_active = bool(getattr(self.config, "taba_enabled", False)) and taba_mode != "disabled"
+        taba_diagnostic = bool(getattr(self.config, "taba_diagnostic_only", False))
+        if grac_enabled or grac_diagnostic:
+            taba_active = grac_mode in ("taba", "grac_taba")
+            taba_mode = "directional"
+            taba_diagnostic = grac_diagnostic
+            if grac_mode == "disabled":
+                taba_active = taba_diagnostic = False
+        if gcrc_control:
+            taba_active = gcrc_mode in ("taba", "gcrc_taba")
+            taba_mode = "directional"
+            taba_diagnostic = gcrc_diagnostic
+        if crcc_control:
+            taba_active = crcc_mode in ("taba", "crcc_taba")
+            taba_mode = "directional"
+            taba_diagnostic = crcc_diagnostic
+        gcrc_original = None
+        if self._gcrc_tracks_history():
+            if self.config.intrinsic_color_parameterization != "bounded_sh3" or bounded_color is None:
+                raise ValueError("GCRC requires bounded_sh3 appearance")
+            self._ensure_gcrc_state()
+            gcrc_original = (bounded_color.logits, bounded_color.dc_logits)
+        dcu = None
+        if taba_active or taba_diagnostic or gcrc_original is not None:
+            if self.config.intrinsic_color_parameterization != "bounded_sh3" or bounded_color is None:
+                raise ValueError("TABA requires the bounded_sh3 appearance path")
+            if self.config.taba_gate_mode != "detached_transmission":
+                raise ValueError("TABA only supports detached_transmission")
+            # The existing compositor supplies color-independent expected depth.
+            # This prepass creates no graph and cannot update medium or geometry.
+            with torch.no_grad():
+                depth_probe = self.underwater_rasterizer.rasterize(
+                    xys=self.xys.detach(), xys_grad_abs=torch.zeros_like(self.xys),
+                    depths=depths.detach(), radii=self.radii.detach(), conics=conics.detach(),
+                    num_tiles_hit=num_tiles_hit.detach(), colors=rgbs.detach(), opacities=opacities.detach(),
+                    medium_rgb=medium_rgb.detach(), medium_bs=medium_bs.detach(), medium_attn=medium_attn.detach(),
+                    height=H, width=W, background=medium_rgb.detach(), step=self.step,
+                )
+                proxy = sample_taba_transmission(
+                    medium_attn, depth_probe.depth, depth_probe.accumulation, self.xys, self.radii,
+                    rgb_object=depth_probe.rgb_object, rgb_medium=depth_probe.rgb_medium,
+                )
+                del depth_probe
+            if gcrc_original is not None:
+                raw_delta = gcrc_original[0] - gcrc_original[1]
+                raw_chroma = raw_delta - raw_delta.mean(-1, keepdim=True)
+                water_raw = proxy["rgb_medium"] - proxy["rgb_object"]
+                contamination = compute_gcrc_contamination(raw_chroma, water_raw,
+                    proxy["transmission_rgb"], proxy["valid"], self._gcrc_state.values(crop_ids), step=self.step,
+                    residual_eps=self.config.gcrc_residual_eps, water_axis_eps=self.config.gcrc_water_axis_eps,
+                    water_strength_scale=self.config.gcrc_water_strength_scale,
+                    visibility_scale=self.config.gcrc_visibility_scale,
+                    min_visibility_count=self.config.gcrc_min_visibility_count,
+                    reliability_start_step=self.config.gcrc_reliability_start_step,
+                    max_correction=self.config.gcrc_max_correction)
+                gcrc_outputs = {"gcrc_" + key: value for key, value in contamination.items()}
+                if self.training and torch.is_grad_enabled() and crop_ids is None and self._gcrc_pending is None:
+                    self._gcrc_pending = (int(self.step), raw_chroma.detach(), water_raw.detach(),
+                                          (self.radii > 0).detach().reshape(-1), proxy["valid"].detach())
+            dcu = compute_taba_dcu(
+                bounded_color.logits, bounded_color.dc_logits, proxy["tau_D"],
+                proxy["rgb_object"], proxy["rgb_medium"],
+                mode=taba_mode if taba_mode != "disabled" else "chromatic",
+                transmission=proxy["transmission_rgb"], valid_mask=proxy["valid"],
+                transmission_mid=self.config.taba_transmission_mid,
+                transmission_temperature=self.config.taba_transmission_temperature,
+                chroma_floor=self.config.taba_chroma_floor,
+                uncertainty_lambda=self.config.taba_uncertainty_lambda,
+                water_axis_eps=self.config.taba_water_axis_eps,
+            )
+            gate = dcu["gate"]
+            apply_taba = taba_active and not taba_diagnostic
+            taba_outputs = {"taba_" + key: value.detach() for key, value in proxy.items()
+                            if key not in ("rgb_object", "rgb_medium")}
+            taba_outputs.update({"taba_dcu_" + key: value.detach() for key, value in dcu.items()
+                                 if key not in ("rgb", "s_adjusted")})
+            taba_outputs["taba_candidate_g_chroma"] = gate.detach()
+            taba_outputs["taba_g_chroma"] = gate.detach() if apply_taba else torch.ones_like(gate)
+            taba_outputs["taba_ungated_sh_residual"] = bounded_color.sh_residual.detach()
+            if apply_taba:
+                bounded_color.rgb = dcu["rgb"]
+                bounded_color.logits = dcu["s_adjusted"]
+                bounded_color.sigmoid_derivative = bounded_color.rgb * (1 - bounded_color.rgb)
+                bounded_color.sh_residual = bounded_color.logits - bounded_color.dc_logits
+                bounded_color.color_residual = bounded_color.rgb - bounded_color.dc_rgb
+                rgbs = bounded_color.rgb
+
+        if grac_original is not None:
+            allocation = apply_grac(*grac_original, reliability,
+                taba=dcu if grac_mode == "grac_taba" else None, chroma_floor=self.config.grac_chroma_floor)
+            grac_outputs.update({"grac_" + key: value for key, value in allocation.items() if key not in ("rgb", "s_adjusted")})
+            if grac_enabled and not grac_diagnostic:
+                bounded_color.rgb = allocation["rgb"]
+                bounded_color.logits = allocation["s_adjusted"]
+                bounded_color.sigmoid_derivative = bounded_color.rgb * (1-bounded_color.rgb)
+                bounded_color.sh_residual = bounded_color.logits - bounded_color.dc_logits
+                bounded_color.color_residual = bounded_color.rgb - bounded_color.dc_rgb
+                rgbs = bounded_color.rgb
+
+        if gcrc_original is not None:
+            allocation = apply_gcrc(*gcrc_original, contamination, taba=dcu if gcrc_mode == "gcrc_taba" else None)
+            gcrc_outputs.update({"gcrc_" + key: value for key, value in allocation.items() if key not in ("rgb", "s_adjusted")})
+            if self.config.gcrc_enabled and not gcrc_diagnostic:
+                bounded_color.rgb = allocation["rgb"]
+                bounded_color.logits = allocation["s_adjusted"]
+                bounded_color.sigmoid_derivative = bounded_color.rgb * (1-bounded_color.rgb)
+                bounded_color.sh_residual = bounded_color.logits - bounded_color.dc_logits
+                bounded_color.color_residual = bounded_color.rgb - bounded_color.dc_rgb
+                rgbs = bounded_color.rgb
+
+        if self._crcc_tracks_history():
+            if bounded_color is None or self.config.intrinsic_color_parameterization != "bounded_sh3":
+                raise ValueError("CRCC requires bounded_sh3 appearance")
+            self._ensure_crcc_state()
+            if self.config.crcc_enabled and not crcc_diagnostic:
+                bounded_color.rgb = safe_sigmoid(bounded_color.logits)
+                bounded_color.sigmoid_derivative = bounded_color.rgb * (1-bounded_color.rgb)
+                bounded_color.color_residual = bounded_color.rgb-bounded_color.dc_rgb
+                rgbs = bounded_color.rgb
 
         render = self.underwater_rasterizer.rasterize(  # type: ignore
             xys=self.xys,
@@ -2163,7 +2834,30 @@ class WaterSplattingModel(Model):
         tau_d = medium_attn * render.depth
         transmission = torch.exp(-tau_d.clamp_min(0.0)).clamp(0.0, 1.0)
 
+        crcc_outputs = {}
+        if self._crcc_tracks_history():
+            # The final renderer already provides depth and transmission. No extra
+            # prepass or gradient through projection/medium is needed for this loss.
+            auxiliary = sample_taba_transmission(medium_attn, render.depth, render.accumulation,
+                self.xys, self.radii, tau_D=tau_d, transmission_rgb=transmission)
+            finite_logits = torch.isfinite(bounded_color.logits.detach()).all(-1, keepdim=True)
+            intrinsic = safe_sigmoid(torch.where(finite_logits, bounded_color.logits, torch.zeros_like(bounded_color.logits)))
+            consistency = clear_consistency(intrinsic, self._crcc_state.values(crop_ids), auxiliary["transmission_rgb"],
+                self.radii > 0, auxiliary["valid"] & finite_logits,
+                charbonnier_eps=self.config.crcc_charbonnier_eps, support_scale=self.config.crcc_support_scale,
+                min_observations=self.config.crcc_min_observations, medium_weight_floor=self.config.crcc_medium_weight_floor)
+            coefficient = loss_coefficient(self.step, start_step=self.config.crcc_start_step,
+                ramp_steps=self.config.crcc_ramp_steps, lambda_max=self.config.crcc_lambda_max)
+            crcc_outputs = {"crcc_"+key: value for key,value in consistency.items()}
+            crcc_outputs["crcc_lambda"] = intrinsic.new_tensor(coefficient)
+            if self.training and torch.is_grad_enabled() and crop_ids is None and self._crcc_pending is None:
+                self._crcc_pending = (int(self.step), consistency["chroma"], (self.radii > 0).detach(), consistency["update_valid"])
+
         outputs = {
+            **taba_outputs,
+            **grac_outputs,
+            **gcrc_outputs,
+            **crcc_outputs,
             "rgb": rgb,
             "depth": render.depth,
             "accumulation": render.accumulation,
@@ -2191,12 +2885,17 @@ class WaterSplattingModel(Model):
                     "legacy": 0.0,
                     "bounded_sh3": 1.0,
                     "bounded_headroom_sh3": 2.0,
+                    "bounded_selective_sh3": 5.0,
+                    "brash_bounded_sh3": 3.0,
+                    "bvam_bounded_sh3": 4.0,
                 }[self.config.intrinsic_color_parameterization]
             ),
             "gaussian_view_rgb": rgbs.detach(),
             "gaussian_visible_mask": (self.radii > 0).reshape(-1).detach(),
             "projected_gaussian_depths": depths.detach(),
         }
+        if self.config.intrinsic_color_parameterization == "bounded_headroom_sh3":
+            outputs["headroom_alpha"] = rgbs.new_tensor(alpha)
         if bounded_color is not None:
             if bounded_color.logits is not None:
                 outputs["gaussian_view_logits"] = bounded_color.logits
@@ -2214,6 +2913,61 @@ class WaterSplattingModel(Model):
                 outputs["gaussian_headroom_u_pos"] = bounded_color.positive_utilization
             if bounded_color.negative_utilization is not None:
                 outputs["gaussian_headroom_u_neg"] = bounded_color.negative_utilization
+            if self.config.intrinsic_color_parameterization == "brash_bounded_sh3":
+                outputs["brash_gate"] = torch.sigmoid(brash_gate_crop).detach().expand_as(rgbs)
+                outputs["brash_base_rgb"] = bounded_color.dc_rgb.detach()
+                outputs["brash_base_logits"] = bounded_color.dc_logits.detach()
+                outputs["brash_view_rgb"] = torch.sigmoid(bounded_color.logits).detach()
+                outputs["brash_residual_logits"] = bounded_color.sh_residual.detach()
+        if self.config.intrinsic_color_parameterization == "bvam_bounded_sh3":
+            outputs["bvam_gate_probs"] = bvam_color.gate_probs
+            outputs["bvam_gate_logits"] = bvam_color.gate_logits
+            outputs["bvam_expert_rgb"] = bvam_color.expert_rgb
+            outputs["bvam_expert_logits"] = bvam_color.expert_logits
+            outputs["bvam_deltas"] = bvam_color.deltas
+            outputs["bvam_shared_logits"] = bvam_color.shared_logits
+            outputs["gaussian_view_dc_rgb"] = bvam_color.dc_rgb
+            outputs["gaussian_view_dc_logits"] = bvam_color.dc_logits
+        taba_log_path = getattr(self.config, "taba_log_path", None)
+        if (taba_log_path and self.training and torch.is_grad_enabled()
+                and (self.step % 500 == 0 or self.step == 14999)
+                and getattr(self, "_taba_last_logged_step", None) != self.step):
+            stats = taba_statistics(outputs, xys=self.xys, radii=self.radii)
+            path = Path(taba_log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf8") as handle:
+                handle.write(json.dumps({"step": int(self.step), **stats}, allow_nan=False) + "\n")
+            self._taba_last_logged_step = self.step
+        grac_log_path = getattr(self.config, "grac_log_path", None)
+        if (grac_log_path and self.training and torch.is_grad_enabled()
+                and (self.step % 500 == 0 or self.step == 14999)
+                and getattr(self, "_grac_last_logged_step", None) != self.step):
+            stats = {**taba_statistics(outputs, xys=self.xys, radii=self.radii), **grac_statistics(outputs)}
+            path = Path(grac_log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf8") as handle:
+                handle.write(json.dumps({"step": int(self.step), **stats}, allow_nan=False) + "\n")
+            self._grac_last_logged_step = self.step
+        gcrc_log_path = getattr(self.config, "gcrc_log_path", None)
+        if (gcrc_log_path and self.training and torch.is_grad_enabled()
+                and (self.step % 500 == 0 or self.step == 14999)
+                and getattr(self, "_gcrc_last_logged_step", None) != self.step):
+            stats = {**taba_statistics(outputs, xys=self.xys, radii=self.radii), **gcrc_statistics(outputs)}
+            path = Path(gcrc_log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf8") as handle:
+                handle.write(json.dumps({"step": int(self.step), **stats}, allow_nan=False) + "\n")
+            self._gcrc_last_logged_step = self.step
+        crcc_log_path = getattr(self.config, "crcc_log_path", None)
+        if (crcc_log_path and self.training and torch.is_grad_enabled()
+                and (self.step % 500 == 0 or self.step == 14999)
+                and getattr(self, "_crcc_last_logged_step", None) != self.step):
+            stats = {**taba_statistics(outputs, xys=self.xys, radii=self.radii), **crcc_statistics(outputs)}
+            path = Path(crcc_log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf8") as handle:
+                handle.write(json.dumps({"step": int(self.step), **stats}, allow_nan=False) + "\n")
+            self._crcc_last_logged_step = self.step
         return self._attach_medium_identifiability_outputs(outputs, medium, H, W)  # type: ignore
         
     def get_gt_img(self, image: torch.Tensor):
@@ -2319,6 +3073,11 @@ class WaterSplattingModel(Model):
             if metrics_dict is not None:
                 metrics_dict["medium_identifiability_loss_raw"] = mic_raw.detach()
                 metrics_dict["medium_identifiability_loss_weighted"] = mic_weighted.detach()
+        if self._crcc_tracks_history() and self.config.crcc_enabled and not self.config.crcc_diagnostic_only:
+            if "crcc_loss" in outputs:
+                loss_dict["crcc_loss"] = outputs["crcc_lambda"] * outputs["crcc_loss"]
+            else:
+                loss_dict["crcc_loss"] = self.features_dc.sum()*0 + self.features_rest.sum()*0
         return loss_dict
 
     def _medium_identifiability_loss(self, outputs: Dict[str, torch.Tensor]) -> torch.Tensor:

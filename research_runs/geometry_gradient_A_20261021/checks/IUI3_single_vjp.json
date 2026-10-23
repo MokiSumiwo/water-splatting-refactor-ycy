@@ -1,0 +1,65 @@
+{
+  "scene": "IUI3-RedSea",
+  "optimizer_updates": 0,
+  "results": [
+    {
+      "view": "MTN_5906",
+      "relative_branch_sum_error": 3.339389877510257e-05,
+      "direct_norm": 0.02765035070478916,
+      "medium_norm": 0.10371234267950058,
+      "native_norm": 0.09480902552604675,
+      "directional_ad": 0.08233552426099777,
+      "finite_difference": [
+        {
+          "h": 2e-05,
+          "fd": 0.03508832818743812,
+          "error": 0.04724719607355965,
+          "passed": false
+        },
+        {
+          "h": 1e-05,
+          "fd": 0.03503137172011783,
+          "error": 0.04730415254087994,
+          "passed": false
+        },
+        {
+          "h": 5e-06,
+          "fd": 0.03506226811111901,
+          "error": 0.04727325614987876,
+          "passed": false
+        }
+      ],
+      "passed": false
+    },
+    {
+      "view": "MTN_5910",
+      "relative_branch_sum_error": 3.443549576331861e-05,
+      "direct_norm": 0.019917303696274757,
+      "medium_norm": 0.04394899681210518,
+      "native_norm": 0.048653773963451385,
+      "directional_ad": 0.03295264020562172,
+      "finite_difference": [
+        {
+          "h": 2e-05,
+          "fd": 0.03261582377928063,
+          "error": 0.0003368164263410911,
+          "passed": true
+        },
+        {
+          "h": 1e-05,
+          "fd": 0.03250037377555692,
+          "error": 0.00045226643006479605,
+          "passed": true
+        },
+        {
+          "h": 5e-06,
+          "fd": 0.03254033482669172,
+          "error": 0.0004123053789300002,
+          "passed": true
+        }
+      ],
+      "passed": true
+    }
+  ],
+  "passed": false
+}

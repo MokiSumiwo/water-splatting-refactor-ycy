@@ -1,0 +1,7 @@
+{
+  "python": "Python 3.8.20",
+  "native_binary_sha256": "681978131413f306b8cee5d4235b98ea316768765f652f5db6d8700180f88c5c",
+  "platform": "Linux r2-7b13 5.15.0-179-generic #189-Ubuntu SMP Tue May 5 18:20:56 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux",
+  "nvcc": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2022 NVIDIA Corporation\nBuilt on Wed_Sep_21_10:33:58_PDT_2022\nCuda compilation tools, release 11.8, V11.8.89\nBuild cuda_11.8.r11.8/compiler.31833905_0\n",
+  "data_note": "Images, COLMAP binaries and split lists are external; hashes identify local inputs. No checkpoints required for training."
+}

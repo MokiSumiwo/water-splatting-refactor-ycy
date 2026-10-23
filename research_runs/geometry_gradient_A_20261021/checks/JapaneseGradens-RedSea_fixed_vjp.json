@@ -1,0 +1,65 @@
+{
+  "scene": "JapaneseGradens-RedSea",
+  "optimizer_updates": 0,
+  "results": [
+    {
+      "view": "MTN_1094",
+      "relative_branch_sum_error": 3.850909706670791e-05,
+      "direct_norm": 0.026485346257686615,
+      "medium_norm": 0.031322456896305084,
+      "native_norm": 0.02086523361504078,
+      "directional_ad": 0.01475546881556511,
+      "finite_difference": [
+        {
+          "h": 2e-05,
+          "fd": 0.015156442842445548,
+          "error": 0.00040097402688043897,
+          "passed": true
+        },
+        {
+          "h": 1e-05,
+          "fd": 0.015024996313783843,
+          "error": 0.00026952749821873394,
+          "passed": true
+        },
+        {
+          "h": 5e-06,
+          "fd": 0.0149868939702813,
+          "error": 0.0002314251547161899,
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "view": "MTN_1100",
+      "relative_branch_sum_error": 3.17501908284612e-05,
+      "direct_norm": 0.05259203538298607,
+      "medium_norm": 0.07904087752103806,
+      "native_norm": 0.04417217895388603,
+      "directional_ad": 0.03683724254369736,
+      "finite_difference": [
+        {
+          "h": 2e-05,
+          "fd": 0.037201165958844484,
+          "error": 0.0003639234151471271,
+          "passed": true
+        },
+        {
+          "h": 1e-05,
+          "fd": 0.03718995391643887,
+          "error": 0.0003527113727415099,
+          "passed": true
+        },
+        {
+          "h": 5e-06,
+          "fd": 0.037278827957898386,
+          "error": 0.0004415854142010289,
+          "passed": true
+        }
+      ],
+      "passed": true
+    }
+  ],
+  "passed": true
+}

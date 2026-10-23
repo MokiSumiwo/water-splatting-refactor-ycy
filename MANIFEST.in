@@ -1,1 +1,2 @@
 recursive-include water_splatting/cuda/csrc *
+recursive-include water_splatting/cuda/gradient_fix *

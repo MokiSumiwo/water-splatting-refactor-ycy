@@ -304,6 +304,9 @@ class _RasterizeGaussians(Function):
             first_idx,
         ) = ctx.saved_tensors
 
+        from water_splatting.cuda._backend import _C as backend
+        corrected = getattr(backend, "gradient_abi_version", 0) == 1
+        v_depths = torch.zeros_like(depths) if corrected else None
         if num_intersects < 1:
             v_xy = torch.zeros_like(xys)
             v_conic = torch.zeros_like(conics)
@@ -318,7 +321,7 @@ class _RasterizeGaussians(Function):
                 rasterize_fn = _C.rasterize_backward
             else:
                 rasterize_fn = _C.nd_rasterize_backward
-            v_xy, v_conic, v_colors, v_opacity, v_medium_rgb, v_medium_bs, v_medium_attn = rasterize_fn(
+            args = (
                 img_height,
                 img_width,
                 ctx.block_width,
@@ -341,11 +344,26 @@ class _RasterizeGaussians(Function):
                 v_out_medium,
                 v_out_alpha,
             )
-            
+            if corrected and colors.shape[-1] == 3:
+                scalar_zero = torch.zeros_like(v_out_alpha)
+                extras = (
+                    torch.zeros_like(v_out_img) if v_out_clr is None else v_out_clr,
+                    scalar_zero if v_depth_im is None else v_depth_im,
+                    scalar_zero if v_depth2_im is None else v_depth2_im,
+                    scalar_zero if v_final_Ts is None else v_final_Ts,
+                    scalar_zero if v_first_depth_im is None else v_first_depth_im,
+                    scalar_zero if v_last_depth_im is None else v_last_depth_im,
+                )
+                v_xy, v_conic, v_colors, v_opacity, v_medium_rgb, v_medium_bs, v_medium_attn, v_depths = rasterize_fn(*args, *extras)
+            elif corrected:
+                raise NotImplementedError("corrected_v1 is validated for RGB rasterization only")
+            else:
+                v_xy, v_conic, v_colors, v_opacity, v_medium_rgb, v_medium_bs, v_medium_attn = rasterize_fn(*args)
+
         return (
             v_xy,  # xys
             None,  # xys_grad_abs
-            None,  # depths
+            v_depths,  # depths (legacy ABI deliberately returns None)
             None,  # radii
             v_conic,  # conics
             None,  # num_tiles_hit

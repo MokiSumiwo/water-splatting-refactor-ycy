@@ -142,3 +142,8 @@ common_masks/
 *.tif
 *.tiff
 *.mp4
+
+# Local JIT caches and generated research runs (selected evidence is force-added).
+.torch_extensions/
+research_runs/
+tihu/

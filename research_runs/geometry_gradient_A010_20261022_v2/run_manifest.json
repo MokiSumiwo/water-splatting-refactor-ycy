@@ -1,0 +1,38 @@
+{
+  "status": "TRAINED",
+  "created_utc": "2026-10-22T13:11:44.108930+00:00",
+  "eta_max": 0.1,
+  "seed": 42,
+  "steps_per_scene": 15000,
+  "total_updates": 60000,
+  "initialization": "raw COLMAP and random medium, no previous checkpoint",
+  "reference_campaign": "geometry_gradient_A_20261021",
+  "same_B0_reused": true,
+  "code_sha256": {
+    "scripts/experiments/run_geometry_gradient_A010_worker.py": "9a133bf29cf3570bbb612da27697ce28f770d966c67fd80e0a4e7c7d5a80b2f4",
+    "scripts/experiments/run_geometry_gradient_A010_campaign.py": "db775d0a678fe015e46e6702b7b92243f97c76236a4883462f80081578721ba9",
+    "scripts/experiments/run_geometry_gradient_A_worker.py": "6e6e22b403282fc7f43bfe71bafc51eec4ca3c6a7eb0e780e230ef984f09b97f",
+    "scripts/experiments/run_direct_mdrr_cica_scene.py": "57dad78d0d1c2169ec89d6e7a502366ade7eed1d14ea47290528644138e398be",
+    "scripts/experiments/geometry_projection_backend.py": "815b49845f44cc369249363d8a7b8ad9516b60b66dd25a038d0e077a5dd6ef2e",
+    "water_splatting/geometry_gradient.py": "a837d9f6a5c551a4cb10a2b23711d24a037f983259a5a230a85f89d2503166b1"
+  },
+  "decision": "User-authorized pre-registered weak intensity ablation. Fixed training views show clearest residual reduction in Curasao with foreground retained; other scenes less clear. No verified O/F labels or quantitative removal success claimed. Previously inspected test images are disclosed exploratory evidence, not used to tune eta=.10.",
+  "jobs": [
+    {
+      "scene": "Curasao",
+      "exit_code": 0
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "exit_code": 0
+    },
+    {
+      "scene": "JapaneseGradens-RedSea",
+      "exit_code": 0
+    },
+    {
+      "scene": "Panama",
+      "exit_code": 0
+    }
+  ]
+}

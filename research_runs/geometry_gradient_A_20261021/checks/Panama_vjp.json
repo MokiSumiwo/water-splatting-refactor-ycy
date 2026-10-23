@@ -1,0 +1,65 @@
+{
+  "scene": "Panama",
+  "optimizer_updates": 0,
+  "results": [
+    {
+      "view": "MTN_1538",
+      "relative_branch_sum_error": 6.798881076974794e-05,
+      "direct_norm": 0.023300400003790855,
+      "medium_norm": 0.024453753605484962,
+      "native_norm": 0.01063598319888115,
+      "directional_ad": 0.010635981336236,
+      "finite_difference": [
+        {
+          "h": 0.0002,
+          "fd": 0.011622905731201172,
+          "error": 0.0009869243949651718,
+          "passed": false
+        },
+        {
+          "h": 0.0001,
+          "fd": 0.011622905731201172,
+          "error": 0.0009869243949651718,
+          "passed": false
+        },
+        {
+          "h": 5e-05,
+          "fd": 0.011324882507324219,
+          "error": 0.0006889011710882187,
+          "passed": false
+        }
+      ],
+      "passed": false
+    },
+    {
+      "view": "MTN_1542",
+      "relative_branch_sum_error": 0.0001839098404161632,
+      "direct_norm": 0.24086534976959229,
+      "medium_norm": 0.30099233984947205,
+      "native_norm": 0.06082364171743393,
+      "directional_ad": 0.06082363799214363,
+      "finite_difference": [
+        {
+          "h": 0.0002,
+          "fd": 0.017881393432617188,
+          "error": 0.042942244559526443,
+          "passed": false
+        },
+        {
+          "h": 0.0001,
+          "fd": 0.017881393432617188,
+          "error": 0.042942244559526443,
+          "passed": false
+        },
+        {
+          "h": 5e-05,
+          "fd": 0.018477439880371094,
+          "error": 0.04234619811177254,
+          "passed": false
+        }
+      ],
+      "passed": false
+    }
+  ],
+  "passed": false
+}

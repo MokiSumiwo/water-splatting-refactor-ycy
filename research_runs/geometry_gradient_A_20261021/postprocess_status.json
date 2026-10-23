@@ -1,0 +1,45 @@
+{
+  "status": "COMPLETE",
+  "jobs": [
+    {
+      "scene": "Curasao",
+      "arm": "B0",
+      "exported": true
+    },
+    {
+      "scene": "Curasao",
+      "arm": "A",
+      "exported": true
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "arm": "B0",
+      "exported": true
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "arm": "A",
+      "exported": true
+    },
+    {
+      "scene": "JapaneseGradens-RedSea",
+      "arm": "B0",
+      "exported": true
+    },
+    {
+      "scene": "JapaneseGradens-RedSea",
+      "arm": "A",
+      "exported": true
+    },
+    {
+      "scene": "Panama",
+      "arm": "B0",
+      "exported": true
+    },
+    {
+      "scene": "Panama",
+      "arm": "A",
+      "exported": true
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+version: native_responsibility_15k_v1
+scenes: [Panama, IUI3-RedSea, Curasao, JapaneseGradens-RedSea]
+arms: [B, N]
+seed: 0
+initialization: raw_data_only
+trained_checkpoint: null
+iterations: 15000
+smoke_iterations_per_run: 20
+native_config: discover_accepted_ocmc_m1_cica
+geometry_and_topology_freeze_step: 10000
+shared_opacity_reference_cap_step: 10000
+transfer:
+  start_after_step: 10000
+  end_step: 14000
+  block_iterations: 200
+  medium_only_iterations: 32
+  events: 20
+  rho_max: 0.75
+  target_contribution_coverage: 0.50
+  informative_coverage_reference: 0.20
+  max_candidates: 4096
+  cameras: {fit: 6, monitor: 2}
+  pixels_per_camera: 8192
+  strata_weights: [0.50, 0.25, 0.25]
+  transfer_loss_weight: 0.25
+  huber_delta: 0.01
+  medium_trust_weight: 0.01
+  on_scientific_alarm: pause_pressure_continue_training
+evaluation:
+  metric_protocol: accepted_custom_float_wrapper
+  test_steps: [15000]
+  checkpoints: [0, 5000, 10000, 12000, 14000, 15000]
+  clear_comparison_montages: true
+  per_view_results: true
+  floating_outputs: true
+execution:
+  max_parallel: 1
+  gpu_policy: allowed_idle_only
+  resume_policy: same_run_only
+  overwrite_existing: false
