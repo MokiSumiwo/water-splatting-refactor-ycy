@@ -2419,7 +2419,8 @@ class WaterSplattingModel(Model):
                         "rgb_clear_clamp": clear, "clear_object_fullsh_raw": clear,
                         "J_gaussian_raw": clear, "J_gaussian": clear, "rgb_medium": medium_rgb,
                         "pred_image": rgb, "medium_rgb": medium_rgb, "medium_bs": medium_bs,
-                        "medium_attn": medium_attn, "b_inf": medium.b_inf,
+                        "medium_attn": medium_attn, "final_transmittance": torch.ones_like(accumulation),
+                        "b_inf": medium.b_inf,
                         "direct_object_signal": clear, "transmission": transmission, "tau_D": tau_d}, medium, H, W)
         else:
             crop_ids = None
@@ -2490,7 +2491,8 @@ class WaterSplattingModel(Model):
                     "rgb_object": clear, "rgb_clear": clear, "rgb_clear_clamp": clear,
                     "clear_object_fullsh_raw": clear, "J_gaussian_raw": clear, "J_gaussian": clear,
                     "rgb_medium": medium_rgb, "pred_image": rgb, "medium_rgb": medium_rgb,
-                    "medium_bs": medium_bs, "medium_attn": medium_attn, "b_inf": medium.b_inf,
+                    "medium_bs": medium_bs, "medium_attn": medium_attn,
+                    "final_transmittance": torch.ones_like(accumulation), "b_inf": medium.b_inf,
                     "direct_object_signal": clear, "transmission": transmission, "tau_D": tau_d}, medium, H, W)
 
         # Pseudo-target and diagnostic forwards can keep the module in training
@@ -2876,6 +2878,11 @@ class WaterSplattingModel(Model):
             "medium_rgb": medium_rgb,
             "medium_bs": medium_bs,
             "medium_attn": medium_attn,
+            # Expose the rasterizer's terminal transmittance for training-time
+            # diagnostics and the registered open-water occupancy ablation.
+            # This is the already-computed native quantity; no second
+            # compositor or alpha approximation is introduced.
+            "final_transmittance": render.final_transmittance,
             "b_inf": b_inf,
             "transmission": transmission,
             "tau_D": tau_d,

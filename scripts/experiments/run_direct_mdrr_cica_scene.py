@@ -147,6 +147,11 @@ RENDERER_BACKWARD_MODE = "legacy"
 # arms keep their original semantics when these are None.
 ACTIVE_MDRR_OVERRIDE: Optional[bool] = None
 ACTIVE_CICA_OVERRIDE: Optional[bool] = None
+# Optional training-time hook used by independently registered experiments.
+# The hook is called after the native/MDRR/CICA gradient has been assembled and
+# may add a separately audited, parameter-group-limited gradient.  Keeping this
+# disabled preserves the historical route bit-for-bit for all existing workers.
+EXTRA_GRADIENT_HOOK = None
 EPS = 1e-12
 SH_C0 = 0.28209479177387814
 SOURCE_ROOT = REPO_ROOT / "outputs" / "m1_raoc_causal_four_scene_20260827"
@@ -2767,6 +2772,24 @@ def _train_arm(
             if geometry_hook is not None:
                 geometry_hook(branch, outputs, base_loss, step, output_dir)
 
+            extra_info: Dict[str, Any] = {}
+            extra_hook = globals().get("EXTRA_GRADIENT_HOOK")
+            if extra_hook is not None:
+                extra_info = extra_hook(
+                    branch,
+                    outputs,
+                    batch,
+                    base_loss,
+                    step,
+                    output_dir,
+                    params,
+                    group_indices,
+                    camera_index,
+                    sequence_row,
+                ) or {}
+                if not isinstance(extra_info, Mapping):
+                    raise RuntimeError("EXTRA_GRADIENT_HOOK must return a mapping")
+
             crcc_norms = _add_crcc_gradients(crcc_weighted, params, group_indices)
             if CRCC_EXPERIMENT:
                 grad_info.update({"crcc_"+key+"_grad_l2": value for key,value in crcc_norms.items()})
@@ -2919,6 +2942,7 @@ def _train_arm(
                     "ocmc_projected_raw_abs_mean": _output_mean_abs(outputs, "camera_medium_delta_projected_raw"),
                     "gaussian_count": int(model.num_points),
                     "iteration_seconds": time.perf_counter() - started_iteration,
+                    **extra_info,
                     **grad_info,
                     **metrics,
                 })
