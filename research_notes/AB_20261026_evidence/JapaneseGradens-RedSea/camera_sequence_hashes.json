@@ -1,0 +1,10 @@
+{
+  "CAMERA_SEQUENCE_RAW": true,
+  "final_step_inclusive": 15000,
+  "length": 15000,
+  "scene": "JapaneseGradens-RedSea",
+  "sha256": "d175f7bee54fde99cd01fd2a935af6822db4d8fff87ed431f4eace6e473951c8",
+  "start_step_exclusive": 0,
+  "full_manifest_sha256": "2ceecdf8bd24441d2d50b8dcccd5a7bcb90af7b1ca9aea0397b1965bf3070d09",
+  "full_manifest_source": "research_runs/AB_20261026/formal/JapaneseGradens-RedSea/AB/camera_sequence_hashes.json"
+}

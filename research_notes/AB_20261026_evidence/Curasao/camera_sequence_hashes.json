@@ -1,0 +1,10 @@
+{
+  "CAMERA_SEQUENCE_RAW": true,
+  "final_step_inclusive": 15000,
+  "length": 15000,
+  "scene": "Curasao",
+  "sha256": "ca173a1903e0efad00eb029ac5e1fda6f62e8b8ffbd1a2217e375bccf73a17f9",
+  "start_step_exclusive": 0,
+  "full_manifest_sha256": "0ffde7be9960ccbdbaacb5b3637d76b7a4759bdf02c75e291a2f3548946dc6d9",
+  "full_manifest_source": "research_runs/AB_20261026/formal/Curasao/AB/camera_sequence_hashes.json"
+}

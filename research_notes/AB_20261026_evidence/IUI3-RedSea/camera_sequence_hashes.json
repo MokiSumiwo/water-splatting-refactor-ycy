@@ -1,0 +1,10 @@
+{
+  "CAMERA_SEQUENCE_RAW": true,
+  "final_step_inclusive": 15000,
+  "length": 15000,
+  "scene": "IUI3-RedSea",
+  "sha256": "19e0dd232b5c67dcd471a518ce0421b767bdedd512a4a3093d6fe9487c03c9bf",
+  "start_step_exclusive": 0,
+  "full_manifest_sha256": "1f4b6400c5220866fdcdd837b147057be149649dbb47dbfbd7da2cf9541552be",
+  "full_manifest_source": "research_runs/AB_20261026/formal/IUI3-RedSea/AB/camera_sequence_hashes.json"
+}

@@ -39,3 +39,5 @@ CUDA_VISIBLE_DEVICES=6 CONDA_DEFAULT_ENV=water_splatting \
 ```
 
 输出路径须不存在，数据、source_config、冻结 A 复核区域和 B 支持资产须存在。模型可从 15k checkpoint 原生重载；从零训练可按此入口复跑。此入口未提供活跃 B 阶段任意中断点恢复参数，不宣称已经验证中途逐步恢复。
+
+Git 中另保存本轮使用的四场景冻结 B 支持资产（每场景约 0.5 MiB）及输入哈希，见 `AB_20261026_evidence/<scene>/support/`；如原 research_runs 支持目录不在新检出环境，可将 `--support` 指向该证据目录。仍需配置原始数据路径。训练代码与预运行审计提交为 `477e7fc`，已推送至 `origin/research/bvam-bnd-on`。

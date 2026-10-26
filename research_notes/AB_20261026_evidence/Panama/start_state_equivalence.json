@@ -1,0 +1,48 @@
+{
+  "absolute_step": 0,
+  "arm": "B",
+  "forward_probe": {
+    "camera_index": 0,
+    "finite": true,
+    "tensor_sha256": {
+      "gaussian_view_rgb": "b91dbed77736b538e9728bf01ea1faab71d01db8f8591557ec65cc9b61f8a08b",
+      "medium_attn": "cb724c198106c723384a30c03d5593a8548e8f9a3044a7d9eba57bb70ee46353",
+      "pred_image": "40ed451f74a82d17d5e68c50d2d615c77aeda7e15f29f8d752d57b95abb41450",
+      "rgb_medium_finite": "507486d2416668eeaebe21259bd047dd0e0c03c3dd643cf13ddacb590c403bc2",
+      "rgb_object": "8c48ef34920f8531020b4e683a9420e63c6450018c2d5058194c808d6d3823dc",
+      "rgb_tail": "40c5ff66d3ef5f002de823384f697bb4a7a2a91c763aa22cb7bb2038b05ed6d3"
+    }
+  },
+  "initialization": "raw_colmap_and_random_network_only",
+  "model_hash": "58f569d95b959b3d11332fead6b91a73eb491cca5ff4a4ae1b9c0a2f80777424",
+  "no_training_checkpoint_loaded": true,
+  "optimizer_groups": [
+    "direction_encoding",
+    "features_dc",
+    "features_rest",
+    "means",
+    "medium_mlp",
+    "opacities",
+    "quats",
+    "scales"
+  ],
+  "optimizer_steps": {
+    "direction_encoding": 0,
+    "features_dc": 0,
+    "features_rest": 0,
+    "means": 0,
+    "medium_mlp": 0,
+    "opacities": 0,
+    "quats": 0,
+    "scales": 0
+  },
+  "scene": "Panama",
+  "training_rng_manifest": {
+    "numpy_sha256": "d30ea7c08a2e9e566f5cd2e15b898fcb3a546466629043869b8218ddd1b70d41",
+    "python_sha256": "2d1026d52826de68f9ba3a8438a5e74ad10a8269aaa1ac77873d4f9a41def20a",
+    "torch_cpu_sha256": "5feb54a46230d321d888e9b43cf5a57492665f199e4377408d79ee460e36679c",
+    "torch_cuda_sha256": [
+      "aefdce03def94ffed42159e55677ec20e91200e1981f25b1f271b6fd99c3c263"
+    ]
+  }
+}

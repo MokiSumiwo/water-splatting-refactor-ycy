@@ -1,0 +1,48 @@
+{
+  "absolute_step": 0,
+  "arm": "B",
+  "forward_probe": {
+    "camera_index": 0,
+    "finite": true,
+    "tensor_sha256": {
+      "gaussian_view_rgb": "c44a62ec3d1b419af8632d6fafc0a49cf0328e0070b1ff350f59b08ddd63d081",
+      "medium_attn": "c8faa4a5d662ec76f01e207198748a9c80153b2df5e7a2a0c7e9198e87b79ab3",
+      "pred_image": "5b74e68cd727ff853c8132545f181a7161fbd6b449db57601af1c79df3f4cbe6",
+      "rgb_medium_finite": "4b23fd9c358382729b3c6bc79be5b3c35d1944d98237b8ed640798aa109f738a",
+      "rgb_object": "d6727e660c711284947c5ca4a757570024be1b8a63fb35cff79fdfe69717b768",
+      "rgb_tail": "3a031d268357af24d11b51225a409b8a0347dcd173b7f0f14ae58eac73f16167"
+    }
+  },
+  "initialization": "raw_colmap_and_random_network_only",
+  "model_hash": "ac8fa354b39193a84c2146aa6795ea3f4717e9e06804feff110aa1a97a2e6b4b",
+  "no_training_checkpoint_loaded": true,
+  "optimizer_groups": [
+    "direction_encoding",
+    "features_dc",
+    "features_rest",
+    "means",
+    "medium_mlp",
+    "opacities",
+    "quats",
+    "scales"
+  ],
+  "optimizer_steps": {
+    "direction_encoding": 0,
+    "features_dc": 0,
+    "features_rest": 0,
+    "means": 0,
+    "medium_mlp": 0,
+    "opacities": 0,
+    "quats": 0,
+    "scales": 0
+  },
+  "scene": "Curasao",
+  "training_rng_manifest": {
+    "numpy_sha256": "d30ea7c08a2e9e566f5cd2e15b898fcb3a546466629043869b8218ddd1b70d41",
+    "python_sha256": "2d1026d52826de68f9ba3a8438a5e74ad10a8269aaa1ac77873d4f9a41def20a",
+    "torch_cpu_sha256": "5feb54a46230d321d888e9b43cf5a57492665f199e4377408d79ee460e36679c",
+    "torch_cuda_sha256": [
+      "aefdce03def94ffed42159e55677ec20e91200e1981f25b1f271b6fd99c3c263"
+    ]
+  }
+}

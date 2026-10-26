@@ -55,6 +55,16 @@ def main():
             rows.append(dict(scene=scene, arm=arm, view_id=name, **values))
     summary = json.loads((formal/'final_summary.json').read_text())
     assert summary['completed_updates']==15000 and summary['final_step']==15000
+    training_endpoint = {r['view_id']: r for r in csv.DictReader((formal/'per_view_metrics.csv').open())
+                         if int(r['absolute_step']) == 15000 and r['split'] == 'eval'}
+    assert set(training_endpoint) == test_names
+    endpoint_comparison = []
+    for row in rows:
+        if row['arm'] != 'AB':
+            continue
+        difference = {k: abs(row[k]-float(training_endpoint[row['view_id']][k])) for k in KEYS}
+        assert all(difference[k] <= {'PSNR':1e-6, 'SSIM':1e-7, 'MSE':1e-10, 'LPIPS':1e-6}[k] for k in KEYS)
+        endpoint_comparison.append(dict(view_id=row['view_id'], absolute_difference=difference))
     old = ROOT/'research_runs/geometry_gradient_A_20261021/formal'/scene/'B0'
     init = json.loads((formal/'start_state_equivalence.json').read_text())
     native = json.loads((old/'start_state_equivalence.json').read_text())
@@ -63,7 +73,7 @@ def main():
     result = dict(scene=scene, complete=True, optimizer_updates=0, raw_initialization_rng_sequence_match=True,
         endpoint_reload=reload, checkpoint_sha256=sha(checkpoint),
         per_scene={arm:{k:float(np.mean([r[k] for r in rows if r['arm']==arm])) for k in KEYS} for arm in roots},
-        recomputed_views=rows, metric_comparison=comparison,
+        recomputed_views=rows, metric_comparison=comparison, training_endpoint_comparison=endpoint_comparison,
         training_seconds=summary['training_wall_seconds'], final_population=summary['final_population'])
     (dest/'verification.json').write_text(json.dumps(result, indent=2)+'\n')
     print(json.dumps(dict(scene=scene, complete=True, per_scene=result['per_scene'])), flush=True)

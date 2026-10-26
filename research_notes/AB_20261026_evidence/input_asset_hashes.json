@@ -1,0 +1,42 @@
+{
+  "Curasao": {
+    "research_runs/surface_support_B_20261023/support/Curasao/support.npz": "6ea71d3abc55321710fab1f74c131306462a7bfa6dc2f00db379b899cc7598ed",
+    "research_runs/geometry_gradient_A_20261021/regions/Curasao/regions.json": "2b2717c247ddcfa80daa55d2525607db871260d44349fa76a416af4cc5251052",
+    "research_runs/AB_20261026/formal/Curasao/AB/source_config.yml": "cb2f421ceafd8a6ccf42307f96567e9c21b695f842cf22e4dd10e81286acecde",
+    "undistorted_data/undistorted_Curasao/train_list.txt": "ff911d798e631dcda1f8d628623ae67ec730ec254503d0f341c5c37da81fafce",
+    "undistorted_data/undistorted_Curasao/test_list.txt": "958abe355244c0bc1f2b4963de7e8facf29ffdb6d905ae17a9a712616eac4369",
+    "undistorted_data/undistorted_Curasao/sparse/0/points3D.bin": "55ebd7a088532a34df8d279915d7af243e0031aee66fd48b752f1edbdc7a3611",
+    "undistorted_data/undistorted_Curasao/sparse/0/images.bin": "1e2a05e1b98e541d9a32861471ad49591ebb9aca9544c970fc0efb0edcb2e269",
+    "undistorted_data/undistorted_Curasao/sparse/0/cameras.bin": "26339f3aead84965600702aeb0cd9ec517c52678eb6cb5f5604bda2ec838eef2"
+  },
+  "IUI3-RedSea": {
+    "research_runs/surface_support_B_20261023/support/IUI3-RedSea/support.npz": "4422bbe80f3a6d0b6f82ddf453c5866fe313c902c1372cb925dc19e1fb44abd3",
+    "research_runs/geometry_gradient_A_20261021/regions/IUI3-RedSea/regions.json": "c1cac8638af85001f1bea60dc8580667ece2fb344f39576f172e698514edf4d2",
+    "research_runs/AB_20261026/formal/IUI3-RedSea/AB/source_config.yml": "cb2f421ceafd8a6ccf42307f96567e9c21b695f842cf22e4dd10e81286acecde",
+    "undistorted_data/undistorted_IUI3-RedSea/train_list.txt": "d514929f30e3f2acd7ee2283de74b91349c7caa673481d06f6c20070452c476c",
+    "undistorted_data/undistorted_IUI3-RedSea/test_list.txt": "cd8f434fefb876be80905594666d358088ac1da278e2cb1017fd16aed47a5aed",
+    "undistorted_data/undistorted_IUI3-RedSea/sparse/0/points3D.bin": "b142782291bd47372cdfa2802ff7a918c964bd7b0b34dbbb83b4706316315d32",
+    "undistorted_data/undistorted_IUI3-RedSea/sparse/0/images.bin": "a01502f031139a1257c9cc319a3622ca77ad1d2d6db6c627ce27a2b13e0bb9db",
+    "undistorted_data/undistorted_IUI3-RedSea/sparse/0/cameras.bin": "eecf033149f6d7dfc2defa84c7e39d3f93f106c61c9b3cd8b49768b88f5b1aee"
+  },
+  "JapaneseGradens-RedSea": {
+    "research_runs/surface_support_B_20261023/support/JapaneseGradens-RedSea/support.npz": "4489ed0686734463c51930a5e77881d5fb2d91978e10ae34495d01b3ca95275e",
+    "research_runs/geometry_gradient_A_20261021/regions/JapaneseGradens-RedSea/regions.json": "aa2ce38cc3bc274be45f19c6583fa405522b48560ddefb7c4c6f78d8edb79baa",
+    "research_runs/AB_20261026/formal/JapaneseGradens-RedSea/AB/source_config.yml": "cb2f421ceafd8a6ccf42307f96567e9c21b695f842cf22e4dd10e81286acecde",
+    "undistorted_data/undistorted_JapaneseGradens-RedSea/train_list.txt": "343ff0c5d47f225e8abf218f3ce9b0ce3a75b3301241eacd96ac95ac13dcf9f5",
+    "undistorted_data/undistorted_JapaneseGradens-RedSea/test_list.txt": "ce90b84232377313a02cd82a7b32a158fde8e0d06f034120f9826e5c4a8e0ccc",
+    "undistorted_data/undistorted_JapaneseGradens-RedSea/sparse/0/points3D.bin": "03aacfbc58426ad26fad67ff9fe924f437ae3c0eb9d23f8d5a14a73f892adf46",
+    "undistorted_data/undistorted_JapaneseGradens-RedSea/sparse/0/images.bin": "5c0cd7330b93fdc7b1dc2a047eb3bbd0f3a2ead01cb1d32f0ee5ab239f459137",
+    "undistorted_data/undistorted_JapaneseGradens-RedSea/sparse/0/cameras.bin": "eecc87d72c753f41b1560756b95cb74db3dda43cd795b178f8347c4b7cdaa7bd"
+  },
+  "Panama": {
+    "research_runs/surface_support_B_20261023/support/Panama/support.npz": "031cd7afddf426cd3985c81447b604968135943e51002eeb65fd8266accc790b",
+    "research_runs/geometry_gradient_A_20261021/regions/Panama/regions.json": "1e4ea73770804745ab331506a69fe9d6b1d0969eb2f578f905d6627ea9689f41",
+    "research_runs/AB_20261026/formal/Panama/AB/source_config.yml": "cb2f421ceafd8a6ccf42307f96567e9c21b695f842cf22e4dd10e81286acecde",
+    "undistorted_data/undistorted_Panama/train_list.txt": "637f96b5fcc0b3fc9c31233495569aca33246f37a9b99aa720d096514d1844a5",
+    "undistorted_data/undistorted_Panama/test_list.txt": "07574dd8f26be9eb52f7fcd2c02936d15923ec669fd5625feb9e51adce377c9a",
+    "undistorted_data/undistorted_Panama/sparse/0/points3D.bin": "9a711e086839bae8e9fbfba96a295116b1a5f071202b1ca4ab45ad616611fa55",
+    "undistorted_data/undistorted_Panama/sparse/0/images.bin": "b0a0052376bd21e0162cb74d33aabcf9f2ffce1a3bc02a52103d9c39f5fd1300",
+    "undistorted_data/undistorted_Panama/sparse/0/cameras.bin": "85f8c05615582b584b2edf88d2af4dceaac870430075c3d6306fa136b8dc17a6"
+  }
+}

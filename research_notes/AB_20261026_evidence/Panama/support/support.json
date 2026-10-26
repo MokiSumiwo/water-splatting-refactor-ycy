@@ -1,0 +1,29 @@
+{
+  "scene": "Panama",
+  "policy": {
+    "neighbors": 16,
+    "minimum_common_train_views": 3,
+    "max_reprojection_error_px": 1.0,
+    "max_normal_to_middle_eigenvalue": 0.05,
+    "min_middle_to_large_eigenvalue": 0.15,
+    "uncertainty_spacing_floor": 0.05,
+    "normal_distance_sigmas": 3.0,
+    "footprint_sigmas": 3.0,
+    "note": "Sparse local plane prior, not dense surface truth; no absent-support water labels."
+  },
+  "input_points": 22501,
+  "eligible_track_points": 12490,
+  "patches": 267,
+  "rejections": {
+    "nonplanar": 881,
+    "common_views": 11342,
+    "hull": 0
+  },
+  "excluded_review_cameras": [
+    "MTN_1538",
+    "MTN_1542",
+    "MTN_1548"
+  ],
+  "points_sha256": "9a711e086839bae8e9fbfba96a295116b1a5f071202b1ca4ab45ad616611fa55",
+  "limitation": "COLMAP source reconstruction is inherited; only eligible real training tracks build patches. Plane interpolation is an explicit prior; no dense footprint observation is claimed."
+}

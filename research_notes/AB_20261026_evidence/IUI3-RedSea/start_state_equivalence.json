@@ -1,0 +1,48 @@
+{
+  "absolute_step": 0,
+  "arm": "B",
+  "forward_probe": {
+    "camera_index": 0,
+    "finite": true,
+    "tensor_sha256": {
+      "gaussian_view_rgb": "8176814b063eb34dadd8a0e207564b2b5f067b24a3c78f69429c7be2bb305dcd",
+      "medium_attn": "1e668bfd341330f51940a7711466e29408584262d534dfbfd7dd609f23730994",
+      "pred_image": "52b5003ca9f0909da3e5550424144aabff8e48c404a41f2e426d49018ec9154f",
+      "rgb_medium_finite": "401371b1899b77f277fb6ad73e7697a42fbd5d0736c7e4e023c8896ac6d0580b",
+      "rgb_object": "884dd1bfa6ff5f903480634376631e40d286f857947578e92b65bdb17db7f9d5",
+      "rgb_tail": "7a43f41a3a81f700befe740ab6dc6dfe07c3d61e6d57788e8dae29c36925ec3b"
+    }
+  },
+  "initialization": "raw_colmap_and_random_network_only",
+  "model_hash": "7d7016e359be717bf81d9cc2eb384c9cf1002c70118fb9f7ad72daf62dc6af70",
+  "no_training_checkpoint_loaded": true,
+  "optimizer_groups": [
+    "direction_encoding",
+    "features_dc",
+    "features_rest",
+    "means",
+    "medium_mlp",
+    "opacities",
+    "quats",
+    "scales"
+  ],
+  "optimizer_steps": {
+    "direction_encoding": 0,
+    "features_dc": 0,
+    "features_rest": 0,
+    "means": 0,
+    "medium_mlp": 0,
+    "opacities": 0,
+    "quats": 0,
+    "scales": 0
+  },
+  "scene": "IUI3-RedSea",
+  "training_rng_manifest": {
+    "numpy_sha256": "d30ea7c08a2e9e566f5cd2e15b898fcb3a546466629043869b8218ddd1b70d41",
+    "python_sha256": "2d1026d52826de68f9ba3a8438a5e74ad10a8269aaa1ac77873d4f9a41def20a",
+    "torch_cpu_sha256": "5feb54a46230d321d888e9b43cf5a57492665f199e4377408d79ee460e36679c",
+    "torch_cuda_sha256": [
+      "aefdce03def94ffed42159e55677ec20e91200e1981f25b1f271b6fd99c3c263"
+    ]
+  }
+}

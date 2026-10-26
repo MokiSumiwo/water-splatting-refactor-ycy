@@ -1,0 +1,616 @@
+!!python/object:nerfstudio.engine.trainer.TrainerConfig
+_target: !!python/name:nerfstudio.engine.trainer.Trainer ''
+data: null
+experiment_name: dewater_bnd_cross_scene_iui3_seed42_step0_to_15000
+gradient_accumulation_steps: {}
+load_checkpoint: null
+load_config: null
+load_dir: null
+load_scheduler: true
+load_step: null
+log_gradients: false
+logging: !!python/object:nerfstudio.configs.base_config.LoggingConfig
+  local_writer: !!python/object:nerfstudio.configs.base_config.LocalWriterConfig
+    _target: !!python/name:nerfstudio.utils.writer.LocalWriter ''
+    enable: true
+    max_log_size: 10
+    stats_to_track: !!python/tuple
+    - !!python/object/apply:nerfstudio.utils.writer.EventName
+      - Train Iter (time)
+    - !!python/object/apply:nerfstudio.utils.writer.EventName
+      - Train Rays / Sec
+    - !!python/object/apply:nerfstudio.utils.writer.EventName
+      - Test PSNR
+    - !!python/object/apply:nerfstudio.utils.writer.EventName
+      - Vis Rays / Sec
+    - !!python/object/apply:nerfstudio.utils.writer.EventName
+      - Test Rays / Sec
+    - !!python/object/apply:nerfstudio.utils.writer.EventName
+      - ETA (time)
+  max_buffer_size: 20
+  profiler: basic
+  relative_log_dir: !!python/object/apply:pathlib.PosixPath []
+  steps_per_log: 10
+machine: !!python/object:nerfstudio.configs.base_config.MachineConfig
+  device_type: cuda
+  dist_url: auto
+  machine_rank: 0
+  num_devices: 1
+  num_machines: 1
+  seed: 42
+max_num_iterations: 15000
+method_name: water-splatting
+mixed_precision: false
+optimizers:
+  camera_opt:
+    optimizer: !!python/object:nerfstudio.engine.optimizers.AdamOptimizerConfig
+      _target: &id001 !!python/name:torch.optim.adam.Adam ''
+      eps: 1.0e-15
+      lr: 0.001
+      max_norm: null
+      weight_decay: 0
+    scheduler: !!python/object:nerfstudio.engine.schedulers.ExponentialDecaySchedulerConfig
+      _target: &id002 !!python/name:nerfstudio.engine.schedulers.ExponentialDecayScheduler ''
+      lr_final: 5.0e-05
+      lr_pre_warmup: 1.0e-08
+      max_steps: 15000
+      ramp: cosine
+      warmup_steps: 0
+  direction_encoding:
+    optimizer: !!python/object:nerfstudio.engine.optimizers.AdamOptimizerConfig
+      _target: *id001
+      eps: 1.0e-15
+      lr: 0.001
+      max_norm: 0.001
+      weight_decay: 0
+    scheduler: !!python/object:nerfstudio.engine.schedulers.ExponentialDecaySchedulerConfig
+      _target: *id002
+      lr_final: 0.00015
+      lr_pre_warmup: 1.0e-08
+      max_steps: 15000
+      ramp: cosine
+      warmup_steps: 0
+  features_dc:
+    optimizer: !!python/object:nerfstudio.engine.optimizers.AdamOptimizerConfig
+      _target: *id001
+      eps: 1.0e-15
+      lr: 0.0025
+      max_norm: null
+      weight_decay: 0
+    scheduler: !!python/object:nerfstudio.engine.schedulers.ExponentialDecaySchedulerConfig
+      _target: *id002
+      lr_final: 0.0025
+      lr_pre_warmup: 1.0e-08
+      max_steps: 15000
+      ramp: cosine
+      warmup_steps: 0
+  features_rest:
+    optimizer: !!python/object:nerfstudio.engine.optimizers.AdamOptimizerConfig
+      _target: *id001
+      eps: 1.0e-15
+      lr: 0.000125
+      max_norm: null
+      weight_decay: 0
+    scheduler: !!python/object:nerfstudio.engine.schedulers.ExponentialDecaySchedulerConfig
+      _target: *id002
+      lr_final: 0.000125
+      lr_pre_warmup: 1.0e-08
+      max_steps: 15000
+      ramp: cosine
+      warmup_steps: 0
+  gmvc_bounded_medium:
+    optimizer: !!python/object:nerfstudio.engine.optimizers.AdamOptimizerConfig
+      _target: *id001
+      eps: 1.0e-15
+      lr: 0.001
+      max_norm: 0.001
+      weight_decay: 0
+    scheduler: !!python/object:nerfstudio.engine.schedulers.ExponentialDecaySchedulerConfig
+      _target: *id002
+      lr_final: 0.00015
+      lr_pre_warmup: 1.0e-08
+      max_steps: 15000
+      ramp: cosine
+      warmup_steps: 0
+  means:
+    optimizer: !!python/object:nerfstudio.engine.optimizers.AdamOptimizerConfig
+      _target: *id001
+      eps: 1.0e-15
+      lr: 0.00016
+      max_norm: null
+      weight_decay: 0
+    scheduler: !!python/object:nerfstudio.engine.schedulers.ExponentialDecaySchedulerConfig
+      _target: *id002
+      lr_final: 5.0e-05
+      lr_pre_warmup: 1.0e-08
+      max_steps: 15000
+      ramp: cosine
+      warmup_steps: 0
+  medium_mlp:
+    optimizer: !!python/object:nerfstudio.engine.optimizers.AdamOptimizerConfig
+      _target: *id001
+      eps: 1.0e-15
+      lr: 0.001
+      max_norm: 0.001
+      weight_decay: 0
+    scheduler: !!python/object:nerfstudio.engine.schedulers.ExponentialDecaySchedulerConfig
+      _target: *id002
+      lr_final: 0.00015
+      lr_pre_warmup: 1.0e-08
+      max_steps: 15000
+      ramp: cosine
+      warmup_steps: 0
+  opacities:
+    optimizer: !!python/object:nerfstudio.engine.optimizers.AdamOptimizerConfig
+      _target: *id001
+      eps: 1.0e-15
+      lr: 0.05
+      max_norm: null
+      weight_decay: 0
+    scheduler: !!python/object:nerfstudio.engine.schedulers.ExponentialDecaySchedulerConfig
+      _target: *id002
+      lr_final: 0.05
+      lr_pre_warmup: 1.0e-08
+      max_steps: 15000
+      ramp: cosine
+      warmup_steps: 0
+  quats:
+    optimizer: !!python/object:nerfstudio.engine.optimizers.AdamOptimizerConfig
+      _target: *id001
+      eps: 1.0e-15
+      lr: 0.001
+      max_norm: null
+      weight_decay: 0
+    scheduler: !!python/object:nerfstudio.engine.schedulers.ExponentialDecaySchedulerConfig
+      _target: *id002
+      lr_final: 0.001
+      lr_pre_warmup: 1.0e-08
+      max_steps: 15000
+      ramp: cosine
+      warmup_steps: 0
+  scales:
+    optimizer: !!python/object:nerfstudio.engine.optimizers.AdamOptimizerConfig
+      _target: *id001
+      eps: 1.0e-15
+      lr: 0.005
+      max_norm: null
+      weight_decay: 0
+    scheduler: !!python/object:nerfstudio.engine.schedulers.ExponentialDecaySchedulerConfig
+      _target: *id002
+      lr_final: 0.005
+      lr_pre_warmup: 1.0e-08
+      max_steps: 15000
+      ramp: cosine
+      warmup_steps: 0
+output_dir: !!python/object/apply:pathlib.PosixPath
+- /
+- mnt
+- new
+- home_old
+- ycy
+- water-splatting-refactor
+- outputs
+- dewater_bounded_sh3_cross_scene_20260808
+pipeline: !!python/object:nerfstudio.pipelines.base_pipeline.VanillaPipelineConfig
+  _target: !!python/name:nerfstudio.pipelines.base_pipeline.VanillaPipeline ''
+  datamanager: !!python/object:water_splatting.data.checkpointable_full_images_datamanager.CheckpointableFullImageDatamanagerConfig
+    _target: !!python/name:water_splatting.data.checkpointable_full_images_datamanager.CheckpointableFullImageDatamanager ''
+    cache_images: gpu
+    cache_images_type: float32
+    camera_res_scale_factor: 1.0
+    data: null
+    dataparser: !!python/object:nerfstudio.data.dataparsers.colmap_dataparser.ColmapDataParserConfig
+      _target: !!python/name:nerfstudio.data.dataparsers.colmap_dataparser.ColmapDataParser ''
+      assume_colmap_world_coordinate_convention: true
+      auto_scale_poses: true
+      center_method: poses
+      colmap_path: !!python/object/apply:pathlib.PosixPath
+      - sparse
+      - '0'
+      data: !!python/object/apply:pathlib.PosixPath
+      - /
+      - mnt
+      - new
+      - home_old
+      - ycy
+      - water-splatting-refactor
+      - undistorted_data
+      - undistorted_IUI3-RedSea
+      depth_unit_scale_factor: 0.001
+      depths_path: null
+      downscale_factor: 1
+      downscale_rounding_mode: floor
+      eval_interval: 8
+      eval_mode: interval
+      images_path: !!python/object/apply:pathlib.PosixPath
+      - images
+      - ColorImage
+      load_3D_points: true
+      masks_path: null
+      max_2D_matches_per_3D_point: 0
+      orientation_method: up
+      scale_factor: 1.0
+      scene_scale: 1.0
+      train_split_fraction: 0.9
+    eval_image_indices: !!python/tuple
+    - 0
+    eval_num_images_to_sample_from: -1
+    eval_num_times_to_repeat_images: -1
+    fps_reset_every: 100
+    images_on_gpu: false
+    masks_on_gpu: false
+    max_thread_workers: null
+    train_cameras_sampling_seed: 42
+    train_cameras_sampling_strategy: random
+  model: !!python/object:water_splatting.water_splatting.WaterSplattingModelConfig
+    _target: !!python/name:water_splatting.water_splatting.WaterSplattingModel ''
+    abs_grad_densification: true
+    appearance_loss_ramp_steps: 3000
+    appearance_loss_start_step: 1000
+    appearance_sh_delay_enabled: false
+    appearance_sh_delay_interval: 2000
+    appearance_sh_delay_start_step: 3000
+    b_inf_mode: tied
+    b_inf_residual_scale: 0.02
+    background_candidate_mask_path: null
+    background_clear_chroma_accumulation_max: 0.65
+    background_clear_chroma_accumulation_temperature: 0.05
+    background_clear_chroma_margin: 0.02
+    background_clear_chroma_medium_detach: true
+    background_clear_chroma_ramp_steps: 1000
+    background_clear_chroma_start_step: 10000
+    background_clear_chroma_use_medium_support: false
+    background_clear_exclude_boundary: true
+    background_clear_hit_exclusion_threshold: -1.0
+    background_clear_loss_ramp_steps: 3000
+    background_clear_loss_start_step: 3000
+    background_clear_use_raw_j: true
+    background_color: black
+    background_densification_diagnostic_only: true
+    background_densification_enabled: false
+    background_densification_ramp_steps: 3000
+    background_densification_start_step: 3000
+    background_densification_weight: 1.0
+    background_gradient_surgery_enabled: false
+    background_gradient_surgery_min_view_count: 5
+    background_gradient_surgery_start_step: 10000
+    background_opacity_decrease_multiplier: 1.0
+    background_opacity_increase_multiplier: 1.0
+    background_render_loss_ramp_steps: 0
+    background_render_loss_start_step: 0
+    background_water_mask_key: water
+    backscatter_loss_ramp_steps: 0
+    backscatter_loss_start_step: 0
+    backscatter_region_mask_dir: null
+    bounded_sh_logit_eps: 1.0e-07
+    budgeted_capacity_enabled: false
+    budgeted_capacity_post_scale: 0.5
+    budgeted_capacity_ramp_steps: 1000
+    budgeted_capacity_start_step: 4000
+    budgeted_capacity_temperature: 0.02
+    budgeted_capacity_value: 0.05
+    capacity_conflict_gate_enabled: false
+    capacity_conflict_rec_grad_threshold: 1.0e-10
+    capacity_conflict_rho: 1.0
+    capacity_control_depth_gradient_scale: -1.0
+    capacity_control_enabled: false
+    capacity_control_footprint_gradient_scale: -1.0
+    capacity_control_geometry_gradient_scale: 1.0
+    capacity_control_opacity_gradient_scale: 1.0
+    capacity_control_position_gradient_scale: -1.0
+    capacity_control_scale_shrink_clip_quantile: -1.0
+    capacity_control_scale_shrink_clip_value: 0.0
+    capacity_control_scale_shrink_only: false
+    clear_proxy_appearance_only: false
+    clear_proxy_color_gradient_scale: 1.0
+    clear_proxy_enabled: false
+    clear_proxy_geometry_gradient_scale: 1.0
+    clear_proxy_opacity_gradient_scale: 1.0
+    clear_sh_chroma_scale: 0.0
+    clear_sh_luminance_scale: 1.0
+    clip_thresh: 0.01
+    collider_params:
+      far_plane: 6.0
+      near_plane: 2.0
+    constrained_appearance_enabled: false
+    continue_cull_post_densification: true
+    core_clearance_amplifier_enabled: false
+    core_clearance_amplifier_min: 0.3
+    core_clearance_amplifier_temperature: 0.05
+    core_clearance_amplifier_threshold: 0.2
+    core_zero_capacity_enabled: false
+    core_zero_capacity_post_scale: 1.0
+    core_zero_capacity_ramp_steps: 3000
+    core_zero_capacity_start_step: 1000
+    cull_alpha_thresh: 0.5
+    cull_alpha_thresh_post: 0.1
+    cull_scale_thresh: 10.0
+    cull_screen_size: 0.15
+    dc_channel_balance_beta: 0.05
+    dc_channel_balance_margin: 0.05
+    dc_channel_balance_use_low_transmission_weight: true
+    dc_softclip_beta: 0.05
+    dc_softclip_threshold: 0.95
+    dc_softclip_use_low_transmission_weight: true
+    densification_region_log_path: /mnt/new/home_old/ycy/water-splatting-refactor/logs/dewater_bounded_sh3_cross_scene_20260808/dewater_bnd_cross_scene_iui3_seed42_step0_to_15000_20260808_bounded_sh3_cross_scene_full_iui3_bnd_g1p00/densification_regions.jsonl
+    densify_grad_thresh: 0.0008
+    densify_size_thresh: 0.001
+    direct_optical_depth_scale: 1.0
+    disable_population_refinement: false
+    dual_color_enabled: false
+    dual_color_freeze_geometry: true
+    dual_color_freeze_medium: true
+    dual_color_loss_ramp_steps: 0
+    dual_color_loss_start_step: 0
+    dual_color_near_transmission_temp: 0.1
+    dual_color_near_transmission_threshold: 0.7
+    enable_collider: true
+    eval_num_rays_per_chunk: 4096
+    foreground_aware_accumulation_threshold: 0.05
+    foreground_aware_weight_cap: -1.0
+    foreground_aware_weight_epsilon: 0.001
+    foreground_aware_weighting_enabled: false
+    foreground_aware_weighting_lambda: 0.0
+    foreground_transmission_detach_weight: true
+    foreground_transmission_gamma: 1.0
+    foreground_transmission_max_weight: 4.0
+    foreground_water_mask_key: object
+    gaussian_cleanup_alpha_threshold: 0.25
+    gaussian_cleanup_contribution_threshold: 0.0001
+    gaussian_cleanup_depth_threshold: 0.0
+    gaussian_cleanup_dry_run: true
+    gaussian_cleanup_enabled: false
+    gaussian_cleanup_interval: 500
+    gaussian_cleanup_opacity_threshold: 0.08
+    gaussian_cleanup_ownership_source: m_inf_eff
+    gaussian_cleanup_ownership_threshold: 0.35
+    gaussian_cleanup_require_alpha_gate: true
+    gaussian_cleanup_require_depth_gate: false
+    gaussian_cleanup_require_ownership_gate: true
+    gaussian_cleanup_start_step: 12000
+    gaussian_cleanup_visibility_min_count: 2
+    gmvc_bounded_beta_log_scale: 0.15
+    gmvc_bounded_binf_logit_scale: 0.1
+    gmvc_bounded_init_from_first_batch: true
+    gmvc_bounded_medium_enabled: false
+    gmvc_bounded_medium_projection_steps: 500
+    gmvc_bounded_medium_start_step: 10000
+    gmvc_charbonnier_eps: 1.0e-06
+    gmvc_closure_signal_floor: 0.03
+    gmvc_detach_depth: true
+    gmvc_diagnostic_only: false
+    gmvc_enabled: false
+    gmvc_eps: 0.0001
+    gmvc_freeze_geometry: false
+    gmvc_grad_log_every: 100
+    gmvc_grad_log_force_steps: ''
+    gmvc_grad_log_path: ''
+    gmvc_intrinsic_source: J_proxy_raw
+    gmvc_intrinsic_use_dc_proxy: true
+    gmvc_j_clamp_max: 1.25
+    gmvc_j_clamp_min: -0.25
+    gmvc_max_tracks_per_step: 4096
+    gmvc_medium_hold_enabled: false
+    gmvc_medium_hold_start_step: 13001
+    gmvc_medium_hold_stop_step: 15000
+    gmvc_object_j_clamp_max: 1.1
+    gmvc_object_j_clamp_min: -0.1
+    gmvc_object_min_depth_span_rel: 0.05
+    gmvc_object_min_hessian: 0.0
+    gmvc_object_track_balanced: true
+    gmvc_profile_detach_j_star: true
+    gmvc_profile_irls_delta: 0.03
+    gmvc_profile_irls_max_weight: 1.0
+    gmvc_profile_loss_mode: charbonnier
+    gmvc_profile_min_depth_span_rel: 0.0
+    gmvc_profile_min_hessian: 0.0
+    gmvc_profile_min_transmission_span: 0.0
+    gmvc_profile_observability_weight_enabled: false
+    gmvc_profile_observability_weight_max: 4.0
+    gmvc_profile_observability_weight_min: 0.25
+    gmvc_profile_observability_weight_mode: dtb_view
+    gmvc_profile_observability_weight_power: 1.0
+    gmvc_profile_track_balanced: false
+    gmvc_ramp_steps: 500
+    gmvc_range_log_scale: 0.25
+    gmvc_residual_beta_log_scale: 0.15
+    gmvc_residual_binf_logit_scale: 0.1
+    gmvc_residual_ema_momentum: 0.99
+    gmvc_seed: 42
+    gmvc_start_step: 10000
+    gmvc_stop_step: 15000
+    gmvc_track_bank_path: null
+    gmvc_train_features_dc: false
+    gmvc_train_features_rest: false
+    gmvc_v2_enabled: false
+    gmvc_v2_max_tracks_per_step: 512
+    gmvc_v2_min_observations_per_track: 2
+    gmvc_v3_enabled: false
+    gmvc_v3_freeze_medium_on_object_phase: false
+    gmvc_v3_medium_steps: 4
+    gmvc_v3_object_phase_medium_grad_scale: 1.0
+    gmvc_v3_object_source: J_proxy_raw
+    gmvc_v3_object_steps: 1
+    gmvc_v3_profile_decay_end_step: 14000
+    gmvc_v3_profile_decay_final_scale: 0.0
+    gmvc_v3_profile_decay_start_step: 13000
+    gmvc_v3_profile_schedule: constant
+    gmvc_v3_target_current_camera_tracks: false
+    gradient_routing_min_scene_weight: 0.3
+    gradient_routing_ramp_steps: 1000
+    gradient_routing_start_step: 4000
+    halo_capacity_enabled: false
+    halo_capacity_post_scale: 0.5
+    halo_capacity_ramp_steps: 1000
+    halo_capacity_start_step: 4000
+    halo_capacity_temperature: 0.02
+    halo_capacity_value: 0.03
+    halo_chroma_margin: 0.015
+    halo_chroma_temperature: 0.01
+    halo_luma_min: 0.02
+    halo_luma_temperature: 0.01
+    hidden_dim_medium: 128
+    infinite_water_alpha_power: 1.0
+    infinite_water_capacity_budget: 0.05
+    infinite_water_capacity_budget_temp: 0.02
+    infinite_water_capacity_floor: 0.5
+    infinite_water_capacity_loss_mode: current
+    infinite_water_capacity_support_mode: m_inf
+    infinite_water_color_temp: 0.2
+    infinite_water_compose_mode: rgb_mix
+    infinite_water_depth_mid: 0.75
+    infinite_water_depth_normalize_mode: p95
+    infinite_water_depth_temp: 0.1
+    infinite_water_detach_evidence: true
+    infinite_water_enabled: false
+    infinite_water_hit_alpha_temp: 0.05
+    infinite_water_hit_alpha_threshold: 0.2
+    infinite_water_hit_concentration_kappa: 0.2
+    infinite_water_hit_protection_enabled: false
+    infinite_water_hit_protection_start_step: 0
+    infinite_water_hit_protection_temp: 0.05
+    infinite_water_hit_protection_threshold: 0.8
+    infinite_water_loss_ramp_steps: 3000
+    infinite_water_loss_start_step: 1000
+    infinite_water_occupancy_limited: true
+    infinite_water_ownership_mode: alpha_depth
+    intrinsic_bound_lambda: 0.0
+    intrinsic_bound_visible_only: true
+    intrinsic_color_parameterization: sigmoid_sh
+    lambda_background_clear_chroma: 0.0
+    lambda_background_clear_gaussian: 0.0
+    lambda_background_finite_medium_render: 0.0
+    lambda_background_medium_render: 0.0
+    lambda_background_tail_render: 0.0
+    lambda_background_water_color: 0.0
+    lambda_budgeted_capacity: 0.0
+    lambda_clear_chroma: 0.0
+    lambda_core_zero_capacity: 0.0
+    lambda_dc_channel_balance: 0.0
+    lambda_dc_softclip: 0.0
+    lambda_foreground_transmission_reconstruction: 0.0
+    lambda_gmvc_binf: 0.0
+    lambda_gmvc_fixed_closure: 0.0
+    lambda_gmvc_intrinsic: 0.0
+    lambda_gmvc_j: 0.0
+    lambda_gmvc_object: 0.0
+    lambda_gmvc_profile: 0.0
+    lambda_gmvc_range: 0.0
+    lambda_gmvc_residual_budget: 0.0
+    lambda_gmvc_symmetric_closure: 0.0
+    lambda_halo_capacity: 0.0
+    lambda_infinite_water_accumulation_zero: 0.0
+    lambda_infinite_water_binf_rgb: 0.0
+    lambda_infinite_water_near_zero: 0.0
+    lambda_intrinsic_near_anchor: 0.0
+    lambda_medium_attenuation_order: 0.0
+    lambda_medium_context_residual: 0.0
+    lambda_medium_explainability: 0.0
+    lambda_object_radiance_budget: 0.0
+    lambda_proxy_clear_luma: 0.0
+    lambda_pseudo_depth: 0.0
+    lambda_sh_residual_mean: 0.0
+    lambda_view_residual_mean: 0.0
+    loss_coefficients:
+      rgb_loss_coarse: 1.0
+      rgb_loss_fine: 1.0
+    low_transmission_temperature: 0.1
+    low_transmission_threshold: 0.35
+    main_loss: reg_l1
+    medium_attenuation_order_beta: 0.05
+    medium_attenuation_order_margin: 0.0
+    medium_attenuation_order_use_low_transmission_weight: true
+    medium_background_supervision_enabled: false
+    medium_background_supervision_exclude_boundary: true
+    medium_background_supervision_hit_exclusion_threshold: -1.0
+    medium_background_supervision_lambda: 0.0
+    medium_camera_context_dropout: 0.0
+    medium_camera_context_scale: 1.0
+    medium_context_mode: dir_xy_camera
+    medium_density_bias: 0.0
+    medium_depth_context_detach: true
+    medium_depth_context_normalize: true
+    medium_depth_context_normalize_mode: p95
+    medium_explainability_enabled: false
+    medium_explainability_ramp_steps: 2000
+    medium_explainability_start_step: 2000
+    medium_predictor_mode: single
+    medium_support_capacity_power: 1.0
+    medium_support_capacity_threshold: 0.0
+    medium_support_color_tau: 0.08
+    medium_support_connected_border: 2
+    medium_support_connected_enabled: false
+    medium_support_connected_threshold: 0.25
+    medium_support_connected_top_only: true
+    medium_support_depth_mid: 0.75
+    medium_support_depth_temperature: 0.15
+    medium_support_exclude_boundary: false
+    medium_support_exclude_object: true
+    medium_support_far_floor: 0.5
+    medium_support_gradient_tau: 0.05
+    medium_support_luma_weight: 0.25
+    medium_support_region_exclusion_apply_capacity: true
+    medium_support_region_exclusion_apply_chroma: true
+    medium_support_region_exclusion_enabled: false
+    medium_support_use_far: true
+    medium_support_use_flatness: true
+    medium_support_use_medium: true
+    medium_support_variance_tau: 0.02
+    mlp_type: tcnn
+    n_split_samples: 2
+    num_downscales: 2
+    num_layers_medium: 2
+    num_random: 50000
+    num_steps: 15000
+    object_radiance_budget_enabled: false
+    object_radiance_budget_ramp_steps: 1000
+    object_radiance_budget_start_step: 10000
+    object_radiance_budget_temperature: 0.01
+    object_radiance_budget_value: 0.015
+    opacity_accumulation_diagnostic_enabled: false
+    prompt: null
+    proxy_clear_luma_budget: 0.03
+    proxy_clear_luma_temperature: 0.01
+    random_init: false
+    random_scale: 10.0
+    rasterize_mode: classic
+    refine_every: 100
+    reset_alpha_every: 5
+    reset_alpha_thresh: 0.5
+    resolution_schedule: 3000
+    sh_degree: 3
+    sh_degree_interval: 1000
+    split_screen_size: 0.05
+    ssim_lambda: 0.2
+    ssim_loss: reg_ssim
+    stop_screen_size_at: 0
+    stop_split_at: 10000
+    training_gradient_routing_enabled: false
+    uncertain_densification_weight: 0.5
+    warmup_length: 500
+    zero_medium: false
+project_name: nerfstudio-project
+prompt: null
+relative_model_dir: !!python/object/apply:pathlib.PosixPath
+- nerfstudio_models
+save_only_latest_checkpoint: false
+steps_per_eval_all_images: 1000
+steps_per_eval_batch: 0
+steps_per_eval_image: 1000
+steps_per_save: 1000
+timestamp: dewater_bnd_cross_scene_iui3_seed42_step0_to_15000_20260808_bounded_sh3_cross_scene_full_iui3_bnd_g1p00
+use_grad_scaler: false
+viewer: !!python/object:nerfstudio.configs.base_config.ViewerConfig
+  camera_frustum_scale: 0.1
+  default_composite_depth: true
+  image_format: jpeg
+  jpeg_quality: 75
+  make_share_url: false
+  max_num_display_images: 512
+  num_rays_per_chunk: 32768
+  quit_on_train_completion: false
+  relative_log_filename: viewer_log_filename.txt
+  websocket_host: 0.0.0.0
+  websocket_port: null
+  websocket_port_default: 7007
+vis: tensorboard

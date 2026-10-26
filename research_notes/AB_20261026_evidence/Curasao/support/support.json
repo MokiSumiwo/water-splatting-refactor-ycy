@@ -1,0 +1,29 @@
+{
+  "scene": "Curasao",
+  "policy": {
+    "neighbors": 16,
+    "minimum_common_train_views": 3,
+    "max_reprojection_error_px": 1.0,
+    "max_normal_to_middle_eigenvalue": 0.05,
+    "min_middle_to_large_eigenvalue": 0.15,
+    "uncertainty_spacing_floor": 0.05,
+    "normal_distance_sigmas": 3.0,
+    "footprint_sigmas": 3.0,
+    "note": "Sparse local plane prior, not dense surface truth; no absent-support water labels."
+  },
+  "input_points": 25837,
+  "eligible_track_points": 16308,
+  "patches": 126,
+  "rejections": {
+    "nonplanar": 192,
+    "common_views": 15990,
+    "hull": 0
+  },
+  "excluded_review_cameras": [
+    "MTN_1289",
+    "MTN_1295",
+    "MTN_1306"
+  ],
+  "points_sha256": "55ebd7a088532a34df8d279915d7af243e0031aee66fd48b752f1edbdc7a3611",
+  "limitation": "COLMAP source reconstruction is inherited; only eligible real training tracks build patches. Plane interpolation is an explicit prior; no dense footprint observation is claimed."
+}

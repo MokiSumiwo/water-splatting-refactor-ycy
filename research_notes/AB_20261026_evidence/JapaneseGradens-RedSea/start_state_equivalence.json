@@ -1,0 +1,48 @@
+{
+  "absolute_step": 0,
+  "arm": "B",
+  "forward_probe": {
+    "camera_index": 0,
+    "finite": true,
+    "tensor_sha256": {
+      "gaussian_view_rgb": "e51b39b69ffa43db831774f49bef4bd4cf9f530c32e5edf988be3d0e1d326875",
+      "medium_attn": "1866ba729c78b81009d2436d221d0447cb98772c19ef4d47480a646f6e635750",
+      "pred_image": "07f64f02acf48d8b00c200ca9a927be2316111c523ea9d86fd578033ff14f025",
+      "rgb_medium_finite": "2768ab1edceee34b11a99170661418242a46393d2db6ee24d80e4c989ea69c52",
+      "rgb_object": "ff8fc7b9242cf04e614e679608d74f058a81241c5648af7178e5e154001bdf64",
+      "rgb_tail": "64c211117f59160b5183ace5aea7e16b4ee215ecf13fec5400406a3c2fad745c"
+    }
+  },
+  "initialization": "raw_colmap_and_random_network_only",
+  "model_hash": "fed4f9a837c91b6957a19df1666ae644f547fc499b45a3150e22aaea8419fb12",
+  "no_training_checkpoint_loaded": true,
+  "optimizer_groups": [
+    "direction_encoding",
+    "features_dc",
+    "features_rest",
+    "means",
+    "medium_mlp",
+    "opacities",
+    "quats",
+    "scales"
+  ],
+  "optimizer_steps": {
+    "direction_encoding": 0,
+    "features_dc": 0,
+    "features_rest": 0,
+    "means": 0,
+    "medium_mlp": 0,
+    "opacities": 0,
+    "quats": 0,
+    "scales": 0
+  },
+  "scene": "JapaneseGradens-RedSea",
+  "training_rng_manifest": {
+    "numpy_sha256": "d30ea7c08a2e9e566f5cd2e15b898fcb3a546466629043869b8218ddd1b70d41",
+    "python_sha256": "2d1026d52826de68f9ba3a8438a5e74ad10a8269aaa1ac77873d4f9a41def20a",
+    "torch_cpu_sha256": "5feb54a46230d321d888e9b43cf5a57492665f199e4377408d79ee460e36679c",
+    "torch_cuda_sha256": [
+      "aefdce03def94ffed42159e55677ec20e91200e1981f25b1f271b6fd99c3c263"
+    ]
+  }
+}
