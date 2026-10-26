@@ -50,13 +50,24 @@ def main():
             B_max_global_gradient_ratio=max(r['gradient_ratio'] for r in active),
             B_displacement_record_count=len(moves),
             B_peak_allocated_bytes=max(r.get('peak_allocated_bytes',0) for r in logs))
+    training_code_paths = [
+        'scripts/experiments/run_AB_worker.py', 'scripts/experiments/run_AB_campaign.py',
+        'scripts/experiments/run_direct_mdrr_cica_scene.py',
+        'scripts/experiments/run_geometry_gradient_A_worker.py', 'scripts/experiments/run_AC_pair_worker.py',
+        'scripts/experiments/geometry_projection_backend.py', 'scripts/experiments/export_geometry_gradient_A.py',
+        'scripts/experiments/audit_AB_pair.py', 'scripts/experiments/summarize_AB_campaign.py',
+        'water_splatting/auxiliary_gradient_isolation.py', 'water_splatting/geometry_gradient.py',
+        'water_splatting/surface_support.py']
+    code_match = all(sha(ROOT/p) == manifest['code_sha256'][p] for p in training_code_paths)
     report = dict(complete=True, seed=42, updates_per_scene=15000, total_formal_updates=60000,
         scene_metrics=scene, macro_scene_equal=macro, AB_minus_reference=delta,
         underwater_guard=guards, underwater_guard_pass=all(guards.values()), telemetry=telemetry,
         metric_source='all four arms independently recomputed from native-resolution float tensors with W._taba_rgb_metrics',
         test_view_counts={s:len([r for r in verification[s]['recomputed_views'] if r['arm']=='AB']) for s in SCENES},
         checkpoint_sha256={s:verification[s]['checkpoint_sha256'] for s in SCENES},
-        code_snapshot_matches_working_tree=all(sha(ROOT/p)==h for p,h in manifest['code_sha256'].items()),
+        training_code_snapshot_matches_frozen_manifest=code_match,
+        posthoc_verifier_sha256=sha(ROOT/'scripts/experiments/verify_AB_endpoint.py'),
+        report_builder_sha256=sha(ROOT/'scripts/experiments/finish_AB_report.py'),
         actual_smoke_updates=manifest['actual_smoke_updates'],
         interpretation='User-requested exploratory combination; single seed; no residual-removal success established')
     (out/'verified_metrics.json').write_text(json.dumps(report, indent=2)+'\n')

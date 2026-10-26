@@ -1,0 +1,21 @@
+{
+  "status": "COMPLETE",
+  "jobs": {
+    "Curasao": {
+      "exit_code": 0,
+      "phase": "verification"
+    },
+    "IUI3-RedSea": {
+      "exit_code": 0,
+      "phase": "verification"
+    },
+    "JapaneseGradens-RedSea": {
+      "exit_code": 0,
+      "phase": "verification"
+    },
+    "Panama": {
+      "exit_code": 0,
+      "phase": "verification"
+    }
+  }
+}

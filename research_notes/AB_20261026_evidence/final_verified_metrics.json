@@ -1,0 +1,225 @@
+{
+  "complete": true,
+  "seed": 42,
+  "updates_per_scene": 15000,
+  "total_formal_updates": 60000,
+  "scene_metrics": {
+    "Curasao": {
+      "B0": {
+        "PSNR": 32.82216771443685,
+        "SSIM": 0.9599198301633199,
+        "LPIPS": 0.12524191538492838,
+        "MSE": 0.000637928363479053
+      },
+      "A010": {
+        "PSNR": 32.745043436686196,
+        "SSIM": 0.960025409857432,
+        "LPIPS": 0.12499808768431346,
+        "MSE": 0.0006628566867827127
+      },
+      "B": {
+        "PSNR": 32.71110852559408,
+        "SSIM": 0.9599064588546753,
+        "LPIPS": 0.1247467299302419,
+        "MSE": 0.0006673784713105609
+      },
+      "AB": {
+        "PSNR": 32.819356282552086,
+        "SSIM": 0.9597035447756449,
+        "LPIPS": 0.12552235027154288,
+        "MSE": 0.0006436577629453192
+      }
+    },
+    "IUI3-RedSea": {
+      "B0": {
+        "PSNR": 30.551129817962646,
+        "SSIM": 0.9094889909029007,
+        "LPIPS": 0.20048798620700836,
+        "MSE": 0.001776526311005
+      },
+      "A010": {
+        "PSNR": 30.809560775756836,
+        "SSIM": 0.9093573987483978,
+        "LPIPS": 0.19937728345394135,
+        "MSE": 0.0015276533194992226
+      },
+      "B": {
+        "PSNR": 31.00356960296631,
+        "SSIM": 0.9100538194179535,
+        "LPIPS": 0.19934618845582008,
+        "MSE": 0.001426754464773694
+      },
+      "AB": {
+        "PSNR": 30.82879877090454,
+        "SSIM": 0.9094562530517578,
+        "LPIPS": 0.19964174926280975,
+        "MSE": 0.0014982786633481737
+      }
+    },
+    "JapaneseGradens-RedSea": {
+      "B0": {
+        "PSNR": 24.64231999715169,
+        "SSIM": 0.8951244950294495,
+        "LPIPS": 0.13378427426020303,
+        "MSE": 0.005774081374208133
+      },
+      "A010": {
+        "PSNR": 24.89347966512044,
+        "SSIM": 0.8969049255053202,
+        "LPIPS": 0.13566338270902634,
+        "MSE": 0.005260950924518208
+      },
+      "B": {
+        "PSNR": 24.651336034138996,
+        "SSIM": 0.8961500922838846,
+        "LPIPS": 0.13480360557635626,
+        "MSE": 0.005889116243148844
+      },
+      "AB": {
+        "PSNR": 24.69876225789388,
+        "SSIM": 0.8956916928291321,
+        "LPIPS": 0.13267176101605097,
+        "MSE": 0.005593326292000711
+      }
+    },
+    "Panama": {
+      "B0": {
+        "PSNR": 31.577850341796875,
+        "SSIM": 0.9507108926773071,
+        "LPIPS": 0.09881606946388881,
+        "MSE": 0.0006982843236376842
+      },
+      "A010": {
+        "PSNR": 31.548931121826172,
+        "SSIM": 0.9505211114883423,
+        "LPIPS": 0.09965565303961436,
+        "MSE": 0.0007019955082796514
+      },
+      "B": {
+        "PSNR": 31.65394401550293,
+        "SSIM": 0.9510022004445394,
+        "LPIPS": 0.0997134695450465,
+        "MSE": 0.0006867113794821004
+      },
+      "AB": {
+        "PSNR": 31.67473602294922,
+        "SSIM": 0.9508927861849467,
+        "LPIPS": 0.09912015497684479,
+        "MSE": 0.0006832399133903285
+      }
+    }
+  },
+  "macro_scene_equal": {
+    "B0": {
+      "PSNR": 29.898366967837017,
+      "SSIM": 0.9288110521932443,
+      "LPIPS": 0.13958256132900712,
+      "MSE": 0.0022217050930824675
+    },
+    "A010": {
+      "PSNR": 29.999253749847412,
+      "SSIM": 0.929202211399873,
+      "LPIPS": 0.13992360172172388,
+      "MSE": 0.0020383641097699487
+    },
+    "B": {
+      "PSNR": 30.00498954455058,
+      "SSIM": 0.9292781427502632,
+      "LPIPS": 0.13965249837686616,
+      "MSE": 0.0021674901396787996
+    },
+    "AB": {
+      "PSNR": 30.005413333574932,
+      "SSIM": 0.9289360692103703,
+      "LPIPS": 0.1392390038818121,
+      "MSE": 0.002104625657921133
+    }
+  },
+  "AB_minus_reference": {
+    "B0": {
+      "PSNR": 0.10704636573791504,
+      "SSIM": 0.00012501701712597235,
+      "LPIPS": -0.00034355744719502535,
+      "MSE": -0.00011707943516133445
+    },
+    "A010": {
+      "PSNR": 0.006159583727519902,
+      "SSIM": -0.00026614218950271606,
+      "LPIPS": -0.000684597839911788,
+      "MSE": 6.626154815118435e-05
+    },
+    "B": {
+      "PSNR": 0.00042378902435302734,
+      "SSIM": -0.00034207353989290645,
+      "LPIPS": -0.00041349449505406755,
+      "MSE": -6.286448175766646e-05
+    }
+  },
+  "underwater_guard": {
+    "macro_PSNR": true,
+    "per_scene_PSNR": true,
+    "macro_SSIM": true,
+    "macro_LPIPS": true
+  },
+  "underwater_guard_pass": true,
+  "telemetry": {
+    "Curasao": {
+      "training_seconds": 8568.07980970107,
+      "final_population": 976574,
+      "B_events": 2374,
+      "B_nonzero_events": 1915,
+      "B_mean_event_coverage": 0.000948049117841556,
+      "B_max_global_gradient_ratio": 0.0001993436017073691,
+      "B_displacement_record_count": 1915,
+      "B_peak_allocated_bytes": 8000207872
+    },
+    "IUI3-RedSea": {
+      "training_seconds": 5661.644393732771,
+      "final_population": 716658,
+      "B_events": 2374,
+      "B_nonzero_events": 899,
+      "B_mean_event_coverage": 0.00013894207377002603,
+      "B_max_global_gradient_ratio": 0.00024033842782955617,
+      "B_displacement_record_count": 899,
+      "B_peak_allocated_bytes": 5213322240
+    },
+    "JapaneseGradens-RedSea": {
+      "training_seconds": 7780.893896477297,
+      "final_population": 767865,
+      "B_events": 2374,
+      "B_nonzero_events": 1770,
+      "B_mean_event_coverage": 0.0009636806167037925,
+      "B_max_global_gradient_ratio": 0.0004565236158668995,
+      "B_displacement_record_count": 1770,
+      "B_peak_allocated_bytes": 5073890816
+    },
+    "Panama": {
+      "training_seconds": 11515.128199044615,
+      "final_population": 1051097,
+      "B_events": 2374,
+      "B_nonzero_events": 1895,
+      "B_mean_event_coverage": 0.002842810397433597,
+      "B_max_global_gradient_ratio": 0.00010456945892656222,
+      "B_displacement_record_count": 1895,
+      "B_peak_allocated_bytes": 7998508032
+    }
+  },
+  "metric_source": "all four arms independently recomputed from native-resolution float tensors with W._taba_rgb_metrics",
+  "test_view_counts": {
+    "Curasao": 3,
+    "IUI3-RedSea": 4,
+    "JapaneseGradens-RedSea": 3,
+    "Panama": 3
+  },
+  "checkpoint_sha256": {
+    "Curasao": "9b971cc7837acd65712b03d1078d31e4f98b052f7185a14c4742424d7dc4c535",
+    "IUI3-RedSea": "d88cef0472ae354ef0219fcd31304077830d2f96bef7919a157d857026652751",
+    "JapaneseGradens-RedSea": "09d79dd4719ae4f8ef5ed964eaf8f005aa586f5c750fbf065d34b176683a066d",
+    "Panama": "cc6e02c54812950c6ac7c4664bf23eb36b10ea4739adfe04ef4fea4afd5f963c"
+  },
+  "training_code_snapshot_matches_frozen_manifest": true,
+  "posthoc_verifier_sha256": "6076ba90bb079fcb6810986a782a008846f2b02f4433545a14c1cfc25d042566",
+  "report_builder_sha256": "d58c0a745585bfd59d30e0699beab2c3d48b66465915aa6e90cbc1a5b258d82c",
+  "actual_smoke_updates": 180,
+  "interpretation": "User-requested exploratory combination; single seed; no residual-removal success established"
+}

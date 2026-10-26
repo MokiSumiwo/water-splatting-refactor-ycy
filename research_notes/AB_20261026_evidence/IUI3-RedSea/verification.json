@@ -1,0 +1,398 @@
+{
+  "scene": "IUI3-RedSea",
+  "complete": true,
+  "optimizer_updates": 0,
+  "raw_initialization_rng_sequence_match": true,
+  "endpoint_reload": {
+    "scene": "IUI3-RedSea",
+    "arm": "AB",
+    "absolute_step": 15000,
+    "checkpoint": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/AB_20261026/formal/IUI3-RedSea/AB/checkpoints/step-000015000.ckpt",
+    "checkpoint_model_hash": "5f75aba2ebbed2f1debc7de5e42c6c9055ebb238c448640fe2c5fded427341c4",
+    "reloaded_model_hash": "5f75aba2ebbed2f1debc7de5e42c6c9055ebb238c448640fe2c5fded427341c4",
+    "model_hash_match": true,
+    "forward_probe_camera_index": 0,
+    "forward_finite": true,
+    "tensor_sha256": {
+      "rgb_object": "f6cc652d11b6e95fe69942200fb6cf8e636a199604aebb03e8cd8828eb0ef91f",
+      "rgb_medium_finite": "63f46b062d16ef34eed9b3635706d70331bf828fb79d2f76d82e7a8904fb68db",
+      "rgb_tail": "30f8ac9e984033c6568e6a06389ea628ecf4ddc3228b82656e8352683f04125f",
+      "pred_image": "4a443f2c925c5cffcacf0d8b26639f3dbb8f4d3ae2e28adfca25c6a7d2c41937"
+    }
+  },
+  "checkpoint_sha256": "d88cef0472ae354ef0219fcd31304077830d2f96bef7919a157d857026652751",
+  "per_scene": {
+    "B0": {
+      "PSNR": 30.551129817962646,
+      "SSIM": 0.9094889909029007,
+      "LPIPS": 0.20048798620700836,
+      "MSE": 0.001776526311005
+    },
+    "A010": {
+      "PSNR": 30.809560775756836,
+      "SSIM": 0.9093573987483978,
+      "LPIPS": 0.19937728345394135,
+      "MSE": 0.0015276533194992226
+    },
+    "B": {
+      "PSNR": 31.00356960296631,
+      "SSIM": 0.9100538194179535,
+      "LPIPS": 0.19934618845582008,
+      "MSE": 0.001426754464773694
+    },
+    "AB": {
+      "PSNR": 30.82879877090454,
+      "SSIM": 0.9094562530517578,
+      "LPIPS": 0.19964174926280975,
+      "MSE": 0.0014982786633481737
+    }
+  },
+  "recomputed_views": [
+    {
+      "scene": "IUI3-RedSea",
+      "arm": "B0",
+      "view_id": "MTN_5894",
+      "PSNR": 22.701242446899414,
+      "SSIM": 0.8432291150093079,
+      "LPIPS": 0.21032077074050903,
+      "MSE": 0.005368781741708517
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "arm": "B0",
+      "view_id": "MTN_5903",
+      "PSNR": 37.09468078613281,
+      "SSIM": 0.9410607814788818,
+      "LPIPS": 0.22552402317523956,
+      "MSE": 0.00019522345974110067
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "arm": "B0",
+      "view_id": "MTN_5911",
+      "PSNR": 30.39419174194336,
+      "SSIM": 0.9228267669677734,
+      "LPIPS": 0.1706957221031189,
+      "MSE": 0.0009132316918112338
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "arm": "B0",
+      "view_id": "MTN_5928",
+      "PSNR": 32.014404296875,
+      "SSIM": 0.9308393001556396,
+      "LPIPS": 0.19541142880916595,
+      "MSE": 0.0006288683507591486
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "arm": "A010",
+      "view_id": "MTN_5894",
+      "PSNR": 23.58838653564453,
+      "SSIM": 0.8423131704330444,
+      "LPIPS": 0.210214763879776,
+      "MSE": 0.004376846831291914
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "arm": "A010",
+      "view_id": "MTN_5903",
+      "PSNR": 37.28712463378906,
+      "SSIM": 0.9416099786758423,
+      "LPIPS": 0.22333437204360962,
+      "MSE": 0.0001867617102107033
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "arm": "A010",
+      "view_id": "MTN_5911",
+      "PSNR": 30.422405242919922,
+      "SSIM": 0.9223051071166992,
+      "LPIPS": 0.1696719229221344,
+      "MSE": 0.0009073179680854082
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "arm": "A010",
+      "view_id": "MTN_5928",
+      "PSNR": 31.940326690673828,
+      "SSIM": 0.9312013387680054,
+      "LPIPS": 0.19428807497024536,
+      "MSE": 0.0006396867684088647
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "arm": "B",
+      "view_id": "MTN_5894",
+      "PSNR": 23.926177978515625,
+      "SSIM": 0.8451946377754211,
+      "LPIPS": 0.2086317092180252,
+      "MSE": 0.004049321636557579
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "arm": "B",
+      "view_id": "MTN_5903",
+      "PSNR": 37.21504592895508,
+      "SSIM": 0.9414467811584473,
+      "LPIPS": 0.22378259897232056,
+      "MSE": 0.0001898871996672824
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "arm": "B",
+      "view_id": "MTN_5911",
+      "PSNR": 30.534915924072266,
+      "SSIM": 0.922034502029419,
+      "LPIPS": 0.17064958810806274,
+      "MSE": 0.0008841139497235417
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "arm": "B",
+      "view_id": "MTN_5928",
+      "PSNR": 32.338138580322266,
+      "SSIM": 0.9315393567085266,
+      "LPIPS": 0.19432085752487183,
+      "MSE": 0.000583695073146373
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "arm": "AB",
+      "view_id": "MTN_5894",
+      "PSNR": 23.750574111938477,
+      "SSIM": 0.8448588848114014,
+      "LPIPS": 0.20927384495735168,
+      "MSE": 0.004216406960040331
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "arm": "AB",
+      "view_id": "MTN_5903",
+      "PSNR": 37.24879837036133,
+      "SSIM": 0.9412935972213745,
+      "LPIPS": 0.22411203384399414,
+      "MSE": 0.0001884170778794214
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "arm": "AB",
+      "view_id": "MTN_5911",
+      "PSNR": 29.983436584472656,
+      "SSIM": 0.9202126264572144,
+      "LPIPS": 0.1711941659450531,
+      "MSE": 0.0010038214968517423
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "arm": "AB",
+      "view_id": "MTN_5928",
+      "PSNR": 32.3323860168457,
+      "SSIM": 0.931459903717041,
+      "LPIPS": 0.1939869523048401,
+      "MSE": 0.0005844691186212003
+    }
+  ],
+  "metric_comparison": [
+    {
+      "arm": "B0",
+      "view_id": "MTN_5894",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 2.086162567138672e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B0",
+      "view_id": "MTN_5903",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 4.023313522338867e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B0",
+      "view_id": "MTN_5911",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 5.662441253662109e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B0",
+      "view_id": "MTN_5928",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 7.301568984985352e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "A010",
+      "view_id": "MTN_5894",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 8.940696716308594e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "A010",
+      "view_id": "MTN_5903",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 2.086162567138672e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "A010",
+      "view_id": "MTN_5911",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 1.7881393432617188e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "A010",
+      "view_id": "MTN_5928",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 6.258487701416016e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B",
+      "view_id": "MTN_5894",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B",
+      "view_id": "MTN_5903",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B",
+      "view_id": "MTN_5911",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B",
+      "view_id": "MTN_5928",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "AB",
+      "view_id": "MTN_5894",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 3.129243850708008e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "AB",
+      "view_id": "MTN_5903",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 3.5762786865234375e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "AB",
+      "view_id": "MTN_5911",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 5.662441253662109e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "AB",
+      "view_id": "MTN_5928",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 1.4901161193847656e-08,
+        "MSE": 0.0
+      }
+    }
+  ],
+  "training_endpoint_comparison": [
+    {
+      "view_id": "MTN_5894",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "view_id": "MTN_5903",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "view_id": "MTN_5911",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "view_id": "MTN_5928",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    }
+  ],
+  "training_seconds": 5661.644393732771,
+  "final_population": 716658
+}

@@ -1,0 +1,313 @@
+{
+  "scene": "Curasao",
+  "complete": true,
+  "optimizer_updates": 0,
+  "raw_initialization_rng_sequence_match": true,
+  "endpoint_reload": {
+    "scene": "Curasao",
+    "arm": "AB",
+    "absolute_step": 15000,
+    "checkpoint": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/AB_20261026/formal/Curasao/AB/checkpoints/step-000015000.ckpt",
+    "checkpoint_model_hash": "6cf44f4ca59b96038d90d3bdd322c76407d0e00023fdfa62b0d8150b2e430b06",
+    "reloaded_model_hash": "6cf44f4ca59b96038d90d3bdd322c76407d0e00023fdfa62b0d8150b2e430b06",
+    "model_hash_match": true,
+    "forward_probe_camera_index": 0,
+    "forward_finite": true,
+    "tensor_sha256": {
+      "rgb_object": "32982536f4a58a17560170928f80c177d3b58fc226c2838030a068498a354170",
+      "rgb_medium_finite": "4f4063540388cc305e087b0b88389326d60ba8f18a15d7fe4cd4b28f4ba452f0",
+      "rgb_tail": "0a392cf2be2a5395a20bcde703e373ec96738354792d20eb551c82eaffb10c1a",
+      "pred_image": "3f721a17f7b27c7295eade9a6f942bf073a07696b759d4e9a1540f7067e57c1b"
+    }
+  },
+  "checkpoint_sha256": "9b971cc7837acd65712b03d1078d31e4f98b052f7185a14c4742424d7dc4c535",
+  "per_scene": {
+    "B0": {
+      "PSNR": 32.82216771443685,
+      "SSIM": 0.9599198301633199,
+      "LPIPS": 0.12524191538492838,
+      "MSE": 0.000637928363479053
+    },
+    "A010": {
+      "PSNR": 32.745043436686196,
+      "SSIM": 0.960025409857432,
+      "LPIPS": 0.12499808768431346,
+      "MSE": 0.0006628566867827127
+    },
+    "B": {
+      "PSNR": 32.71110852559408,
+      "SSIM": 0.9599064588546753,
+      "LPIPS": 0.1247467299302419,
+      "MSE": 0.0006673784713105609
+    },
+    "AB": {
+      "PSNR": 32.819356282552086,
+      "SSIM": 0.9597035447756449,
+      "LPIPS": 0.12552235027154288,
+      "MSE": 0.0006436577629453192
+    }
+  },
+  "recomputed_views": [
+    {
+      "scene": "Curasao",
+      "arm": "B0",
+      "view_id": "MTN_1288",
+      "PSNR": 29.090301513671875,
+      "SSIM": 0.947785496711731,
+      "LPIPS": 0.18337416648864746,
+      "MSE": 0.0012330191675573587
+    },
+    {
+      "scene": "Curasao",
+      "arm": "B0",
+      "view_id": "MTN_1296",
+      "PSNR": 34.948123931884766,
+      "SSIM": 0.9705324769020081,
+      "LPIPS": 0.09018310904502869,
+      "MSE": 0.00032002769876271486
+    },
+    {
+      "scene": "Curasao",
+      "arm": "B0",
+      "view_id": "MTN_1304",
+      "PSNR": 34.428077697753906,
+      "SSIM": 0.9614415168762207,
+      "LPIPS": 0.10216847062110901,
+      "MSE": 0.00036073822411708534
+    },
+    {
+      "scene": "Curasao",
+      "arm": "A010",
+      "view_id": "MTN_1288",
+      "PSNR": 28.823516845703125,
+      "SSIM": 0.9478780031204224,
+      "LPIPS": 0.1827360987663269,
+      "MSE": 0.0013111381558701396
+    },
+    {
+      "scene": "Curasao",
+      "arm": "A010",
+      "view_id": "MTN_1296",
+      "PSNR": 34.8960075378418,
+      "SSIM": 0.9702643752098083,
+      "LPIPS": 0.09050287306308746,
+      "MSE": 0.0003238910576328635
+    },
+    {
+      "scene": "Curasao",
+      "arm": "A010",
+      "view_id": "MTN_1304",
+      "PSNR": 34.51560592651367,
+      "SSIM": 0.9619338512420654,
+      "LPIPS": 0.101755291223526,
+      "MSE": 0.0003535408468451351
+    },
+    {
+      "scene": "Curasao",
+      "arm": "B",
+      "view_id": "MTN_1288",
+      "PSNR": 28.79888343811035,
+      "SSIM": 0.9477623701095581,
+      "LPIPS": 0.18219925463199615,
+      "MSE": 0.001318596419878304
+    },
+    {
+      "scene": "Curasao",
+      "arm": "B",
+      "view_id": "MTN_1296",
+      "PSNR": 34.86612319946289,
+      "SSIM": 0.970192015171051,
+      "LPIPS": 0.09053803980350494,
+      "MSE": 0.0003261277452111244
+    },
+    {
+      "scene": "Curasao",
+      "arm": "B",
+      "view_id": "MTN_1304",
+      "PSNR": 34.468318939208984,
+      "SSIM": 0.9617649912834167,
+      "LPIPS": 0.10150289535522461,
+      "MSE": 0.0003574112488422543
+    },
+    {
+      "scene": "Curasao",
+      "arm": "AB",
+      "view_id": "MTN_1288",
+      "PSNR": 29.009735107421875,
+      "SSIM": 0.9468935132026672,
+      "LPIPS": 0.18362051248550415,
+      "MSE": 0.0012561065377667546
+    },
+    {
+      "scene": "Curasao",
+      "arm": "AB",
+      "view_id": "MTN_1296",
+      "PSNR": 34.953399658203125,
+      "SSIM": 0.97050541639328,
+      "LPIPS": 0.0902671366930008,
+      "MSE": 0.0003196390753146261
+    },
+    {
+      "scene": "Curasao",
+      "arm": "AB",
+      "view_id": "MTN_1304",
+      "PSNR": 34.49493408203125,
+      "SSIM": 0.9617117047309875,
+      "LPIPS": 0.10267940163612366,
+      "MSE": 0.0003552276757545769
+    }
+  ],
+  "metric_comparison": [
+    {
+      "arm": "B0",
+      "view_id": "MTN_1288",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 1.4901161193847656e-08,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B0",
+      "view_id": "MTN_1296",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B0",
+      "view_id": "MTN_1304",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "A010",
+      "view_id": "MTN_1288",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 2.2351741790771484e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "A010",
+      "view_id": "MTN_1296",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 3.129243850708008e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "A010",
+      "view_id": "MTN_1304",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 1.9371509552001953e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B",
+      "view_id": "MTN_1288",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B",
+      "view_id": "MTN_1296",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B",
+      "view_id": "MTN_1304",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "AB",
+      "view_id": "MTN_1288",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 4.470348358154297e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "AB",
+      "view_id": "MTN_1296",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 3.501772880554199e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "AB",
+      "view_id": "MTN_1304",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 2.980232238769531e-07,
+        "MSE": 0.0
+      }
+    }
+  ],
+  "training_endpoint_comparison": [
+    {
+      "view_id": "MTN_1288",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "view_id": "MTN_1296",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "view_id": "MTN_1304",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    }
+  ],
+  "training_seconds": 8568.07980970107,
+  "final_population": 976574
+}

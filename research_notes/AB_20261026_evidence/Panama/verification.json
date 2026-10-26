@@ -1,0 +1,313 @@
+{
+  "scene": "Panama",
+  "complete": true,
+  "optimizer_updates": 0,
+  "raw_initialization_rng_sequence_match": true,
+  "endpoint_reload": {
+    "scene": "Panama",
+    "arm": "AB",
+    "absolute_step": 15000,
+    "checkpoint": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/AB_20261026/formal/Panama/AB/checkpoints/step-000015000.ckpt",
+    "checkpoint_model_hash": "97fee6e3468fa7b140299fb55f4e157d5b4239bb1b31fce5293699adb53020be",
+    "reloaded_model_hash": "97fee6e3468fa7b140299fb55f4e157d5b4239bb1b31fce5293699adb53020be",
+    "model_hash_match": true,
+    "forward_probe_camera_index": 0,
+    "forward_finite": true,
+    "tensor_sha256": {
+      "rgb_object": "78a18c1c413cb071aa94bba33d82ea1a3acc30fc0906f300bfdb154cfac7311b",
+      "rgb_medium_finite": "8f10a20998b50b735a11c904ae2aaa4a738003acd450b5d9866f9f72feb49030",
+      "rgb_tail": "72476c28932c98e1d18828584c46b55851ddd0082493b0aceeb8cf0a1fd3dc5f",
+      "pred_image": "714919a651760ef92ed4f142339d1ebad2f415c7543a3c5191088f51ce121e6f"
+    }
+  },
+  "checkpoint_sha256": "cc6e02c54812950c6ac7c4664bf23eb36b10ea4739adfe04ef4fea4afd5f963c",
+  "per_scene": {
+    "B0": {
+      "PSNR": 31.577850341796875,
+      "SSIM": 0.9507108926773071,
+      "LPIPS": 0.09881606946388881,
+      "MSE": 0.0006982843236376842
+    },
+    "A010": {
+      "PSNR": 31.548931121826172,
+      "SSIM": 0.9505211114883423,
+      "LPIPS": 0.09965565303961436,
+      "MSE": 0.0007019955082796514
+    },
+    "B": {
+      "PSNR": 31.65394401550293,
+      "SSIM": 0.9510022004445394,
+      "LPIPS": 0.0997134695450465,
+      "MSE": 0.0006867113794821004
+    },
+    "AB": {
+      "PSNR": 31.67473602294922,
+      "SSIM": 0.9508927861849467,
+      "LPIPS": 0.09912015497684479,
+      "MSE": 0.0006832399133903285
+    }
+  },
+  "recomputed_views": [
+    {
+      "scene": "Panama",
+      "arm": "B0",
+      "view_id": "MTN_1529",
+      "PSNR": 32.13842010498047,
+      "SSIM": 0.9519327878952026,
+      "LPIPS": 0.12259886413812637,
+      "MSE": 0.0006111642578616738
+    },
+    {
+      "scene": "Panama",
+      "arm": "B0",
+      "view_id": "MTN_1539",
+      "PSNR": 31.37508773803711,
+      "SSIM": 0.9407338500022888,
+      "LPIPS": 0.09356434643268585,
+      "MSE": 0.0007286034524440765
+    },
+    {
+      "scene": "Panama",
+      "arm": "B0",
+      "view_id": "MTN_1547",
+      "PSNR": 31.220043182373047,
+      "SSIM": 0.9594660401344299,
+      "LPIPS": 0.08028499782085419,
+      "MSE": 0.0007550852606073022
+    },
+    {
+      "scene": "Panama",
+      "arm": "A010",
+      "view_id": "MTN_1529",
+      "PSNR": 32.015052795410156,
+      "SSIM": 0.9521045684814453,
+      "LPIPS": 0.1237272173166275,
+      "MSE": 0.0006287739961408079
+    },
+    {
+      "scene": "Panama",
+      "arm": "A010",
+      "view_id": "MTN_1539",
+      "PSNR": 31.315101623535156,
+      "SSIM": 0.9403936862945557,
+      "LPIPS": 0.09420561790466309,
+      "MSE": 0.0007387367077171803
+    },
+    {
+      "scene": "Panama",
+      "arm": "A010",
+      "view_id": "MTN_1547",
+      "PSNR": 31.316638946533203,
+      "SSIM": 0.9590650796890259,
+      "LPIPS": 0.08103412389755249,
+      "MSE": 0.0007384758209809661
+    },
+    {
+      "scene": "Panama",
+      "arm": "B",
+      "view_id": "MTN_1529",
+      "PSNR": 32.264949798583984,
+      "SSIM": 0.953031063079834,
+      "LPIPS": 0.12408974766731262,
+      "MSE": 0.0005936151137575507
+    },
+    {
+      "scene": "Panama",
+      "arm": "B",
+      "view_id": "MTN_1539",
+      "PSNR": 31.44242286682129,
+      "SSIM": 0.9403767585754395,
+      "LPIPS": 0.09433823823928833,
+      "MSE": 0.0007173938793130219
+    },
+    {
+      "scene": "Panama",
+      "arm": "B",
+      "view_id": "MTN_1547",
+      "PSNR": 31.254459381103516,
+      "SSIM": 0.9595987796783447,
+      "LPIPS": 0.08071242272853851,
+      "MSE": 0.0007491251453757286
+    },
+    {
+      "scene": "Panama",
+      "arm": "AB",
+      "view_id": "MTN_1529",
+      "PSNR": 32.278263092041016,
+      "SSIM": 0.9524503350257874,
+      "LPIPS": 0.12320791184902191,
+      "MSE": 0.0005917982780374587
+    },
+    {
+      "scene": "Panama",
+      "arm": "AB",
+      "view_id": "MTN_1539",
+      "PSNR": 31.362239837646484,
+      "SSIM": 0.9402897357940674,
+      "LPIPS": 0.09488929808139801,
+      "MSE": 0.0007307621417567134
+    },
+    {
+      "scene": "Panama",
+      "arm": "AB",
+      "view_id": "MTN_1547",
+      "PSNR": 31.383705139160156,
+      "SSIM": 0.9599382877349854,
+      "LPIPS": 0.07926325500011444,
+      "MSE": 0.0007271593203768134
+    }
+  ],
+  "metric_comparison": [
+    {
+      "arm": "B0",
+      "view_id": "MTN_1529",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B0",
+      "view_id": "MTN_1539",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B0",
+      "view_id": "MTN_1547",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "A010",
+      "view_id": "MTN_1529",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "A010",
+      "view_id": "MTN_1539",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "A010",
+      "view_id": "MTN_1547",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B",
+      "view_id": "MTN_1529",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B",
+      "view_id": "MTN_1539",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B",
+      "view_id": "MTN_1547",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "AB",
+      "view_id": "MTN_1529",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "AB",
+      "view_id": "MTN_1539",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "AB",
+      "view_id": "MTN_1547",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    }
+  ],
+  "training_endpoint_comparison": [
+    {
+      "view_id": "MTN_1529",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "view_id": "MTN_1539",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "view_id": "MTN_1547",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    }
+  ],
+  "training_seconds": 11515.128199044615,
+  "final_population": 1051097
+}

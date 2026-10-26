@@ -1,0 +1,313 @@
+{
+  "scene": "JapaneseGradens-RedSea",
+  "complete": true,
+  "optimizer_updates": 0,
+  "raw_initialization_rng_sequence_match": true,
+  "endpoint_reload": {
+    "scene": "JapaneseGradens-RedSea",
+    "arm": "AB",
+    "absolute_step": 15000,
+    "checkpoint": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/AB_20261026/formal/JapaneseGradens-RedSea/AB/checkpoints/step-000015000.ckpt",
+    "checkpoint_model_hash": "58d8b098b006dd388bd0d8a0df4e792d891c57f3815cae07fd5538baf6668ad6",
+    "reloaded_model_hash": "58d8b098b006dd388bd0d8a0df4e792d891c57f3815cae07fd5538baf6668ad6",
+    "model_hash_match": true,
+    "forward_probe_camera_index": 0,
+    "forward_finite": true,
+    "tensor_sha256": {
+      "rgb_object": "c6f4d18153411eca2dcab1c46360a1a555aacc90fa5a07dbed3639bb37271259",
+      "rgb_medium_finite": "5ccb50b62d969fa40ebf8161cf5db33768f1c2726b3cfc26d32ae917774b0147",
+      "rgb_tail": "e0fa8f58d37e9c413f82cd2bb3de49a2af1406fcdfe880fc0083563b498a49b7",
+      "pred_image": "f78a3c785ca3d678dce3dc355c6295f09fb34d7917fb2378791e5257faf8d3a5"
+    }
+  },
+  "checkpoint_sha256": "09d79dd4719ae4f8ef5ed964eaf8f005aa586f5c750fbf065d34b176683a066d",
+  "per_scene": {
+    "B0": {
+      "PSNR": 24.64231999715169,
+      "SSIM": 0.8951244950294495,
+      "LPIPS": 0.13378427426020303,
+      "MSE": 0.005774081374208133
+    },
+    "A010": {
+      "PSNR": 24.89347966512044,
+      "SSIM": 0.8969049255053202,
+      "LPIPS": 0.13566338270902634,
+      "MSE": 0.005260950924518208
+    },
+    "B": {
+      "PSNR": 24.651336034138996,
+      "SSIM": 0.8961500922838846,
+      "LPIPS": 0.13480360557635626,
+      "MSE": 0.005889116243148844
+    },
+    "AB": {
+      "PSNR": 24.69876225789388,
+      "SSIM": 0.8956916928291321,
+      "LPIPS": 0.13267176101605097,
+      "MSE": 0.005593326292000711
+    }
+  },
+  "recomputed_views": [
+    {
+      "scene": "JapaneseGradens-RedSea",
+      "arm": "B0",
+      "view_id": "MTN_1090",
+      "PSNR": 18.590984344482422,
+      "SSIM": 0.7768181562423706,
+      "LPIPS": 0.2103874236345291,
+      "MSE": 0.013832532800734043
+    },
+    {
+      "scene": "JapaneseGradens-RedSea",
+      "arm": "B0",
+      "view_id": "MTN_1098",
+      "PSNR": 28.532997131347656,
+      "SSIM": 0.9583990573883057,
+      "LPIPS": 0.09109504520893097,
+      "MSE": 0.0014018465299159288
+    },
+    {
+      "scene": "JapaneseGradens-RedSea",
+      "arm": "B0",
+      "view_id": "MTN_1106",
+      "PSNR": 26.802978515625,
+      "SSIM": 0.9501562714576721,
+      "LPIPS": 0.09987035393714905,
+      "MSE": 0.0020878647919744253
+    },
+    {
+      "scene": "JapaneseGradens-RedSea",
+      "arm": "A010",
+      "view_id": "MTN_1090",
+      "PSNR": 19.075925827026367,
+      "SSIM": 0.7819508910179138,
+      "LPIPS": 0.20758669078350067,
+      "MSE": 0.012371078133583069
+    },
+    {
+      "scene": "JapaneseGradens-RedSea",
+      "arm": "A010",
+      "view_id": "MTN_1098",
+      "PSNR": 28.835458755493164,
+      "SSIM": 0.9588457942008972,
+      "LPIPS": 0.0937027633190155,
+      "MSE": 0.0013075378956273198
+    },
+    {
+      "scene": "JapaneseGradens-RedSea",
+      "arm": "A010",
+      "view_id": "MTN_1106",
+      "PSNR": 26.769054412841797,
+      "SSIM": 0.9499180912971497,
+      "LPIPS": 0.10570069402456284,
+      "MSE": 0.0021042367443442345
+    },
+    {
+      "scene": "JapaneseGradens-RedSea",
+      "arm": "B",
+      "view_id": "MTN_1090",
+      "PSNR": 18.46958351135254,
+      "SSIM": 0.778752326965332,
+      "LPIPS": 0.2103232890367508,
+      "MSE": 0.014224656857550144
+    },
+    {
+      "scene": "JapaneseGradens-RedSea",
+      "arm": "B",
+      "view_id": "MTN_1098",
+      "PSNR": 28.681976318359375,
+      "SSIM": 0.9593566656112671,
+      "LPIPS": 0.09116826951503754,
+      "MSE": 0.0013545725960284472
+    },
+    {
+      "scene": "JapaneseGradens-RedSea",
+      "arm": "B",
+      "view_id": "MTN_1106",
+      "PSNR": 26.802448272705078,
+      "SSIM": 0.9503412842750549,
+      "LPIPS": 0.10291925817728043,
+      "MSE": 0.002088119275867939
+    },
+    {
+      "scene": "JapaneseGradens-RedSea",
+      "arm": "AB",
+      "view_id": "MTN_1090",
+      "PSNR": 18.769508361816406,
+      "SSIM": 0.7779884934425354,
+      "LPIPS": 0.2077101618051529,
+      "MSE": 0.0132754473015666
+    },
+    {
+      "scene": "JapaneseGradens-RedSea",
+      "arm": "AB",
+      "view_id": "MTN_1098",
+      "PSNR": 28.59606170654297,
+      "SSIM": 0.9589674472808838,
+      "LPIPS": 0.090316042304039,
+      "MSE": 0.0013816364808008075
+    },
+    {
+      "scene": "JapaneseGradens-RedSea",
+      "arm": "AB",
+      "view_id": "MTN_1106",
+      "PSNR": 26.730716705322266,
+      "SSIM": 0.950119137763977,
+      "LPIPS": 0.09998907893896103,
+      "MSE": 0.0021228950936347246
+    }
+  ],
+  "metric_comparison": [
+    {
+      "arm": "B0",
+      "view_id": "MTN_1090",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B0",
+      "view_id": "MTN_1098",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B0",
+      "view_id": "MTN_1106",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "A010",
+      "view_id": "MTN_1090",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "A010",
+      "view_id": "MTN_1098",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "A010",
+      "view_id": "MTN_1106",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 0.0,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B",
+      "view_id": "MTN_1090",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 1.341104507446289e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B",
+      "view_id": "MTN_1098",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 5.513429641723633e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "B",
+      "view_id": "MTN_1106",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 7.450580596923828e-08,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "AB",
+      "view_id": "MTN_1090",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 1.341104507446289e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "AB",
+      "view_id": "MTN_1098",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 1.1920928955078125e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "arm": "AB",
+      "view_id": "MTN_1106",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 7.450580596923828e-08,
+        "MSE": 0.0
+      }
+    }
+  ],
+  "training_endpoint_comparison": [
+    {
+      "view_id": "MTN_1090",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 1.341104507446289e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "view_id": "MTN_1098",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 1.1920928955078125e-07,
+        "MSE": 0.0
+      }
+    },
+    {
+      "view_id": "MTN_1106",
+      "absolute_difference": {
+        "PSNR": 0.0,
+        "SSIM": 0.0,
+        "LPIPS": 7.450580596923828e-08,
+        "MSE": 0.0
+      }
+    }
+  ],
+  "training_seconds": 7780.893896477297,
+  "final_population": 767865
+}
