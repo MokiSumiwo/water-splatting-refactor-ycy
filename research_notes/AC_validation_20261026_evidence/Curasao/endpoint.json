@@ -1,0 +1,36 @@
+{
+  "complete": true,
+  "scene": "Curasao",
+  "arm": "C2",
+  "checkpoint_sha256": "3afea773b39dd645993d4cae2ce7cadd3bdd4de95170172f73eb4a5a5e31dc6c",
+  "model_hash_match": true,
+  "model_hash": "cbe9bb52bf46074d295b333b192e6ce72a6769248071121cf765b4a827e6ff11",
+  "metric_max_abs_errors": [
+    {
+      "view_id": "MTN_1288",
+      "PSNR": 0.0,
+      "SSIM": 0.0,
+      "LPIPS": 3.129243850708008e-07,
+      "MSE": 0.0
+    },
+    {
+      "view_id": "MTN_1296",
+      "PSNR": 0.0,
+      "SSIM": 0.0,
+      "LPIPS": 5.960464477539063e-08,
+      "MSE": 0.0
+    },
+    {
+      "view_id": "MTN_1304",
+      "PSNR": 0.0,
+      "SSIM": 0.0,
+      "LPIPS": 7.450580596923828e-09,
+      "MSE": 0.0
+    }
+  ],
+  "train_views": 18,
+  "open_water_views": 8,
+  "eval_views": 3,
+  "diagnostic_seconds": 32.70253344811499,
+  "scope": "Training O masks and existing foreground protection regions; no updates; O metrics are in-sample diagnostics, not test segmentation truth."
+}

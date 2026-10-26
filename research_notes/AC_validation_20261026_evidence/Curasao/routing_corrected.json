@@ -1,0 +1,198 @@
+{
+  "scene": "Curasao",
+  "corrected": true,
+  "optimizer_updates": 0,
+  "model_unchanged": true,
+  "rows": [
+    {
+      "camera": "MTN_1289",
+      "empty_mask": true,
+      "variants": {
+        "off": {
+          "runtime_error": null,
+          "combination_relative_l2": 0.0,
+          "disabled_exact": true,
+          "parameter_routing_exact": true,
+          "densification_buffer_exact": true,
+          "densification_buffer_max_abs_delta": 0.0,
+          "densification_buffer_delta_l2": 0.0,
+          "densification_buffer_native_l2": 0.0010395180433988571,
+          "rng_exact": true,
+          "means_delta_l2": 0.0,
+          "C_medium_delta_l2": 0.0,
+          "C_opacity_delta_l2": 0.0
+        },
+        "A010": {
+          "runtime_error": null,
+          "combination_relative_l2": 0.0,
+          "disabled_exact": null,
+          "parameter_routing_exact": true,
+          "densification_buffer_exact": true,
+          "densification_buffer_max_abs_delta": 0.0,
+          "densification_buffer_delta_l2": 0.0,
+          "densification_buffer_native_l2": 0.0010395180433988571,
+          "rng_exact": true,
+          "means_delta_l2": 0.000879954022821039,
+          "C_medium_delta_l2": 0.0,
+          "C_opacity_delta_l2": 0.0
+        },
+        "C2": {
+          "runtime_error": null,
+          "combination_relative_l2": 0.0,
+          "disabled_exact": null,
+          "parameter_routing_exact": true,
+          "densification_buffer_exact": true,
+          "densification_buffer_max_abs_delta": 0.0,
+          "densification_buffer_delta_l2": 0.0,
+          "densification_buffer_native_l2": 0.0010395180433988571,
+          "rng_exact": true,
+          "means_delta_l2": 0.0,
+          "C_medium_delta_l2": 0.0,
+          "C_opacity_delta_l2": 0.0
+        },
+        "A010_C2": {
+          "runtime_error": null,
+          "combination_relative_l2": 3.203235044855539e-08,
+          "disabled_exact": null,
+          "parameter_routing_exact": true,
+          "densification_buffer_exact": true,
+          "densification_buffer_max_abs_delta": 0.0,
+          "densification_buffer_delta_l2": 0.0,
+          "densification_buffer_native_l2": 0.0010395180433988571,
+          "rng_exact": true,
+          "means_delta_l2": 0.000879954022821039,
+          "C_medium_delta_l2": 0.0,
+          "C_opacity_delta_l2": 0.0
+        }
+      },
+      "passed": true
+    },
+    {
+      "camera": "MTN_1293",
+      "empty_mask": false,
+      "variants": {
+        "off": {
+          "runtime_error": null,
+          "combination_relative_l2": 0.0,
+          "disabled_exact": true,
+          "parameter_routing_exact": true,
+          "densification_buffer_exact": true,
+          "densification_buffer_max_abs_delta": 0.0,
+          "densification_buffer_delta_l2": 0.0,
+          "densification_buffer_native_l2": 0.0014287445228546858,
+          "rng_exact": true,
+          "means_delta_l2": 0.0,
+          "C_medium_delta_l2": 0.0,
+          "C_opacity_delta_l2": 0.0
+        },
+        "A010": {
+          "runtime_error": null,
+          "combination_relative_l2": 0.0,
+          "disabled_exact": null,
+          "parameter_routing_exact": true,
+          "densification_buffer_exact": true,
+          "densification_buffer_max_abs_delta": 0.0,
+          "densification_buffer_delta_l2": 0.0,
+          "densification_buffer_native_l2": 0.0014287445228546858,
+          "rng_exact": true,
+          "means_delta_l2": 0.0020442302338778973,
+          "C_medium_delta_l2": 0.0,
+          "C_opacity_delta_l2": 0.0
+        },
+        "C2": {
+          "runtime_error": null,
+          "combination_relative_l2": 0.0,
+          "disabled_exact": null,
+          "parameter_routing_exact": true,
+          "densification_buffer_exact": true,
+          "densification_buffer_max_abs_delta": 0.0,
+          "densification_buffer_delta_l2": 0.0,
+          "densification_buffer_native_l2": 0.0014287445228546858,
+          "rng_exact": true,
+          "means_delta_l2": 0.0,
+          "C_medium_delta_l2": 0.012612041080376904,
+          "C_opacity_delta_l2": 5.654864286639427e-06
+        },
+        "A010_C2": {
+          "runtime_error": null,
+          "combination_relative_l2": 6.22274727439205e-08,
+          "disabled_exact": null,
+          "parameter_routing_exact": true,
+          "densification_buffer_exact": true,
+          "densification_buffer_max_abs_delta": 0.0,
+          "densification_buffer_delta_l2": 0.0,
+          "densification_buffer_native_l2": 0.0014287445228546858,
+          "rng_exact": true,
+          "means_delta_l2": 0.0020442302338778973,
+          "C_medium_delta_l2": 0.012612041080376904,
+          "C_opacity_delta_l2": 5.654864286639427e-06
+        }
+      },
+      "passed": true
+    },
+    {
+      "camera": "MTN_1302",
+      "empty_mask": false,
+      "variants": {
+        "off": {
+          "runtime_error": null,
+          "combination_relative_l2": 0.0,
+          "disabled_exact": true,
+          "parameter_routing_exact": true,
+          "densification_buffer_exact": true,
+          "densification_buffer_max_abs_delta": 0.0,
+          "densification_buffer_delta_l2": 0.0,
+          "densification_buffer_native_l2": 0.0017824076348915696,
+          "rng_exact": true,
+          "means_delta_l2": 0.0,
+          "C_medium_delta_l2": 0.0,
+          "C_opacity_delta_l2": 0.0
+        },
+        "A010": {
+          "runtime_error": null,
+          "combination_relative_l2": 0.0,
+          "disabled_exact": null,
+          "parameter_routing_exact": true,
+          "densification_buffer_exact": true,
+          "densification_buffer_max_abs_delta": 0.0,
+          "densification_buffer_delta_l2": 0.0,
+          "densification_buffer_native_l2": 0.0017824076348915696,
+          "rng_exact": true,
+          "means_delta_l2": 0.00218010600656271,
+          "C_medium_delta_l2": 0.0,
+          "C_opacity_delta_l2": 0.0
+        },
+        "C2": {
+          "runtime_error": null,
+          "combination_relative_l2": 0.0,
+          "disabled_exact": null,
+          "parameter_routing_exact": true,
+          "densification_buffer_exact": true,
+          "densification_buffer_max_abs_delta": 0.0,
+          "densification_buffer_delta_l2": 0.0,
+          "densification_buffer_native_l2": 0.0017824076348915696,
+          "rng_exact": true,
+          "means_delta_l2": 0.0,
+          "C_medium_delta_l2": 0.005711839474254465,
+          "C_opacity_delta_l2": 6.290319240284613e-06
+        },
+        "A010_C2": {
+          "runtime_error": null,
+          "combination_relative_l2": 5.436893448211331e-08,
+          "disabled_exact": null,
+          "parameter_routing_exact": true,
+          "densification_buffer_exact": true,
+          "densification_buffer_max_abs_delta": 0.0,
+          "densification_buffer_delta_l2": 0.0,
+          "densification_buffer_native_l2": 0.0017824076348915696,
+          "rng_exact": true,
+          "means_delta_l2": 0.00218010600656271,
+          "C_medium_delta_l2": 0.005711839474254465,
+          "C_opacity_delta_l2": 6.290319240284613e-06
+        }
+      },
+      "passed": true
+    }
+  ],
+  "passed": true
+}

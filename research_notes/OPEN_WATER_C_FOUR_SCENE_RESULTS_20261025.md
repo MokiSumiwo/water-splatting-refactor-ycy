@@ -1,5 +1,12 @@
 # C1/C2 四场景扩展结果
 
+> 2026-10-26 更正：组合前审计发现，历史 C2 的占据项反向传播会向 renderer 的
+> `xys_grad_abs` 累加额外统计，从而间接改变后续增密。下文的 checkpoint 和指标
+> 仍是真实测量，但 C2 不能解释为仅改变 medium/opacity 梯度的干净消融，
+> “占据项带来更稳定收益”的机制归因暂不成立。旧入口保留以复现历史结果；
+> 修正入口隔离该统计副作用，并重新进行四场景单模块检验。
+> 详见 [AC_VALIDATION_20261026.md](AC_VALIDATION_20261026.md)。
+
 评估日期：2026-10-25。C1/C2 在 IUI3-RedSea 的结果沿用已完成的
 `research_runs/C_open_water_20261024/formal/IUI3-RedSea/`；本轮新增
 Curasao、JapaneseGradens-RedSea、Panama 三个场景，每个场景各运行 C1、C2

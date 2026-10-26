@@ -1,0 +1,24 @@
+{
+  "arm": "C2",
+  "scene": "Curasao",
+  "mask_manifest_sha256": "c765f586990bd88882655771ccbcd8240ca5ca0aaa6cfd524231c2229037729d",
+  "mask_views": 18,
+  "nonempty_mask_views": 8,
+  "empty_mask_policy": "skip auxiliary gradients and retain all native updates",
+  "target": "native tied B_inf == medium_rgb, the existing no-Gaussian infinite-water output",
+  "C1_loss": "masked pixel-mean Charbonnier(B_inf - observed RGB), delta=0.01",
+  "C2_loss": "C1 plus masked mean -log(final_transmittance), floor=1e-4",
+  "C1_parameter_groups": [
+    "medium_mlp",
+    "direction_encoding"
+  ],
+  "C2_parameter_groups": [
+    "opacities"
+  ],
+  "per_group_gradient_cap_fraction": 0.05,
+  "formal_schedule": "every 4 steps; 0 through 500; ramp 501-2000; hold 2000-8000; decay 8001-10000; off thereafter",
+  "smoke_schedule": "steps 4,8,12,16 at full strength; smoke is not a formal initialization",
+  "smoke": false,
+  "unknown_outside_mask": true,
+  "forward_change": "none; uses existing renderer outputs and terminal transmittance"
+}

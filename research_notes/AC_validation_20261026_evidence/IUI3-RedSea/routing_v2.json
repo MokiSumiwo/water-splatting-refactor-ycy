@@ -1,0 +1,126 @@
+{
+  "scene": "IUI3-RedSea",
+  "optimizer_updates": 0,
+  "model_unchanged": true,
+  "rows": [
+    {
+      "camera": "MTN_5895",
+      "empty_mask": false,
+      "variants": {
+        "off": {
+          "runtime_error": null,
+          "disabled_exact": true,
+          "parameter_routing_exact": true,
+          "densification_buffer_exact": true,
+          "densification_buffer_max_abs_delta": 0.0,
+          "densification_buffer_delta_l2": 0.0,
+          "densification_buffer_native_l2": 0.001200780738145113,
+          "rng_exact": true,
+          "means_delta_l2": 0.0,
+          "C_medium_delta_l2": 0.0,
+          "C_opacity_delta_l2": 0.0
+        },
+        "A010": {
+          "runtime_error": null,
+          "disabled_exact": null,
+          "parameter_routing_exact": true,
+          "densification_buffer_exact": true,
+          "densification_buffer_max_abs_delta": 0.0,
+          "densification_buffer_delta_l2": 0.0,
+          "densification_buffer_native_l2": 0.001200780738145113,
+          "rng_exact": true,
+          "means_delta_l2": 0.0002569100179243833,
+          "C_medium_delta_l2": 0.0,
+          "C_opacity_delta_l2": 0.0
+        },
+        "C2": {
+          "runtime_error": null,
+          "disabled_exact": null,
+          "parameter_routing_exact": true,
+          "densification_buffer_exact": false,
+          "densification_buffer_max_abs_delta": 0.00016106273687910289,
+          "densification_buffer_delta_l2": 0.00019844631606247276,
+          "densification_buffer_native_l2": 0.001200780738145113,
+          "rng_exact": true,
+          "means_delta_l2": 0.0,
+          "C_medium_delta_l2": 0.016839788269225,
+          "C_opacity_delta_l2": 4.6464294604825375e-06
+        },
+        "A010_C2": {
+          "runtime_error": "one of the variables needed for gradient computation has been modified by an inplace operation: [torch.cuda.FloatTensor [753907, 2]] is at version 1; expected version 0 instead. Hint: enable anomaly detection to find the operation that failed to compute its gradient, with torch.autograd.set_detect_anomaly(True).",
+          "disabled_exact": null,
+          "parameter_routing_exact": true,
+          "densification_buffer_exact": true,
+          "densification_buffer_max_abs_delta": 0.0,
+          "densification_buffer_delta_l2": 0.0,
+          "densification_buffer_native_l2": 0.001200780738145113,
+          "rng_exact": true,
+          "means_delta_l2": 0.0002569100179243833,
+          "C_medium_delta_l2": 0,
+          "C_opacity_delta_l2": 0
+        }
+      },
+      "passed": false
+    },
+    {
+      "camera": "MTN_5909",
+      "empty_mask": false,
+      "variants": {
+        "off": {
+          "runtime_error": null,
+          "disabled_exact": true,
+          "parameter_routing_exact": true,
+          "densification_buffer_exact": true,
+          "densification_buffer_max_abs_delta": 0.0,
+          "densification_buffer_delta_l2": 0.0,
+          "densification_buffer_native_l2": 0.0011187876807525754,
+          "rng_exact": true,
+          "means_delta_l2": 0.0,
+          "C_medium_delta_l2": 0.0,
+          "C_opacity_delta_l2": 0.0
+        },
+        "A010": {
+          "runtime_error": null,
+          "disabled_exact": null,
+          "parameter_routing_exact": true,
+          "densification_buffer_exact": true,
+          "densification_buffer_max_abs_delta": 0.0,
+          "densification_buffer_delta_l2": 0.0,
+          "densification_buffer_native_l2": 0.0011187876807525754,
+          "rng_exact": true,
+          "means_delta_l2": 0.000957024225499481,
+          "C_medium_delta_l2": 0.0,
+          "C_opacity_delta_l2": 0.0
+        },
+        "C2": {
+          "runtime_error": null,
+          "disabled_exact": null,
+          "parameter_routing_exact": true,
+          "densification_buffer_exact": true,
+          "densification_buffer_max_abs_delta": 0.0,
+          "densification_buffer_delta_l2": 0.0,
+          "densification_buffer_native_l2": 0.0011187876807525754,
+          "rng_exact": true,
+          "means_delta_l2": 0.0,
+          "C_medium_delta_l2": 0.015678247975393106,
+          "C_opacity_delta_l2": 0.0
+        },
+        "A010_C2": {
+          "runtime_error": "one of the variables needed for gradient computation has been modified by an inplace operation: [torch.cuda.FloatTensor [753907, 2]] is at version 1; expected version 0 instead. Hint: enable anomaly detection to find the operation that failed to compute its gradient, with torch.autograd.set_detect_anomaly(True).",
+          "disabled_exact": null,
+          "parameter_routing_exact": true,
+          "densification_buffer_exact": true,
+          "densification_buffer_max_abs_delta": 0.0,
+          "densification_buffer_delta_l2": 0.0,
+          "densification_buffer_native_l2": 0.0011187876807525754,
+          "rng_exact": true,
+          "means_delta_l2": 0.000957024225499481,
+          "C_medium_delta_l2": 0,
+          "C_opacity_delta_l2": 0
+        }
+      },
+      "passed": false
+    }
+  ],
+  "passed": false
+}

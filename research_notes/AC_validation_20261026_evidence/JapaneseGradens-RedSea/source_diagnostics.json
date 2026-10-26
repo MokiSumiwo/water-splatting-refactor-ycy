@@ -1,0 +1,222 @@
+{
+  "complete": true,
+  "scene": "JapaneseGradens-RedSea",
+  "arm": "C2_corrected",
+  "step": 15000,
+  "checkpoint": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/AC_validation_20261026/formal_C2/JapaneseGradens-RedSea/C2/checkpoints/step-000015000.ckpt",
+  "checkpoint_sha256": "41f3acdfd786fa9140bd8753a26c662d6af35d0807f47e078c79cbf508ad367b",
+  "model_unchanged": true,
+  "mask_manifest_sha256": "56dac342553656e205258291ad5805fb51309508eb96763e1381aa3735da2e12",
+  "source_cameras": [
+    "MTN_1093",
+    "MTN_1099",
+    "MTN_1104"
+  ],
+  "contributions": [
+    {
+      "camera": "MTN_1094",
+      "label": "U",
+      "region": 0,
+      "box": [
+        0,
+        0,
+        461,
+        306
+      ],
+      "selected": 663,
+      "population": 771478,
+      "contribution_mass": 17473.80859375,
+      "coverage": 0.8000988960266113,
+      "remaining_occupancy": 0.18709714710712433,
+      "not_a_deletion_label": true
+    },
+    {
+      "camera": "MTN_1094",
+      "label": "U",
+      "region": 1,
+      "box": [
+        461,
+        0,
+        922,
+        306
+      ],
+      "selected": 1215,
+      "population": 771478,
+      "contribution_mass": 7497.73974609375,
+      "coverage": 0.800016462802887,
+      "remaining_occupancy": 0.09154155105352402,
+      "not_a_deletion_label": true
+    },
+    {
+      "camera": "MTN_1094",
+      "label": "U",
+      "region": 2,
+      "box": [
+        922,
+        0,
+        1384,
+        306
+      ],
+      "selected": 203,
+      "population": 771478,
+      "contribution_mass": 4704.0048828125,
+      "coverage": 0.8000285625457764,
+      "remaining_occupancy": 0.05047954246401787,
+      "not_a_deletion_label": true
+    },
+    {
+      "camera": "MTN_1093",
+      "label": "O",
+      "region": 0,
+      "box": [
+        1024,
+        18,
+        1342,
+        92
+      ],
+      "selected": 1,
+      "population": 771478,
+      "contribution_mass": 22.05811882019043,
+      "coverage": 0.8254595994949341,
+      "remaining_occupancy": 0.0009344641002826393,
+      "not_a_deletion_label": true
+    },
+    {
+      "camera": "MTN_1099",
+      "label": "O",
+      "region": 0,
+      "box": [
+        1024,
+        18,
+        1342,
+        92
+      ],
+      "selected": 1,
+      "population": 771478,
+      "contribution_mass": 226.54739379882812,
+      "coverage": 0.9724374413490295,
+      "remaining_occupancy": 0.001160340616479516,
+      "not_a_deletion_label": true
+    },
+    {
+      "camera": "MTN_1100",
+      "label": "U",
+      "region": 0,
+      "box": [
+        0,
+        0,
+        461,
+        306
+      ],
+      "selected": 65,
+      "population": 771478,
+      "contribution_mass": 25439.16015625,
+      "coverage": 0.8004962801933289,
+      "remaining_occupancy": 0.4385070502758026,
+      "not_a_deletion_label": true
+    },
+    {
+      "camera": "MTN_1100",
+      "label": "U",
+      "region": 1,
+      "box": [
+        461,
+        0,
+        922,
+        306
+      ],
+      "selected": 550,
+      "population": 771478,
+      "contribution_mass": 7333.7958984375,
+      "coverage": 0.800193190574646,
+      "remaining_occupancy": 0.07816193997859955,
+      "not_a_deletion_label": true
+    },
+    {
+      "camera": "MTN_1100",
+      "label": "U",
+      "region": 2,
+      "box": [
+        922,
+        0,
+        1384,
+        306
+      ],
+      "selected": 357,
+      "population": 771478,
+      "contribution_mass": 5625.66796875,
+      "coverage": 0.8003129363059998,
+      "remaining_occupancy": 0.07078414410352707,
+      "not_a_deletion_label": true
+    },
+    {
+      "camera": "MTN_1104",
+      "label": "O",
+      "region": 0,
+      "box": [
+        1024,
+        18,
+        1342,
+        92
+      ],
+      "selected": 1,
+      "population": 771478,
+      "contribution_mass": 89.93526458740234,
+      "coverage": 0.8304673433303833,
+      "remaining_occupancy": 0.0042832945473492146,
+      "not_a_deletion_label": true
+    },
+    {
+      "camera": "MTN_1105",
+      "label": "U",
+      "region": 0,
+      "box": [
+        0,
+        0,
+        461,
+        306
+      ],
+      "selected": 6280,
+      "population": 771478,
+      "contribution_mass": 32398.103515625,
+      "coverage": 0.8000051379203796,
+      "remaining_occupancy": 0.402996301651001,
+      "not_a_deletion_label": true
+    },
+    {
+      "camera": "MTN_1105",
+      "label": "U",
+      "region": 1,
+      "box": [
+        461,
+        0,
+        922,
+        306
+      ],
+      "selected": 9627,
+      "population": 771478,
+      "contribution_mass": 24283.857421875,
+      "coverage": 0.8000100255012512,
+      "remaining_occupancy": 0.44171279668807983,
+      "not_a_deletion_label": true
+    },
+    {
+      "camera": "MTN_1105",
+      "label": "U",
+      "region": 2,
+      "box": [
+        922,
+        0,
+        1384,
+        306
+      ],
+      "selected": 9007,
+      "population": 771478,
+      "contribution_mass": 25394.1484375,
+      "coverage": 0.8000138401985168,
+      "remaining_occupancy": 0.37513577938079834,
+      "not_a_deletion_label": true
+    }
+  ],
+  "scope": "Frozen training masks; O in-sample for C. U remains unknown. No updates or test-based selection."
+}

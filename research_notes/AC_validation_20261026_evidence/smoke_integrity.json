@@ -1,0 +1,90 @@
+{
+  "Curasao": {
+    "routing_passed": true,
+    "completed_updates": 20,
+    "camera_prefix_exact": true,
+    "optimizer_records": 80,
+    "optimizer_all_finite": true,
+    "reload": true,
+    "forward_finite": true,
+    "cap_passed": true,
+    "initial_keys_equal": {
+      "model_hash": true
+    },
+    "checkpoint_hashes": [
+      {
+        "sha256": "aceb8e3bef4f6fed114dcaded95f77e57c7013e1a2a5660120004818b9df3930",
+        "verified": true
+      }
+    ],
+    "full_planned_camera_sequence_exact": true,
+    "initial_rng_exact": true,
+    "initial_forward_exact": true
+  },
+  "IUI3-RedSea": {
+    "routing_passed": true,
+    "completed_updates": 20,
+    "camera_prefix_exact": true,
+    "optimizer_records": 80,
+    "optimizer_all_finite": true,
+    "reload": true,
+    "forward_finite": true,
+    "cap_passed": true,
+    "initial_keys_equal": {
+      "model_hash": true
+    },
+    "checkpoint_hashes": [
+      {
+        "sha256": "82923c32ee75729e9f14246c92ffbabed2a4534f37d825a691bee5b070ce6ffc",
+        "verified": true
+      }
+    ],
+    "full_planned_camera_sequence_exact": true,
+    "initial_rng_exact": true,
+    "initial_forward_exact": true
+  },
+  "JapaneseGradens-RedSea": {
+    "routing_passed": true,
+    "completed_updates": 20,
+    "camera_prefix_exact": true,
+    "optimizer_records": 80,
+    "optimizer_all_finite": true,
+    "reload": true,
+    "forward_finite": true,
+    "cap_passed": true,
+    "initial_keys_equal": {
+      "model_hash": true
+    },
+    "checkpoint_hashes": [
+      {
+        "sha256": "669e4e772c5ffdb4c4bf7275a8b35f8565d3b751a903c9f14990f678f3f6d58f",
+        "verified": true
+      }
+    ],
+    "full_planned_camera_sequence_exact": true,
+    "initial_rng_exact": true,
+    "initial_forward_exact": true
+  },
+  "Panama": {
+    "routing_passed": true,
+    "completed_updates": 20,
+    "camera_prefix_exact": true,
+    "optimizer_records": 80,
+    "optimizer_all_finite": true,
+    "reload": true,
+    "forward_finite": true,
+    "cap_passed": true,
+    "initial_keys_equal": {
+      "model_hash": true
+    },
+    "checkpoint_hashes": [
+      {
+        "sha256": "af70bbc0508d0fb8ce0bc020651bf10a8a5bb5e5095037ca84f054093f6c5832",
+        "verified": true
+      }
+    ],
+    "full_planned_camera_sequence_exact": true,
+    "initial_rng_exact": true,
+    "initial_forward_exact": true
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "complete": true,
+  "scene": "IUI3-RedSea",
+  "arm": "C2",
+  "checkpoint_sha256": "94f2afaf99d331f24fa64444b101044476ea454a1b0e106adcb92be812243fcc",
+  "model_hash_match": true,
+  "model_hash": "4bd5453285d8ede1cbb6a6afcc1f5200b78c8fc1abec057082ee55a5160075e3",
+  "metric_max_abs_errors": [
+    {
+      "view_id": "MTN_5903",
+      "PSNR": 0.0,
+      "SSIM": 0.0,
+      "LPIPS": 0.0,
+      "MSE": 0.0
+    },
+    {
+      "view_id": "MTN_5894",
+      "PSNR": 0.0,
+      "SSIM": 0.0,
+      "LPIPS": 0.0,
+      "MSE": 0.0
+    },
+    {
+      "view_id": "MTN_5911",
+      "PSNR": 0.0,
+      "SSIM": 0.0,
+      "LPIPS": 0.0,
+      "MSE": 0.0
+    },
+    {
+      "view_id": "MTN_5928",
+      "PSNR": 0.0,
+      "SSIM": 0.0,
+      "LPIPS": 0.0,
+      "MSE": 0.0
+    }
+  ],
+  "train_views": 25,
+  "open_water_views": 25,
+  "eval_views": 4,
+  "diagnostic_seconds": 24.833549676463008,
+  "scope": "Training O masks and existing foreground protection regions; no updates; O metrics are in-sample diagnostics, not test segmentation truth."
+}

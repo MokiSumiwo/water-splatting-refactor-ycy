@@ -1,0 +1,347 @@
+{
+  "Curasao": {
+    "O": {
+      "B0": {
+        "regions": 8,
+        "cameras": 8,
+        "occupancy_mean": 0.5595874097198248,
+        "occupancy_gt_0p01": 1.0,
+        "clear_mean": 0.32479369454085827,
+        "clear_edge_proxy": 0.0013951016735518351,
+        "underwater_MSE": 4.282756276552391e-05,
+        "medium_only_MSE": 4.237531697981467e-05
+      },
+      "C2_corrected": {
+        "regions": 8,
+        "cameras": 8,
+        "occupancy_mean": 0.014494000239210436,
+        "occupancy_gt_0p01": 0.1969999959692359,
+        "clear_mean": 0.011003953728504712,
+        "clear_edge_proxy": 0.0001465977445604949,
+        "underwater_MSE": 3.2288955935655395e-05,
+        "medium_only_MSE": 3.173629079356033e-05
+      },
+      "relative_change": {
+        "occupancy_mean": -0.9740987735115997,
+        "occupancy_gt_0p01": -0.8030000040307641,
+        "clear_edge_proxy": -0.894919669770543,
+        "underwater_MSE": -0.2460706645289671
+      }
+    },
+    "U": {
+      "B0": {
+        "regions": 9,
+        "cameras": 3,
+        "occupancy_mean": 0.9257164001464844,
+        "occupancy_gt_0p01": 1.0,
+        "clear_mean": 0.3687903996970918,
+        "clear_edge_proxy": 0.014076985134225752,
+        "underwater_MSE": 0.0003649151504861139,
+        "medium_only_MSE": 0.0023911543442712477
+      },
+      "C2_corrected": {
+        "regions": 9,
+        "cameras": 3,
+        "occupancy_mean": 0.7209526557061408,
+        "occupancy_gt_0p01": 0.8869506054454379,
+        "clear_mean": 0.22388671504126656,
+        "clear_edge_proxy": 0.013588679385268025,
+        "underwater_MSE": 0.00040626139848932833,
+        "medium_only_MSE": 0.0016069099882669332
+      },
+      "relative_change": {
+        "occupancy_mean": -0.22119489771159073,
+        "occupancy_gt_0p01": -0.11304939455456209,
+        "clear_edge_proxy": -0.03468823361690543,
+        "underwater_MSE": 0.1133037308758924
+      }
+    },
+    "P": {
+      "B0": {
+        "regions": 6,
+        "cameras": 3,
+        "occupancy_mean": 0.9935498336950938,
+        "occupancy_gt_0p01": 1.0,
+        "clear_mean": 0.229275551935037,
+        "clear_edge_proxy": 0.01983216529091199,
+        "underwater_MSE": 0.0011822664055216592,
+        "medium_only_MSE": 0.00985556091958036
+      },
+      "C2_corrected": {
+        "regions": 6,
+        "cameras": 3,
+        "occupancy_mean": 0.9940518438816071,
+        "occupancy_gt_0p01": 1.0,
+        "clear_mean": 0.22981557250022888,
+        "clear_edge_proxy": 0.01981641010691722,
+        "underwater_MSE": 0.0012069366894138511,
+        "medium_only_MSE": 0.00865197996608913
+      },
+      "relative_change": {
+        "occupancy_mean": 0.0005052692572513617,
+        "occupancy_gt_0p01": 0.0,
+        "clear_edge_proxy": -0.0007944258109824354,
+        "underwater_MSE": 0.02086694147526469
+      }
+    }
+  },
+  "IUI3-RedSea": {
+    "O": {
+      "B0": {
+        "regions": 25,
+        "cameras": 25,
+        "occupancy_mean": 0.08156174203453702,
+        "occupancy_gt_0p01": 0.3423505252599716,
+        "clear_mean": 0.008586415610188282,
+        "clear_edge_proxy": 6.92745413041962e-05,
+        "underwater_MSE": 7.744656410068274e-05,
+        "medium_only_MSE": 7.692342784139328e-05
+      },
+      "C2_corrected": {
+        "regions": 25,
+        "cameras": 25,
+        "occupancy_mean": 0.3266500315302983,
+        "occupancy_gt_0p01": 0.7842450794577599,
+        "clear_mean": 0.03165159074502299,
+        "clear_edge_proxy": 0.00019633791653177467,
+        "underwater_MSE": 7.645894831512123e-05,
+        "medium_only_MSE": 7.334655267186462e-05
+      },
+      "relative_change": {
+        "occupancy_mean": 3.004941819314987,
+        "occupancy_gt_0p01": 1.290766397575192,
+        "clear_edge_proxy": 1.8342001669794068,
+        "underwater_MSE": -0.012752222090544607
+      }
+    },
+    "U": {
+      "B0": {
+        "regions": 9,
+        "cameras": 3,
+        "occupancy_mean": 0.4357991839513286,
+        "occupancy_gt_0p01": 0.7095187850710418,
+        "clear_mean": 0.09338105102910453,
+        "clear_edge_proxy": 0.00452193254454869,
+        "underwater_MSE": 0.00010543175206597273,
+        "medium_only_MSE": 0.0011465724851910232
+      },
+      "C2_corrected": {
+        "regions": 9,
+        "cameras": 3,
+        "occupancy_mean": 0.6780279278755188,
+        "occupancy_gt_0p01": 0.9292952285872565,
+        "clear_mean": 0.1423163509203328,
+        "clear_edge_proxy": 0.004654432967072353,
+        "underwater_MSE": 0.00010796294372994453,
+        "medium_only_MSE": 0.0016180613319092016
+      },
+      "relative_change": {
+        "occupancy_mean": 0.5558265202057906,
+        "occupancy_gt_0p01": 0.3097542279930041,
+        "clear_edge_proxy": 0.029301724698081788,
+        "underwater_MSE": 0.02400786873377503
+      }
+    },
+    "P": {
+      "B0": {
+        "regions": 6,
+        "cameras": 3,
+        "occupancy_mean": 0.9447311560312907,
+        "occupancy_gt_0p01": 1.0,
+        "clear_mean": 0.38383281975984573,
+        "clear_edge_proxy": 0.028363104288776714,
+        "underwater_MSE": 0.0006154490923411989,
+        "medium_only_MSE": 0.06492720884853043
+      },
+      "C2_corrected": {
+        "regions": 6,
+        "cameras": 3,
+        "occupancy_mean": 0.9459577004114786,
+        "occupancy_gt_0p01": 1.0,
+        "clear_mean": 0.3829484321177006,
+        "clear_edge_proxy": 0.028548401469985645,
+        "underwater_MSE": 0.0005926746780460235,
+        "medium_only_MSE": 0.06740663297629605
+      },
+      "relative_change": {
+        "occupancy_mean": 0.0012982999156507802,
+        "occupancy_gt_0p01": 0.0,
+        "clear_edge_proxy": 0.006533035993604219,
+        "underwater_MSE": -0.03700454607633019
+      }
+    }
+  },
+  "JapaneseGradens-RedSea": {
+    "O": {
+      "B0": {
+        "regions": 11,
+        "cameras": 11,
+        "occupancy_mean": 0.07177500536834652,
+        "occupancy_gt_0p01": 0.7837335575710643,
+        "clear_mean": 0.015466647243804553,
+        "clear_edge_proxy": 0.00016520990505920383,
+        "underwater_MSE": 5.6634015643133104e-05,
+        "medium_only_MSE": 5.850736182434378e-05
+      },
+      "C2_corrected": {
+        "regions": 11,
+        "cameras": 11,
+        "occupancy_mean": 0.024276192575185138,
+        "occupancy_gt_0p01": 0.4337806877764789,
+        "clear_mean": 0.005850110303568231,
+        "clear_edge_proxy": 9.212347586898514e-05,
+        "underwater_MSE": 5.846705508619462e-05,
+        "medium_only_MSE": 5.902812823809324e-05
+      },
+      "relative_change": {
+        "occupancy_mean": -0.6617737267924862,
+        "occupancy_gt_0p01": -0.4465202062792287,
+        "clear_edge_proxy": -0.4423852744423997,
+        "underwater_MSE": 0.0323664042227203
+      }
+    },
+    "U": {
+      "B0": {
+        "regions": 9,
+        "cameras": 3,
+        "occupancy_mean": 0.5920318282312818,
+        "occupancy_gt_0p01": 0.9638893273141649,
+        "clear_mean": 0.147558457735512,
+        "clear_edge_proxy": 0.004404404601599608,
+        "underwater_MSE": 0.0001377673482541771,
+        "medium_only_MSE": 0.0008697484194676185
+      },
+      "C2_corrected": {
+        "regions": 9,
+        "cameras": 3,
+        "occupancy_mean": 0.49908318122227985,
+        "occupancy_gt_0p01": 0.8870107001728482,
+        "clear_mean": 0.11820577457547188,
+        "clear_edge_proxy": 0.004138795348505179,
+        "underwater_MSE": 0.00014803363956161775,
+        "medium_only_MSE": 0.0008164291616089435
+      },
+      "relative_change": {
+        "occupancy_mean": -0.15699940877619645,
+        "occupancy_gt_0p01": -0.07975876997781017,
+        "clear_edge_proxy": -0.06030537090029453,
+        "underwater_MSE": 0.07451904560505596
+      }
+    },
+    "P": {
+      "B0": {
+        "regions": 6,
+        "cameras": 3,
+        "occupancy_mean": 0.9970528880755106,
+        "occupancy_gt_0p01": 1.0,
+        "clear_mean": 0.30217066407203674,
+        "clear_edge_proxy": 0.026223538753887016,
+        "underwater_MSE": 0.0012567444355227053,
+        "medium_only_MSE": 0.03749576956033707
+      },
+      "C2_corrected": {
+        "regions": 6,
+        "cameras": 3,
+        "occupancy_mean": 0.9963888029257456,
+        "occupancy_gt_0p01": 1.0,
+        "clear_mean": 0.30244144797325134,
+        "clear_edge_proxy": 0.02648855932056904,
+        "underwater_MSE": 0.0012554964826752741,
+        "medium_only_MSE": 0.035371159513791404
+      },
+      "relative_change": {
+        "occupancy_mean": -0.0006660480679684389,
+        "occupancy_gt_0p01": 0.0,
+        "clear_edge_proxy": 0.010106209126437449,
+        "underwater_MSE": -0.00099300447422479
+      }
+    }
+  },
+  "Panama": {
+    "O": {
+      "B0": {
+        "regions": 3,
+        "cameras": 3,
+        "occupancy_mean": 0.842078427473704,
+        "occupancy_gt_0p01": 0.9999999403953552,
+        "clear_mean": 0.49337755640347797,
+        "clear_edge_proxy": 0.0033115224602321782,
+        "underwater_MSE": 2.732537359406706e-05,
+        "medium_only_MSE": 0.000349124178076939
+      },
+      "C2_corrected": {
+        "regions": 3,
+        "cameras": 3,
+        "occupancy_mean": 0.8037054141362509,
+        "occupancy_gt_0p01": 0.9999999403953552,
+        "clear_mean": 0.4462082286675771,
+        "clear_edge_proxy": 0.0015481304726563394,
+        "underwater_MSE": 2.7256861964512307e-05,
+        "medium_only_MSE": 0.00032630644030480954
+      },
+      "relative_change": {
+        "occupancy_mean": -0.04556940551555866,
+        "occupancy_gt_0p01": 0.0,
+        "clear_edge_proxy": -0.5325018956544246,
+        "underwater_MSE": -0.0025072531696191946
+      }
+    },
+    "U": {
+      "B0": {
+        "regions": 9,
+        "cameras": 3,
+        "occupancy_mean": 0.9565407037734985,
+        "occupancy_gt_0p01": 0.999999980131785,
+        "clear_mean": 0.3560296528869205,
+        "clear_edge_proxy": 0.011426292515049377,
+        "underwater_MSE": 7.126551483654314e-05,
+        "medium_only_MSE": 0.004798100368740658
+      },
+      "C2_corrected": {
+        "regions": 9,
+        "cameras": 3,
+        "occupancy_mean": 0.9553790291150411,
+        "occupancy_gt_0p01": 0.999999980131785,
+        "clear_mean": 0.356865084833569,
+        "clear_edge_proxy": 0.011226032446655963,
+        "underwater_MSE": 7.070859970149791e-05,
+        "medium_only_MSE": 0.005565687923485206
+      },
+      "relative_change": {
+        "occupancy_mean": -0.001214453973442664,
+        "occupancy_gt_0p01": 0.0,
+        "clear_edge_proxy": -0.017526250805294574,
+        "underwater_MSE": -0.007814651115937155
+      }
+    },
+    "P": {
+      "B0": {
+        "regions": 6,
+        "cameras": 3,
+        "occupancy_mean": 0.9751175940036774,
+        "occupancy_gt_0p01": 1.0,
+        "clear_mean": 0.2785531133413315,
+        "clear_edge_proxy": 0.019521612984438736,
+        "underwater_MSE": 0.00012899906020417498,
+        "medium_only_MSE": 0.020898935695489246
+      },
+      "C2_corrected": {
+        "regions": 6,
+        "cameras": 3,
+        "occupancy_mean": 0.9854269524415334,
+        "occupancy_gt_0p01": 1.0,
+        "clear_mean": 0.2803837110598882,
+        "clear_edge_proxy": 0.0190653574342529,
+        "underwater_MSE": 0.00015609270121785812,
+        "medium_only_MSE": 0.023783463674287002
+      },
+      "relative_change": {
+        "occupancy_mean": 0.01057242582971707,
+        "occupancy_gt_0p01": 0.0,
+        "clear_edge_proxy": -0.023371816178792804,
+        "underwater_MSE": 0.21002975502922516
+      }
+    }
+  },
+  "scope": "Frozen train-camera diagnostics only; all C2 O regions were also used for training supervision, not independent validation."
+}

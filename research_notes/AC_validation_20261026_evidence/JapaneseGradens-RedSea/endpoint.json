@@ -1,0 +1,36 @@
+{
+  "complete": true,
+  "scene": "JapaneseGradens-RedSea",
+  "arm": "C2",
+  "checkpoint_sha256": "41f3acdfd786fa9140bd8753a26c662d6af35d0807f47e078c79cbf508ad367b",
+  "model_hash_match": true,
+  "model_hash": "e55f7c98b457508190f744c7b7ebdfd69e274d51c7074f1fb428568814c8ef96",
+  "metric_max_abs_errors": [
+    {
+      "view_id": "MTN_1090",
+      "PSNR": 0.0,
+      "SSIM": 0.0,
+      "LPIPS": 0.0,
+      "MSE": 0.0
+    },
+    {
+      "view_id": "MTN_1098",
+      "PSNR": 0.0,
+      "SSIM": 0.0,
+      "LPIPS": 0.0,
+      "MSE": 0.0
+    },
+    {
+      "view_id": "MTN_1106",
+      "PSNR": 0.0,
+      "SSIM": 0.0,
+      "LPIPS": 0.0,
+      "MSE": 0.0
+    }
+  ],
+  "train_views": 17,
+  "open_water_views": 11,
+  "eval_views": 3,
+  "diagnostic_seconds": 20.95273805782199,
+  "scope": "Training O masks and existing foreground protection regions; no updates; O metrics are in-sample diagnostics, not test segmentation truth."
+}

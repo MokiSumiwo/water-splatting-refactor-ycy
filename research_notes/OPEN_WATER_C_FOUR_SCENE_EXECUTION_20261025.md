@@ -1,5 +1,10 @@
 # C1/C2 四场景扩展：冻结执行方案
 
+> 2026-10-26 实施更正：下文是原先冻结的设计。后续审计发现历史 C2 的额外
+> backward 改写了增密统计，实际执行未满足“densification 保持一致”的干净
+> 消融要求。原始设计与运行记录保留，修正后的四场景结果和组合判断见
+> [AC_VALIDATION_20261026.md](AC_VALIDATION_20261026.md)。
+
 2026-10-25（Asia/Shanghai）。用户要求在其余场景尝试 C1/C2，并最终给出四场景平均指标。
 沿用 IUI3 已完成的 C1/C2 15k 结果，在 Curasao、JapaneseGradens-RedSea、Panama 各增加两条 raw 初始化、seed42、15k 训练，共新增 90,000 正式更新。独立作用于 B0，A 和 B 表面支持模块不叠加。
 

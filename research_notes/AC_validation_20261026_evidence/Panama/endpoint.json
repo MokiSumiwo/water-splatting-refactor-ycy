@@ -1,0 +1,36 @@
+{
+  "complete": true,
+  "scene": "Panama",
+  "arm": "C2",
+  "checkpoint_sha256": "71228534506d614c560039b700a01dcc2a7f5a042735c04b0df2a64590cbc74a",
+  "model_hash_match": true,
+  "model_hash": "78a925f769d0d17869f33f0dc5e760cae4ff664d37c46c3c437a4b3bc46cdff5",
+  "metric_max_abs_errors": [
+    {
+      "view_id": "MTN_1539",
+      "PSNR": 0.0,
+      "SSIM": 0.0,
+      "LPIPS": 0.0,
+      "MSE": 0.0
+    },
+    {
+      "view_id": "MTN_1529",
+      "PSNR": 0.0,
+      "SSIM": 0.0,
+      "LPIPS": 0.0,
+      "MSE": 0.0
+    },
+    {
+      "view_id": "MTN_1547",
+      "PSNR": 0.0,
+      "SSIM": 0.0,
+      "LPIPS": 0.0,
+      "MSE": 0.0
+    }
+  ],
+  "train_views": 15,
+  "open_water_views": 3,
+  "eval_views": 3,
+  "diagnostic_seconds": 32.2784882299602,
+  "scope": "Training O masks and existing foreground protection regions; no updates; O metrics are in-sample diagnostics, not test segmentation truth."
+}

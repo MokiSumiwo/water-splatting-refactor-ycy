@@ -1,0 +1,13 @@
+{
+  "scene": "IUI3-RedSea",
+  "arm": "C2",
+  "seed": 42,
+  "smoke": false,
+  "A_eta": 0.1,
+  "C_gradient_cap": 0.05,
+  "independent_hooks": true,
+  "auxiliary_densification_isolation": true,
+  "historical_C2_is_not_a_clean_control": true,
+  "gate_decision": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/AC_validation_20261026/corrected_C2_decision.json",
+  "gate_decision_sha256": "3af0fe3e43c2b593035759584b933ce26897e4f60c64210c7ece492f4e4fa703"
+}

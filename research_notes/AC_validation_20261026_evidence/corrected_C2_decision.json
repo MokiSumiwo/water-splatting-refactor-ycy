@@ -1,0 +1,68 @@
+{
+  "created": "2026-10-26",
+  "purpose": "Rerun corrected isolated C2 as a single-module prerequisite; prior historical C2 auxiliary opacity VJP modified renderer densification statistics and is not a clean standalone control.",
+  "launch_formal": true,
+  "allowed_arms": [
+    "C2"
+  ],
+  "scenes": [
+    "Curasao",
+    "IUI3-RedSea",
+    "JapaneseGradens-RedSea",
+    "Panama"
+  ],
+  "seed": 42,
+  "steps": 15000,
+  "criterion": "Preserve original C2 mask/schedule/loss/cap/data/seed and isolate only renderer densification scratch side effects. Compare corrected C2 against paired raw B0; combination remains gated on corrected C2 and A010 evidence.",
+  "code_sha256": {
+    "scripts/experiments/run_AC_pair_worker.py": "46455cea0a1178a8d6bd77917877c9917f8b2ee57478ff03c4670fff58d45c3b",
+    "water_splatting/auxiliary_gradient_isolation.py": "dca16ee37a854135b772fed8ef71c3e90d51e5b8308e53ad379921396569c118",
+    "water_splatting/open_water_C.py": "cedce4bb4f120ed273d5402514069a29045bc07b35ab858c30848dccb94dec3a",
+    "water_splatting/geometry_gradient.py": "a837d9f6a5c551a4cb10a2b23711d24a037f983259a5a230a85f89d2503166b1",
+    "scripts/experiments/run_direct_mdrr_cica_scene.py": "fb6aed8ae3acbeafc6780369bf05676fefdbd3faad4985ab3bb535e3ea04121d",
+    "scripts/experiments/geometry_projection_backend.py": "815b49845f44cc369249363d8a7b8ad9516b60b66dd25a038d0e077a5dd6ef2e"
+  },
+  "git_head": "29c1f4b303eabdc569beb411c4791f70fe2736a1",
+  "commands": [
+    {
+      "scene": "Curasao",
+      "gpu": 1,
+      "arm": "C2",
+      "output": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/AC_validation_20261026/formal_C2/Curasao/C2",
+      "mask_dir": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/C_four_scene_20261025/assets/Curasao/masks",
+      "source_config": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/bnd_on_baseline_scratch15k_20261021_v2/Curasao/source_config.yml",
+      "max_step": 15000,
+      "seed": 42
+    },
+    {
+      "scene": "IUI3-RedSea",
+      "gpu": 2,
+      "arm": "C2",
+      "output": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/AC_validation_20261026/formal_C2/IUI3-RedSea/C2",
+      "mask_dir": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/C_open_water_20261024/assets/IUI3-RedSea/masks",
+      "source_config": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/bnd_on_baseline_scratch15k_20261021_v2/IUI3-RedSea/source_config.yml",
+      "max_step": 15000,
+      "seed": 42
+    },
+    {
+      "scene": "JapaneseGradens-RedSea",
+      "gpu": 3,
+      "arm": "C2",
+      "output": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/AC_validation_20261026/formal_C2/JapaneseGradens-RedSea/C2",
+      "mask_dir": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/C_four_scene_20261025/assets/JapaneseGradens-RedSea/masks",
+      "source_config": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/bnd_on_baseline_scratch15k_20261021_v2/JapaneseGradens-RedSea/source_config.yml",
+      "max_step": 15000,
+      "seed": 42
+    },
+    {
+      "scene": "Panama",
+      "gpu": 4,
+      "arm": "C2",
+      "output": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/AC_validation_20261026/formal_C2/Panama/C2",
+      "mask_dir": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/C_four_scene_20261025/assets/Panama/masks",
+      "source_config": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/bnd_on_baseline_scratch15k_20261021_v2/Panama/source_config.yml",
+      "max_step": 15000,
+      "seed": 42
+    }
+  ]
+}
