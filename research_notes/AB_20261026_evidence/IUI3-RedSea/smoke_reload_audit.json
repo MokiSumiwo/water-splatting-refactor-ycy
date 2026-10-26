@@ -1,0 +1,17 @@
+{
+  "absolute_step": 20,
+  "arm": "B",
+  "checkpoint": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/AB_validation_20261026/smoke_final/IUI3-RedSea/AB/checkpoints/step-000000020.ckpt",
+  "checkpoint_model_hash": "0cc0b4069e18ffec91dd36acf9706b19cad3c97375fd23bc46930a998f450978",
+  "forward_finite": true,
+  "forward_probe_camera_index": 0,
+  "model_hash_match": true,
+  "reloaded_model_hash": "0cc0b4069e18ffec91dd36acf9706b19cad3c97375fd23bc46930a998f450978",
+  "scene": "IUI3-RedSea",
+  "tensor_sha256": {
+    "pred_image": "b8b818dd8785ef9e01d800787074fe27a2945c2129e21c97a1cf086cb334b411",
+    "rgb_medium_finite": "d82d1e5e91a721d2e4b73f1fa9aa240300edd5a944e00b4cb68fd68a16c15040",
+    "rgb_object": "6b0faa7fc0cd52cb514c4d58932d2aa7f35f5853b1c87620b53d9dd5cab82142",
+    "rgb_tail": "faf795ee3bf797267a200d0877014744aa3759ae4bcb3808323ff49c3ec2da88"
+  }
+}

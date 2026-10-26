@@ -1,0 +1,17 @@
+{
+  "absolute_step": 20,
+  "arm": "B",
+  "checkpoint": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/AB_validation_20261026/smoke_final/Panama/AB/checkpoints/step-000000020.ckpt",
+  "checkpoint_model_hash": "90866ffe2bac5a1bcba87bcbc1175fe0411583c1586e4af75688e3f1ad3c36e3",
+  "forward_finite": true,
+  "forward_probe_camera_index": 0,
+  "model_hash_match": true,
+  "reloaded_model_hash": "90866ffe2bac5a1bcba87bcbc1175fe0411583c1586e4af75688e3f1ad3c36e3",
+  "scene": "Panama",
+  "tensor_sha256": {
+    "pred_image": "d47903f0aea7c5cc8eb301ed085764960075e0541cc3345519f4e968ad57f6fd",
+    "rgb_medium_finite": "23bf34f08d72db2ded5011e8d939c7f9316a0d83d0eb4151a141a9d80b15a7e5",
+    "rgb_object": "581046025ebece318f4146dcc1a2302b969a66cefc1f01908dfe2f4c786032db",
+    "rgb_tail": "59c3ac8dcfe8f65069349598d1dff3a5e335f8767d90c65c04e95d386ecc3ff7"
+  }
+}

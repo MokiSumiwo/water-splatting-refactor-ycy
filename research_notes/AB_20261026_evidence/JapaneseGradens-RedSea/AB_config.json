@@ -1,0 +1,13 @@
+{
+  "scene": "JapaneseGradens-RedSea",
+  "arm": "AB",
+  "seed": 42,
+  "smoke": false,
+  "updates": 15000,
+  "A_eta_max": 0.1,
+  "B_native_gradient_cap": 0.05,
+  "B": "center-to-supported-plane Huber",
+  "formula": "g_native + delta_A(g_native) + delta_B(g_native)",
+  "auxiliary_densification_isolation": true,
+  "support": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/surface_support_B_20261023/support/JapaneseGradens-RedSea"
+}

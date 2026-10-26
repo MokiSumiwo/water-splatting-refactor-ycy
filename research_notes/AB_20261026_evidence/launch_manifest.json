@@ -1,0 +1,59 @@
+{
+  "status": "TRAINING",
+  "experiment": "A(0.1)+B center-to-supported-plane",
+  "seed": 42,
+  "updates_per_scene": 15000,
+  "total_formal_updates": 60000,
+  "renderer": "corrected_v1",
+  "source": "fresh raw COLMAP plus random medium initialization",
+  "schedule": "A eta max .10; B every fourth update; both active 501-9999 with registered schedules",
+  "B_support_scope": "frozen support assets from the registered B run; no O/F residual labels",
+  "code_sha256": {
+    "scripts/experiments/run_AB_worker.py": "43c5c6cf2353f3ba45fa1bf4d124dce6f3d08639f838754cf99841a29f8e64bc",
+    "scripts/experiments/run_AB_campaign.py": "adfe121f1dd79b32718314643549e4ea266cf1d6476a322ba1a7f9f8acbd9e75",
+    "scripts/experiments/run_direct_mdrr_cica_scene.py": "fb6aed8ae3acbeafc6780369bf05676fefdbd3faad4985ab3bb535e3ea04121d",
+    "scripts/experiments/run_geometry_gradient_A_worker.py": "6e6e22b403282fc7f43bfe71bafc51eec4ca3c6a7eb0e780e230ef984f09b97f",
+    "scripts/experiments/run_AC_pair_worker.py": "46455cea0a1178a8d6bd77917877c9917f8b2ee57478ff03c4670fff58d45c3b",
+    "scripts/experiments/geometry_projection_backend.py": "815b49845f44cc369249363d8a7b8ad9516b60b66dd25a038d0e077a5dd6ef2e",
+    "scripts/experiments/export_geometry_gradient_A.py": "81518bf845448f608b8dfb7acb83dcacd53db85aa67f42bcb027e3e8df3b0e2b",
+    "scripts/experiments/audit_AB_pair.py": "de5a0c33a9c1894fd7f80ce89479a8ede628d8b2285e9eddaede18ab03a302df",
+    "scripts/experiments/summarize_AB_campaign.py": "38c03cf969adb48b300c53723bb64fbc6a4ea240c332bdadc2b1648dc285966c",
+    "water_splatting/auxiliary_gradient_isolation.py": "dca16ee37a854135b772fed8ef71c3e90d51e5b8308e53ad379921396569c118",
+    "water_splatting/geometry_gradient.py": "a837d9f6a5c551a4cb10a2b23711d24a037f983259a5a230a85f89d2503166b1",
+    "water_splatting/surface_support.py": "29b7e821e1140c579bc73e9d63f32df00b6dd5a65105c85210b792ec53ee7a5b"
+  },
+  "git_commit": "fdd92a48be3095a9de92abed42079a39b0c31172",
+  "smoke_checks": {
+    "Curasao": {
+      "updates": 20,
+      "reload_hash_match": true,
+      "forward_finite": true,
+      "initialization_rng_sequence_match_B0": true,
+      "audit_sha256": "c5ebd9f17a48510177cdf8e0b62b61070ed03c759868307cd7c86c3dc70f1926"
+    },
+    "IUI3-RedSea": {
+      "updates": 20,
+      "reload_hash_match": true,
+      "forward_finite": true,
+      "initialization_rng_sequence_match_B0": true,
+      "audit_sha256": "c4c7b1d609a7edf089b71d4558763e1f9622e1dd86a0eb1805e57e3e704300d9"
+    },
+    "JapaneseGradens-RedSea": {
+      "updates": 20,
+      "reload_hash_match": true,
+      "forward_finite": true,
+      "initialization_rng_sequence_match_B0": true,
+      "audit_sha256": "1238e90fffe54e48acc26eadf53362601c123111f78b89c1faafec75ccaf6863"
+    },
+    "Panama": {
+      "updates": 20,
+      "reload_hash_match": true,
+      "forward_finite": true,
+      "initialization_rng_sequence_match_B0": true,
+      "audit_sha256": "1e913a19761847ed76afcd93b5d700e4160683122ecfdf4ec17afc99fd93dedc"
+    }
+  },
+  "actual_smoke_updates": 180,
+  "smoke_budget_deviation": "80 preliminary + 20 Panama telemetry repeat + 80 final; disposable states only",
+  "jobs": []
+}

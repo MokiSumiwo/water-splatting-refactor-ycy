@@ -64,7 +64,7 @@ class SurfaceSupport:
         valid &= self.views[idx,self.names[camera]] & visible
         return valid,idx
 
-    def apply(self, model, outputs, loss, step):
+    def apply(self, model, outputs, loss, step, native_reference=None):
         weight=(1. if 4<=step<=16 else 0.) if self.smoke else schedule(step)
         if step%4 or weight==0:return
         start=time.perf_counter();valid,index=self.select(model,outputs,self.sequence[step])
@@ -78,15 +78,19 @@ class SurfaceSupport:
         with torch.no_grad():
             native=model.means.grad
             if native is None:raise RuntimeError('Native means gradient absent')
-            if self.lam is None:self.lam=float(.05*native[ids].norm()/grad[ids].norm().clamp_min(1e-12))
+            cap_reference = native if native_reference is None else native_reference
+            if cap_reference.shape != native.shape:
+                raise ValueError('native reference shape mismatch')
+            if self.lam is None:self.lam=float(.05*cap_reference[ids].norm()/grad[ids].norm().clamp_min(1e-12))
             delta=grad*(self.lam*weight)
             # Local caps prevent a small supported subset receiving a large global budget.
-            ratios=(.05*weight*native.norm(dim=-1)/delta.norm(dim=-1).clamp_min(1e-20)).clamp(max=1)
+            ratios=(.05*weight*cap_reference.norm(dim=-1)/delta.norm(dim=-1).clamp_min(1e-20)).clamp(max=1)
             delta*=ratios[:,None]
-            ratio=float(delta.norm()/native.norm().clamp_min(1e-20))
+            ratio=float(delta.norm()/cap_reference.norm().clamp_min(1e-20))
             if not torch.isfinite(delta).all() or ratio>.050001:raise RuntimeError('B gradient cap violated')
             row.update(auxiliary=float(auxiliary),resolved_lambda=self.lam,gradient_ratio=ratio,
-                       delta_norm=float(delta.norm()),native_norm=float(native.norm()))
+                       delta_norm=float(delta.norm()),native_norm=float(cap_reference.norm()),
+                       native_reference_supplied=native_reference is not None)
             if self.enabled:model.means.grad.add_(delta)
             self.pending=(step,ids,model.means[ids].detach().clone(),model.scales[ids].detach().exp().amax(-1))
         torch.cuda.synchronize();row['hook_seconds']=time.perf_counter()-start

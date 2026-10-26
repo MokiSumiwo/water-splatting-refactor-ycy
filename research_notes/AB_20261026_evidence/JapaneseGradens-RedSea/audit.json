@@ -1,0 +1,80 @@
+{
+  "scene": "JapaneseGradens-RedSea",
+  "optimizer_updates": 0,
+  "model_unchanged": true,
+  "rows": [
+    {
+      "camera": "MTN_1093",
+      "B_supported": 4140,
+      "variants": {
+        "off": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        },
+        "A010": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        },
+        "B": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        },
+        "AB": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        }
+      },
+      "disabled_exact": true,
+      "A_delta_l2": 0.0015158113092184067,
+      "B_delta_l2": 0.00295645953156054,
+      "combination_relative_l2": 1.781354841412508e-09,
+      "B_cap": true,
+      "passed": true
+    },
+    {
+      "camera": "MTN_1096",
+      "B_supported": 165,
+      "variants": {
+        "off": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        },
+        "A010": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        },
+        "B": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        },
+        "AB": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        }
+      },
+      "disabled_exact": true,
+      "A_delta_l2": 0.002409266075119376,
+      "B_delta_l2": 0.0008592363446950912,
+      "combination_relative_l2": 1.7103664040618582e-09,
+      "B_cap": true,
+      "passed": true
+    }
+  ],
+  "passed": true
+}

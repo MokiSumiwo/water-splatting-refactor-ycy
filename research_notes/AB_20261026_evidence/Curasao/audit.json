@@ -1,0 +1,80 @@
+{
+  "scene": "Curasao",
+  "optimizer_updates": 0,
+  "model_unchanged": true,
+  "rows": [
+    {
+      "camera": "MTN_1298",
+      "B_supported": 1220,
+      "variants": {
+        "off": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        },
+        "A010": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        },
+        "B": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        },
+        "AB": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        }
+      },
+      "disabled_exact": true,
+      "A_delta_l2": 0.0015347166918218136,
+      "B_delta_l2": 0.0006099214660935104,
+      "combination_relative_l2": 1.0031095953877411e-09,
+      "B_cap": true,
+      "passed": true
+    },
+    {
+      "camera": "MTN_1294",
+      "B_supported": 400,
+      "variants": {
+        "off": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        },
+        "A010": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        },
+        "B": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        },
+        "AB": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        }
+      },
+      "disabled_exact": true,
+      "A_delta_l2": 0.001392013393342495,
+      "B_delta_l2": 0.000507710559759289,
+      "combination_relative_l2": 9.943789125443914e-10,
+      "B_cap": true,
+      "passed": true
+    }
+  ],
+  "passed": true
+}

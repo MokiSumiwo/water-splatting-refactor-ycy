@@ -1,0 +1,17 @@
+{
+  "absolute_step": 20,
+  "arm": "B",
+  "checkpoint": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/AB_validation_20261026/smoke_final/Curasao/AB/checkpoints/step-000000020.ckpt",
+  "checkpoint_model_hash": "42fb5659a53c13b9e8599e899b50853b7785c88afc76f8f5791f8a8784eb317e",
+  "forward_finite": true,
+  "forward_probe_camera_index": 0,
+  "model_hash_match": true,
+  "reloaded_model_hash": "42fb5659a53c13b9e8599e899b50853b7785c88afc76f8f5791f8a8784eb317e",
+  "scene": "Curasao",
+  "tensor_sha256": {
+    "pred_image": "71761cdf0a3476f396415f8045731ab8261c85e80fcceaea4dae7931d47d86f6",
+    "rgb_medium_finite": "2e2b0ca7b41982af6c530362a2dd06a31e861b355ee24758676452ae6086bf3d",
+    "rgb_object": "71ab4d63f583d6ec0fd04ed3dded631fcd2556ae6688c38ee6f73620f02e32bb",
+    "rgb_tail": "dcbfc51fb8d25f63b5a68c7392d65d4e2d8441e3523f649a384bc50d602b00d6"
+  }
+}

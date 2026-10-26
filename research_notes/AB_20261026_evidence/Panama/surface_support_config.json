@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "patches": 267,
+  "transform_max_error": 2.619521783486789e-06,
+  "scale": 0.20700700657099072,
+  "rate": 4,
+  "gradient_cap": 0.05,
+  "scope": "means only; current visible camera must observe every patch vertex",
+  "support_sha256": "031cd7afddf426cd3985c81447b604968135943e51002eeb65fd8266accc790b"
+}

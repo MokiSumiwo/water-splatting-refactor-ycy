@@ -1,0 +1,80 @@
+{
+  "scene": "Panama",
+  "optimizer_updates": 0,
+  "model_unchanged": true,
+  "rows": [
+    {
+      "camera": "MTN_1541",
+      "B_supported": 1864,
+      "variants": {
+        "off": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        },
+        "A010": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        },
+        "B": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        },
+        "AB": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        }
+      },
+      "disabled_exact": true,
+      "A_delta_l2": 0.0018414428923279047,
+      "B_delta_l2": 0.001286159735172987,
+      "combination_relative_l2": 1.1621995588129153e-09,
+      "B_cap": true,
+      "passed": true
+    },
+    {
+      "camera": "MTN_1540",
+      "B_supported": 2146,
+      "variants": {
+        "off": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        },
+        "A010": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        },
+        "B": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        },
+        "AB": {
+          "nonmeans_exact": true,
+          "densification_exact": true,
+          "rng_exact": true,
+          "finite": true
+        }
+      },
+      "disabled_exact": true,
+      "A_delta_l2": 0.0032233488745987415,
+      "B_delta_l2": 0.0012885523028671741,
+      "combination_relative_l2": 1.302589369700513e-09,
+      "B_cap": true,
+      "passed": true
+    }
+  ],
+  "passed": true
+}

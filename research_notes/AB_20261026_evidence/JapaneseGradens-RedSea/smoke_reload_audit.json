@@ -1,0 +1,17 @@
+{
+  "absolute_step": 20,
+  "arm": "B",
+  "checkpoint": "/mnt/new/home_old/ycy/water-splatting-refactor/research_runs/AB_validation_20261026/smoke_final/JapaneseGradens-RedSea/AB/checkpoints/step-000000020.ckpt",
+  "checkpoint_model_hash": "9060885495059152ba89063209f73182b3944c5050da5c894e66e24ed69a4c9a",
+  "forward_finite": true,
+  "forward_probe_camera_index": 0,
+  "model_hash_match": true,
+  "reloaded_model_hash": "9060885495059152ba89063209f73182b3944c5050da5c894e66e24ed69a4c9a",
+  "scene": "JapaneseGradens-RedSea",
+  "tensor_sha256": {
+    "pred_image": "4374ac7e58d867618e1d57bc4738949d01314dc6436cda9cc4e1ff05e436a26e",
+    "rgb_medium_finite": "b3f032771a3c4ea2f1364373c140d48183db32b628263c6223d3c97173997e89",
+    "rgb_object": "a1bfacfc78c7967e3d5d290beb4a6e0e16b23be2dd1c02dd6a05cf412675eb1f",
+    "rgb_tail": "e2bebcb93cbcedb98822613c826760637bacd027ee1d82bc6eefcc1117913b41"
+  }
+}
